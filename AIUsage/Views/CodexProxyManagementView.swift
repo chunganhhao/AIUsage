@@ -335,23 +335,28 @@ struct CodexSubscriptionSection: View {
 
             // 与节点列表统一的激活开关：开=激活该账号（互斥切换），关=停用（清除激活标记）。
             // 全局代理启用时单独激活被互斥拦截，开关禁用并提示去全局代理面板切换。
-            Toggle("", isOn: Binding(
-                get: { isActive },
-                set: { newValue in
-                    if newValue {
-                        try? activation.activateAccount(entry: entry)
-                    } else {
-                        activation.deactivateAccount(entry: entry)
+            // 远程模式下本机没有凭据的账号只读展示，不给开关。
+            if activation.isRemoteViewOnly(entry) {
+                GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { isActive },
+                    set: { newValue in
+                        if newValue {
+                            try? activation.activateAccount(entry: entry)
+                        } else {
+                            activation.deactivateAccount(entry: entry)
+                        }
                     }
-                }
-            ))
-            .labelsHidden()
-            .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
-            .disabled(globalProxy.isEnabled)
-            .help(globalProxy.isEnabled
-                  ? L("Global proxy is enabled; switch the active node in the global proxy card.",
-                      "全局代理已启用，请在全局代理卡片切换激活节点。")
-                  : "")
+                ))
+                .labelsHidden()
+                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
+                .disabled(globalProxy.isEnabled)
+                .help(globalProxy.isEnabled
+                      ? L("Global proxy is enabled; switch the active node in the global proxy card.",
+                          "全局代理已启用，请在全局代理卡片切换激活节点。")
+                      : "")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)

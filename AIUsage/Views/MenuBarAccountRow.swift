@@ -36,7 +36,7 @@ struct MenuBarAccountRow: View {
     /// 每节点代理（codexProxyActive）仍允许账号切换——切换会自动停用该代理（既有自动交接语义）。
     private var canActivate: Bool {
         if entry.providerId == "codex", codexGlobalProxyManaged { return false }
-        return activationManager.canActivateProvider(providerId) && !isActive
+        return activationManager.canSwitch(to: entry) && !isActive
     }
     private var remainingPercent: Double? { entry.liveProvider?.remainingPercent }
     private var isCostProvider: Bool { entry.liveProvider?.category == ProviderCategory.localCost }
@@ -191,6 +191,8 @@ struct MenuBarAccountRow: View {
                 activeBadge
             } else if canActivate {
                 switchButton
+            } else if activationManager.isRemoteViewOnly(entry) {
+                GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
             }
         }
     }

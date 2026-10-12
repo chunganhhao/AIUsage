@@ -88,6 +88,26 @@ final class ProviderActivationManager: ObservableObject {
         Self.activatableProviders.contains(providerId)
     }
 
+    static var remoteViewOnlyLabel: String { L("From remote · view only", "来自远程 · 仅查看") }
+
+    /// 本机是否存有该账号可写入的认证文件——切换就是把它写进 ~/.codex 或 ~/.gemini。
+    func hasLocalAuthSource(for entry: ProviderAccountEntry) -> Bool {
+        resolveManagedSource(entry: entry) != nil
+    }
+
+    /// 远程后端模式下本机没有凭据的账号：只有远程共享的额度快照，界面标注「来自远程 · 仅查看」、不提供切换。
+    /// 本地模式维持原行为（缺凭据时点切换会提示重新连接）。
+    func isRemoteViewOnly(_ entry: ProviderAccountEntry) -> Bool {
+        settings.backendMode == "remote"
+            && canActivateProvider(entry.providerId)
+            && !hasLocalAuthSource(for: entry)
+    }
+
+    /// 各处「切换 / 激活」入口的统一判定。
+    func canSwitch(to entry: ProviderAccountEntry) -> Bool {
+        canActivateProvider(entry.providerId) && !isRemoteViewOnly(entry)
+    }
+
     /// 互斥：Codex 代理接管 ~/.codex/config.toml 时调用，把当前 Codex 订阅账号标记为未激活，
     /// 保证账号轨道与代理轨道在 UI 与用量统计上互斥（不改动 auth.json 内容）。
     func markCodexSubscriptionInactiveForProxy() {
@@ -98,6 +118,15 @@ final class ProviderActivationManager: ObservableObject {
     }
 
     func activateAccount(entry: ProviderAccountEntry) throws {
+        if isRemoteViewOnly(entry) {
+            let msg = settings.t(
+                "This account comes from the remote device and is view-only here.",
+                "该账号来自远程，只能查看额度，不能在本机切换。"
+            )
+            activationResult = .failure(msg)
+            if entry.providerId == "codex" { codexActivationResult = .failure(msg) }
+            throw ProviderError("remote_view_only", msg)
+        }
         switch entry.providerId {
         case "codex":
             try activateCodexAccount(entry: entry)
