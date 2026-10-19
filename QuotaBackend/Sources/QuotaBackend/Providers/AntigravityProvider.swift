@@ -477,25 +477,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         var reason = ""
 
         for model in models {
-            let labelLower = model.label.lowercased()
-            if labelLower.contains("weekly") {
-                if model.remainingPercent <= 5.0 {
-                    shouldTrip = true
-                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 5%)"
-                    break
-                }
-            } else if labelLower.contains("five") || labelLower.contains("5h") {
-                if model.remainingPercent <= 2.0 {
-                    shouldTrip = true
-                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 2%)"
-                    break
-                }
-            } else {
-                if model.remainingPercent <= 5.0 {
-                    shouldTrip = true
-                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 5%)"
-                    break
-                }
+            if model.remainingPercent <= 5.0 {
+                shouldTrip = true
+                reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 5%)"
+                break
             }
         }
 
@@ -504,7 +489,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             return nil
         }
 
-        let currentDisabled = json["disabled"] as? Bool ?? false
+        let currentDisabled = (json["disabled"] as? Bool) ?? ((json["disabled"] as? Int) == 1)
         let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
 
         if shouldTrip && !currentDisabled {
@@ -513,7 +498,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             json["circuit_breaker_reason"] = reason
             json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
             if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL)
+                try? updatedData.write(to: fileURL, options: .atomic)
             }
             return CircuitBreakerResult(tripped: true, reason: reason)
         } else if !shouldTrip && currentDisabled && isTrippedByBreaker {
@@ -522,7 +507,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             json["circuit_breaker_tripped"] = false
             json["circuit_breaker_recovered_at"] = ISO8601DateFormatter().string(from: Date())
             if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL)
+                try? updatedData.write(to: fileURL, options: .atomic)
             }
             return CircuitBreakerResult(tripped: false, reason: "Quota recovered")
         } else if currentDisabled && isTrippedByBreaker {

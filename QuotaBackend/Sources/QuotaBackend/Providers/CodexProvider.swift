@@ -98,7 +98,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         do {
             let response = try await requestUsage(creds: effectiveCreds, url: usageURL)
-            return parseResponse(
+            var usage = parseResponse(
                 response,
                 accountId: effectiveCreds.accountId ?? normalizedLabel(credential.accountLabel),
                 source: source,
@@ -106,6 +106,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 jwtPlanType: effectiveCreds.jwtPlanType,
                 jwtUserId: effectiveCreds.jwtUserId
             )
+            postProcessUsage(&usage, fileURL: credentialPath.map { URL(fileURLWithPath: $0) })
+            return usage
         } catch let error as ProviderError where error.code == "unauthorized" {
             var credentialFailure = proactiveRefreshFailure
             var refreshedCredentials: Credentials?
@@ -129,7 +131,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             if let refreshed = refreshedCredentials {
                 do {
                     let response = try await requestUsage(creds: refreshed, url: usageURL)
-                    return parseResponse(
+                    var usage = parseResponse(
                         response,
                         accountId: refreshed.accountId ?? normalizedLabel(credential.accountLabel),
                         source: source,
@@ -137,6 +139,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                         jwtPlanType: refreshed.jwtPlanType,
                         jwtUserId: refreshed.jwtUserId
                     )
+                    postProcessUsage(&usage, fileURL: credentialPath.map { URL(fileURLWithPath: $0) })
+                    return usage
                 } catch let retryError as ProviderError where retryError.code == "unauthorized" {
                     credentialFailure = ProviderError(
                         "unauthorized_after_refresh",
@@ -698,7 +702,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         do {
             let response = try await requestUsage(creds: creds, url: usageURL)
-            return parseResponse(
+            var usage = parseResponse(
                 response,
                 accountId: creds.accountId,
                 source: sourceInfo(for: authContext.url, mode: "oauth"),
@@ -706,6 +710,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 jwtPlanType: creds.jwtPlanType,
                 jwtUserId: creds.jwtUserId
             )
+            postProcessUsage(&usage, fileURL: authContext.url)
+            return usage
         } catch let error as ProviderError where error.code == "unauthorized" {
             guard !creds.isApiKeyMode,
                   let refreshToken = creds.refreshToken ?? authContext.creds.refreshToken else { throw error }
@@ -715,7 +721,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 persistTo: [authContext.url.path]
             )
             let response = try await requestUsage(creds: refreshed, url: usageURL)
-            return parseResponse(
+            var usage = parseResponse(
                 response,
                 accountId: refreshed.accountId,
                 source: sourceInfo(for: authContext.url, mode: "oauth"),
@@ -723,6 +729,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 jwtPlanType: refreshed.jwtPlanType,
                 jwtUserId: refreshed.jwtUserId
             )
+            postProcessUsage(&usage, fileURL: authContext.url)
+            return usage
         }
     }
 
@@ -927,6 +935,70 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         case "education", "edu": return "Edu"
         default: return "Personal"
         }
+    }
+
+    // MARK: - Smart Circuit Breaker Implementation
+
+    private struct CircuitBreakerResult {
+        let tripped: Bool
+        let reason: String
+    }
+
+    private func postProcessUsage(_ usage: inout ProviderUsage, fileURL: URL?) {
+        guard let fileURL else { return }
+        if let circuitBreakerInfo = applySmartCircuitBreaker(at: fileURL, usage: usage) {
+            usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
+            usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
+        }
+    }
+
+    private func applySmartCircuitBreaker(at fileURL: URL, usage: ProviderUsage) -> CircuitBreakerResult? {
+        guard fileURL.path.contains("CLIProxyAPI/auth") else { return nil }
+
+        var shouldTrip = false
+        var reason = ""
+
+        if let primary = usage.primary, let rem = primary.remainingPercent, rem <= 5.0 {
+            shouldTrip = true
+            let label = primary.label ?? "Primary Window"
+            reason = "\(label) còn \(Int(rem))% (<= 5%)"
+        } else if let secondary = usage.secondary, let rem = secondary.remainingPercent, rem <= 5.0 {
+            shouldTrip = true
+            let label = secondary.label ?? "Weekly Window"
+            reason = "\(label) còn \(Int(rem))% (<= 5%)"
+        }
+
+        guard let data = try? Data(contentsOf: fileURL),
+              var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+
+        let currentDisabled = (json["disabled"] as? Bool) ?? ((json["disabled"] as? Int) == 1)
+        let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
+
+        if shouldTrip && !currentDisabled {
+            json["disabled"] = true
+            json["circuit_breaker_tripped"] = true
+            json["circuit_breaker_reason"] = reason
+            json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
+            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updatedData.write(to: fileURL, options: .atomic)
+            }
+            return CircuitBreakerResult(tripped: true, reason: reason)
+        } else if !shouldTrip && currentDisabled && isTrippedByBreaker {
+            // Auto-recovery when quota is healthy again (> 5%)
+            json["disabled"] = false
+            json["circuit_breaker_tripped"] = false
+            json["circuit_breaker_recovered_at"] = ISO8601DateFormatter().string(from: Date())
+            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updatedData.write(to: fileURL, options: .atomic)
+            }
+            return CircuitBreakerResult(tripped: false, reason: "Quota recovered")
+        } else if currentDisabled && isTrippedByBreaker {
+            return CircuitBreakerResult(tripped: true, reason: json["circuit_breaker_reason"] as? String ?? reason)
+        }
+
+        return nil
     }
 }
 
