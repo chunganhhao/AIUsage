@@ -13,10 +13,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     let homeDirectory: String
     let timeoutSeconds: Double
 
-    static let quotaURL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
+    static let quotaURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
     static let loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
     static let oauthRefreshURL = "https://oauth2.googleapis.com/token"
-    static let userAgent = "antigravity/1.11.3 Darwin/arm64"
+    static let userAgent = "antigravity/2.24.0 Darwin/arm64"
 
     // Antigravity 的 Google「桌面应用」OAuth 客户端凭据（非用户私密：随安装包公开分发，
     // 桌面应用 client_secret 在 OAuth 规范里本就非机密）。新版已打进 Go 二进制
@@ -384,6 +384,8 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         var body: [String: Any] = [:]
         if let projectId, !projectId.isEmpty {
             body["project"] = projectId
+        } else {
+            body["project"] = "aicode-consumers"
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
@@ -452,6 +454,37 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     private func parseModels(_ response: [String: Any]) -> [ModelQuota] {
+        // Antigravity 2.x pooled dual-window group architecture
+        if let groups = response["groups"] as? [[String: Any]], !groups.isEmpty {
+            var models: [ModelQuota] = []
+            for group in groups {
+                let groupName = (group["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Models"
+                let buckets = group["buckets"] as? [[String: Any]] ?? []
+                for bucket in buckets {
+                    guard let frac = doubleValue(bucket["remainingFraction"]) else { continue }
+                    let isDisabled = bucket["disabled"] as? Bool ?? false
+                    let bucketName = (bucket["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let bucketId = bucket["bucketId"] as? String ?? ""
+                    let resetAt = bucket["resetTime"] as? String
+                    let remainingPercent = isDisabled ? 0.0 : min(100.0, max(0.0, frac * 100.0))
+
+                    let label = bucketName.isEmpty ? groupName : "\(groupName) (\(bucketName))"
+                    let providerLabel = groupName.localizedCaseInsensitiveContains("Gemini") ? "Google" : "Claude/3P"
+
+                    models.append(ModelQuota(
+                        id: "\(groupName)-\(bucketId)",
+                        label: label,
+                        remainingPercent: remainingPercent,
+                        resetAt: resetAt,
+                        providerLabel: providerLabel
+                    ))
+                }
+            }
+            if !models.isEmpty {
+                return models
+            }
+        }
+
         let rawModels = response["models"] as? [String: Any] ?? [:]
         var models: [ModelQuota] = []
 
