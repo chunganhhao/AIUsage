@@ -56,6 +56,15 @@ extension UsageNormalizer {
         base.spotlight = authFileCount > 1
             ? "Antigravity auth files detected: \(formatInt(authFileCount)). This snapshot uses the most recently updated file (\(selectedAuthFile ?? "unknown"))."
             : "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first."
+
+        let isTripped = (usage.extra["circuitBreakerTripped"]?.value as? Bool) == true
+        if isTripped {
+            base.status = "watch"
+            base.statusLabel = "Protected (CPA Paused)"
+            let reason = extraString(usage, "circuitBreakerReason") ?? "Quota <= 5%"
+            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục (> 5%), tài khoản sẽ tự động kích hoạt lại."
+        }
+
         return base
     }
 }

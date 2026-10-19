@@ -89,12 +89,20 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             subscription = await loadCodeAssist(accessToken: accessToken)
             quotaResponse = try await fetchAvailableModels(accessToken: accessToken, projectId: subscription.projectId)
         }
-        return buildUsage(
+        var usage = buildUsage(
             authContext: authContext,
             authFile: authFile,
             subscription: subscription,
             quotaResponse: quotaResponse
         )
+
+        // MARK: - Smart Circuit Breaker
+        if let circuitBreakerInfo = applySmartCircuitBreaker(at: authContext.url, quotaResponse: quotaResponse) {
+            usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
+            usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
+        }
+
+        return usage
     }
 
     // MARK: - Auth Files
@@ -451,6 +459,77 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         })
 
         return usage
+    }
+
+    // MARK: - Smart Circuit Breaker Implementation
+
+    private struct CircuitBreakerResult {
+        let tripped: Bool
+        let reason: String
+    }
+
+    private func applySmartCircuitBreaker(at fileURL: URL, quotaResponse: [String: Any]) -> CircuitBreakerResult? {
+        guard fileURL.path.contains("CLIProxyAPI/auth") else { return nil }
+        let models = parseModels(quotaResponse)
+        guard !models.isEmpty else { return nil }
+
+        var shouldTrip = false
+        var reason = ""
+
+        for model in models {
+            let labelLower = model.label.lowercased()
+            if labelLower.contains("weekly") {
+                if model.remainingPercent <= 5.0 {
+                    shouldTrip = true
+                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 5%)"
+                    break
+                }
+            } else if labelLower.contains("five") || labelLower.contains("5h") {
+                if model.remainingPercent <= 2.0 {
+                    shouldTrip = true
+                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 2%)"
+                    break
+                }
+            } else {
+                if model.remainingPercent <= 5.0 {
+                    shouldTrip = true
+                    reason = "\(model.label) còn \(Int(model.remainingPercent))% (<= 5%)"
+                    break
+                }
+            }
+        }
+
+        guard let data = try? Data(contentsOf: fileURL),
+              var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+            return nil
+        }
+
+        let currentDisabled = json["disabled"] as? Bool ?? false
+        let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
+
+        if shouldTrip && !currentDisabled {
+            json["disabled"] = true
+            json["circuit_breaker_tripped"] = true
+            json["circuit_breaker_reason"] = reason
+            json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
+            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updatedData.write(to: fileURL)
+            }
+            return CircuitBreakerResult(tripped: true, reason: reason)
+        } else if !shouldTrip && currentDisabled && isTrippedByBreaker {
+            // Auto-recovery when quota is healthy again (> 5%)
+            json["disabled"] = false
+            json["circuit_breaker_tripped"] = false
+            json["circuit_breaker_recovered_at"] = ISO8601DateFormatter().string(from: Date())
+            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
+                try? updatedData.write(to: fileURL)
+            }
+            return CircuitBreakerResult(tripped: false, reason: "Quota recovered")
+        } else if currentDisabled && isTrippedByBreaker {
+            return CircuitBreakerResult(tripped: true, reason: json["circuit_breaker_reason"] as? String ?? reason)
+        }
+
+        return nil
     }
 
     private func parseModels(_ response: [String: Any]) -> [ModelQuota] {
