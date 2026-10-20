@@ -64,23 +64,21 @@ final class AntigravityProviderTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        GoogleAPIStub.reset()
-        URLProtocol.registerClass(GoogleAPIStub.self)
+        StubURLProtocol.install(hosts: ["googleapis.com"])
     }
 
     override func tearDown() {
-        URLProtocol.unregisterClass(GoogleAPIStub.self)
-        GoogleAPIStub.reset()
+        StubURLProtocol.uninstall()
         super.tearDown()
     }
 
     func testUsesDailySummaryWithAccountProject() async throws {
-        GoogleAPIStub.responses[Self.dailySummary] = (200, Self.fullSummary)
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
 
         let usage = try await provider.fetchUsage(with: makeCredential())
 
-        XCTAssertEqual(GoogleAPIStub.requestedURLs, [Self.loadCodeAssist, Self.dailySummary])
-        XCTAssertEqual(GoogleAPIStub.bodies[Self.dailySummary], ["project": "proj-123"])
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary])
+        XCTAssertEqual(StubURLProtocol.lastRequest(to: Self.dailySummary)?.jsonBody as? [String: String], ["project": "proj-123"])
         XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "groups")
         XCTAssertEqual(usage.primary?.label, "Gemini · Weekly")
         XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 27.25, accuracy: 0.001)
@@ -92,37 +90,37 @@ final class AntigravityProviderTests: XCTestCase {
     }
 
     func testFallsBackToProdSummaryWhenDailyIsForbidden() async throws {
-        GoogleAPIStub.responses[Self.dailySummary] = (403, #"{"error":{"code":403}}"#)
-        GoogleAPIStub.responses[Self.prodSummary] = (200, Self.fullSummary)
+        StubURLProtocol.respond(Self.dailySummary, status: 403, body: #"{"error":{"code":403}}"#)
+        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
 
         let usage = try await provider.fetchUsage(with: makeCredential())
 
-        XCTAssertEqual(GoogleAPIStub.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
         XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "groups")
     }
 
     func testFallsBackToProdSummaryWhenDailyHasNoUsableBuckets() async throws {
-        GoogleAPIStub.responses[Self.dailySummary] = (200, #"{"groups":[]}"#)
-        GoogleAPIStub.responses[Self.prodSummary] = (200, Self.fullSummary)
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: #"{"groups":[]}"#)
+        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
 
         let usage = try await provider.fetchUsage(with: makeCredential())
 
-        XCTAssertEqual(GoogleAPIStub.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
         XCTAssertEqual(usage.extra["modelCount"]?.value as? Int, 4)
     }
 
     /// 免费账号拿不到分组额度时仍要显示旧的按模型配额，而不是直接报错。
     func testFallsBackToLegacyModelsWhenNoSummaryIsAvailable() async throws {
-        GoogleAPIStub.responses[Self.dailySummary] = (403, "{}")
-        GoogleAPIStub.responses[Self.prodSummary] = (404, "{}")
-        GoogleAPIStub.responses[Self.legacyModels] = (200, """
+        StubURLProtocol.respond(Self.dailySummary, status: 403, body: "{}")
+        StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
+        StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
         {"models":{"gemini-3-pro":{"displayName":"Gemini 3 Pro","modelProvider":"GOOGLE",
           "quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-10-20T15:00:00Z"}}}}
         """)
 
         let usage = try await provider.fetchUsage(with: makeCredential())
 
-        XCTAssertEqual(GoogleAPIStub.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary, Self.legacyModels])
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary, Self.legacyModels])
         XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "models")
         XCTAssertEqual(usage.primary?.label, "Gemini 3 Pro")
         XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 40, accuracy: 0.001)
@@ -134,8 +132,8 @@ final class AntigravityProviderTests: XCTestCase {
 
     /// 401 必须走令牌刷新，不能被当成「这份部署不可用」吞掉后去读旧接口。
     func testUnauthorizedSummaryIsNotSwallowedByFallback() async throws {
-        GoogleAPIStub.responses[Self.dailySummary] = (401, "{}")
-        GoogleAPIStub.responses[Self.legacyModels] = (200, #"{"models":{}}"#)
+        StubURLProtocol.respond(Self.dailySummary, status: 401, body: "{}")
+        StubURLProtocol.respond(Self.legacyModels, status: 200, body: #"{"models":{}}"#)
 
         do {
             _ = try await provider.fetchUsage(with: makeCredential())
@@ -143,7 +141,7 @@ final class AntigravityProviderTests: XCTestCase {
         } catch let error as ProviderError {
             XCTAssertEqual(error.code, "unauthorized")
         }
-        XCTAssertFalse(GoogleAPIStub.requestedURLs.contains(Self.legacyModels))
+        XCTAssertFalse(StubURLProtocol.requestedURLs.contains(Self.legacyModels))
     }
 
     // MARK: - Fixtures
@@ -178,72 +176,7 @@ final class AntigravityProviderTests: XCTestCase {
 
         let authFile = directory.appendingPathComponent("antigravity-user@example.com.json")
         try Data(#"{"access_token":"test-token","email":"user@example.com"}"#.utf8).write(to: authFile)
-        GoogleAPIStub.responses[Self.loadCodeAssist] = (200, #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-123"}"#)
+        StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-123"}"#)
         return AccountCredential(providerId: "antigravity", authMethod: .authFile, credential: authFile.path)
-    }
-}
-
-/// 拦截 *.googleapis.com 请求（URLSession.shared 会读取全局注册的 URLProtocol），
-/// 其他主机不受影响。未配置的 URL 返回 404。
-private final class GoogleAPIStub: URLProtocol {
-    private static let lock = NSLock()
-    private static var _responses: [String: (Int, String)] = [:]
-    private static var _requestedURLs: [String] = []
-    private static var _bodies: [String: [String: String]] = [:]
-
-    static var responses: [String: (Int, String)] {
-        get { lock.withLock { _responses } }
-        set { lock.withLock { _responses = newValue } }
-    }
-    static var requestedURLs: [String] { lock.withLock { _requestedURLs } }
-    static var bodies: [String: [String: String]] { lock.withLock { _bodies } }
-
-    static func reset() {
-        lock.withLock {
-            _responses = [:]
-            _requestedURLs = []
-            _bodies = [:]
-        }
-    }
-
-    override class func canInit(with request: URLRequest) -> Bool {
-        request.url?.host?.hasSuffix("googleapis.com") == true
-    }
-
-    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
-
-    override func startLoading() {
-        let url = request.url!
-        let key = url.absoluteString
-        let body = Self.readBody(request).flatMap {
-            (try? JSONSerialization.jsonObject(with: $0)) as? [String: String]
-        }
-        let (status, text) = Self.lock.withLock { () -> (Int, String) in
-            Self._requestedURLs.append(key)
-            if let body { Self._bodies[key] = body }
-            return Self._responses[key] ?? (404, "{}")
-        }
-        let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
-                                       headerFields: ["Content-Type": "application/json"])!
-        client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)
-        client?.urlProtocol(self, didLoad: Data(text.utf8))
-        client?.urlProtocolDidFinishLoading(self)
-    }
-
-    override func stopLoading() {}
-
-    private static func readBody(_ request: URLRequest) -> Data? {
-        if let body = request.httpBody { return body }
-        guard let stream = request.httpBodyStream else { return nil }
-        stream.open()
-        defer { stream.close() }
-        var data = Data()
-        var buffer = [UInt8](repeating: 0, count: 4096)
-        while stream.hasBytesAvailable {
-            let count = stream.read(&buffer, maxLength: buffer.count)
-            guard count > 0 else { break }
-            data.append(buffer, count: count)
-        }
-        return data
     }
 }
