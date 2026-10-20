@@ -1,6 +1,5 @@
 import CryptoKit
 import Foundation
-import QuotaBackend
 
 nonisolated enum CLIProxyArchitecture: String, Codable, Sendable {
     case arm64
@@ -1351,17 +1350,17 @@ nonisolated struct CLIProxyAccountIdentity: Equatable, Sendable {
     let email: String?
     let planType: String?
 
+    /// 界面显示请用 `resolvedPlanDisplayName`（Codex 走 CodexProvider 的官方方案名）。
+    /// 本文件不 import QuotaBackend：CPA 回归脚本用 swiftc 单独编译它。
     var planDisplayName: String? {
         guard let planType else { return nil }
-        // Codex 与主卡片共用一套方案名（含 prolite / promax / ent26 等新值）。
-        if providerID.lowercased() == "codex" {
-            return CodexProvider.planDisplayName(forRaw: planType)
-        }
         switch planType.lowercased() {
         case "free": return "Free"
         case "go": return "Go"
         case "plus": return "Plus"
         case "pro": return "Pro"
+        // OpenAI 产品侧原 Team 已更名为 Business；JWT/CPA 仍可能下发 team。
+        case "team" where providerID.lowercased() == "codex": return "Business"
         case "team": return "Team"
         case "business": return "Business"
         case "enterprise": return "Enterprise"
