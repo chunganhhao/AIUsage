@@ -25,7 +25,6 @@ extension ProviderAccountEditorView {
 
     /// 本机已有的登录，未连接的排在前面；已在同步的也列出来，而不是悄悄隐藏。
     func discoverSessions() -> [DetectedSession] {
-        if providerId == "warp" { return warpSessions() }
         let monitored = ProviderAuthManager.monitoredSessions(for: providerId)
         let candidates = ProviderAuthManager.deduplicated(
             ProviderAuthManager.discoverCandidates(for: providerId)
@@ -35,28 +34,6 @@ extension ProviderAccountEditorView {
             DetectedSession(candidate: $0, isConnected: ProviderAuthManager.isCandidateManaged($0, monitored: monitored))
         }
         return sessions.filter { !$0.isConnected } + sessions.filter(\.isConnected)
-    }
-
-    /// Warp 没有可导入的凭证：只要应用缓存里有额度信息就算已登录，连接时再读取账号。
-    private func warpSessions() -> [DetectedSession] {
-        guard let domain = WarpProvider.localAppDomain() else { return [] }
-        let candidate = ProviderAuthCandidate(
-            id: "warp:\(domain)",
-            providerId: "warp",
-            sourceIdentifier: "warp-app:\(domain)",
-            sessionFingerprint: nil,
-            title: "Warp",
-            subtitle: L("Signed in to the Warp app", "Warp 应用已登录"),
-            detail: domain,
-            modifiedAt: nil,
-            authMethod: .auto,
-            credentialValue: "",
-            sourcePath: nil,
-            shouldCopyFile: false,
-            identityScope: .sharedSource
-        )
-        let connected = appState.accountStore.accountRegistry.contains { $0.providerId == "warp" }
-        return [DetectedSession(candidate: candidate, isConnected: connected)]
     }
 
     // MARK: - Sign-In
@@ -89,8 +66,6 @@ extension ProviderAccountEditorView {
             }
         case .embeddedWeb:
             showWebLogin = true
-        case .desktopApp:
-            openAppAndWatch()
         case .apiKey:
             showKeyEntry = true
         case .manual:
@@ -195,11 +170,7 @@ extension ProviderAccountEditorView {
     // MARK: - Connecting
 
     func connect(_ candidate: ProviderAuthCandidate) async {
-        if providerId == "warp" {
-            await connectWarp()
-        } else {
-            await importCandidate(candidate)
-        }
+        await importCandidate(candidate)
     }
 
     func importCandidate(_ candidate: ProviderAuthCandidate) async {
@@ -262,29 +233,6 @@ extension ProviderAccountEditorView {
             finishConnection(resultId: resultId, usage: usage, fallbackTitle: providerTitle)
         } catch {
             fail(localizedErrorMessage(error))
-        }
-    }
-
-    private func connectWarp() async {
-        appWatchTask?.cancel()
-        appWatchTask = nil
-        errorMessage = nil
-        step = .connecting
-        do {
-            let usage = try await WarpProvider().fetchUsage()
-            let email = usage.accountEmail ?? "Warp User"
-            appState.saveAccount(
-                providerId: "warp",
-                email: email,
-                displayName: "Warp",
-                note: nil,
-                accountId: "warp-auto:\(email.lowercased())"
-            )
-            _ = await refreshCoordinator.fetchSingleProvider("warp")
-            finishConnection(resultId: nil, usage: usage, fallbackTitle: "Warp", refreshProvider: false)
-        } catch {
-            fail(L("Warp data isn't available. Make sure Warp is installed and you're signed in.",
-                   "未检测到 Warp 数据。请确认 Warp 已安装并已登录。"))
         }
     }
 

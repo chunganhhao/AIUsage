@@ -23,7 +23,7 @@ struct ProviderAccountEditorView: View {
         case ready
         /// 浏览器 / 设备码登录进行中。
         case signingIn
-        /// 已打开服务商应用（Kiro / Warp），等待用户在应用里完成登录。
+        /// 已打开服务商应用（Kiro），等待用户在应用里完成登录。
         case waitingForApp
         case connecting
         case connected(ConnectedAccount)
@@ -252,11 +252,6 @@ struct ProviderAccountEditorView: View {
             return FooterAction(id: "detect", title: L("Check Again", "重新检测")) { Task { await detect() } }
         case .kiro where !appInstalled:
             return FooterAction(id: "builder-id", title: L("Sign in with AWS Builder ID", "使用 AWS Builder ID 登录"), perform: startBuilderIDSignIn)
-        case .desktopApp where !appInstalled:
-            return FooterAction(id: "download", title: L("Get \(providerTitle)", "下载 \(providerTitle)"), perform: openDownloadPage)
-        case .desktopApp where !detected.isEmpty:
-            // Warp 只有本机这一个账号，已在同步时没有可新增的登录。
-            return nil
         default:
             return FooterAction(id: "sign-in", title: authPlan.signInTitle, perform: startSignIn)
         }
@@ -293,7 +288,7 @@ struct ProviderAccountEditorView: View {
                 if primaryConnectsSession, !showKeyEntry {
                     actions.append(FooterAction(id: "manual-key", title: L("Enter a key manually…", "手动输入 Key…")) { showKeyEntry = true })
                 }
-            case .desktopApp, .manual:
+            case .manual:
                 break
             }
             if supportsBatchImport {
@@ -301,7 +296,6 @@ struct ProviderAccountEditorView: View {
             }
             return actions
         case .connected:
-            guard authPlan.method != .desktopApp else { return [] }
             return [FooterAction(id: "another", title: L("Add another account…", "添加其他账号…")) { Task { await detect() } }]
         default:
             return []
@@ -313,10 +307,7 @@ struct ProviderAccountEditorView: View {
     }
 
     private var waitingForAppText: String {
-        providerId == "warp"
-            ? L("Sign in to Warp. AIUsage connects automatically as soon as it's signed in.",
-                "在 Warp 中登录，登录完成后 AIUsage 会自动接入。")
-            : L("Sign in to the Kiro app with any method. AIUsage connects automatically as soon as you're signed in.",
-                "在 Kiro 应用中用任意方式登录，完成后 AIUsage 会自动接入。")
+        L("Sign in to the Kiro app with any method. AIUsage connects automatically as soon as you're signed in.",
+          "在 Kiro 应用中用任意方式登录，完成后 AIUsage 会自动接入。")
     }
 }
