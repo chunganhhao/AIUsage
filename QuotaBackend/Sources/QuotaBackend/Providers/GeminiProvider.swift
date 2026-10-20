@@ -444,21 +444,29 @@ public struct GeminiProvider: ProviderFetcher, CredentialAcceptingProvider {
 
     // MARK: - Response Parsing
 
-    private func parseQuotaResponse(_ response: [String: Any], creds: GeminiCredentials, projectId: String?, tierId: String?, source: SourceInfo) -> ProviderUsage {
-        let buckets = response["buckets"] as? [[String: Any]] ?? []
+    typealias ModelBucket = (remainingFraction: Double, resetTime: String?, tokenType: String?)
 
-        // Group by modelId, keep lowest remainingFraction
-        var byModel: [String: (remainingFraction: Double, resetTime: String?, tokenType: String?)] = [:]
+    /// Group by modelId, keep the lowest remainingFraction. proto3 JSON omits zero values, so an
+    /// exhausted bucket arrives with a resetTime but no remainingFraction: count it as 0 instead of dropping it.
+    static func lowestBucketsByModel(_ buckets: [[String: Any]]) -> [String: ModelBucket] {
+        var byModel: [String: ModelBucket] = [:]
         for bucket in buckets {
-            guard let modelId = bucket["modelId"] as? String,
-                  let remainingFraction = bucket["remainingFraction"] as? Double else { continue }
+            guard let modelId = bucket["modelId"] as? String else { continue }
+            let resetTime = bucket["resetTime"] as? String
+            guard let remainingFraction = (bucket["remainingFraction"] as? NSNumber)?.doubleValue
+                    ?? (resetTime == nil ? nil : 0) else { continue }
             if let existing = byModel[modelId], existing.remainingFraction <= remainingFraction { continue }
             byModel[modelId] = (
                 remainingFraction: remainingFraction,
-                resetTime: bucket["resetTime"] as? String,
+                resetTime: resetTime,
                 tokenType: bucket["tokenType"] as? String
             )
         }
+        return byModel
+    }
+
+    private func parseQuotaResponse(_ response: [String: Any], creds: GeminiCredentials, projectId: String?, tierId: String?, source: SourceInfo) -> ProviderUsage {
+        let byModel = Self.lowestBucketsByModel(response["buckets"] as? [[String: Any]] ?? [])
 
         let models = byModel.map { (modelId, info) -> [String: Any] in
             let percentLeft = info.remainingFraction * 100
