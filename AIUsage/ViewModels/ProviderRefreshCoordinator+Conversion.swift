@@ -404,6 +404,7 @@ extension ProviderRefreshCoordinator {
             "Assistant Credits": "助手额度",
             "Main Plan": "主计划",
             "Included Usage": "包含额度",
+            "This MiniMax key has no active Token Plan quota.": "这个 MiniMax Key 没有已激活的 Token Plan 额度。",
             "Prepaid Balance": "预付余额",
             "included usage this week": "本周包含额度",
             "included usage this month": "本月包含额度",

@@ -11,7 +11,7 @@ import Foundation
 //        {
 //          "model_name": "general",                              // 文本/语言模型，主卡片用这个
 //          "start_time", "end_time", "remains_time",             // 5h 窗口边界（Unix ms / ms）
-//          "current_interval_total_count", "current_interval_usage_count",
+//          "current_interval_total_count", "current_interval_usage_count",  // usage_count 实为剩余量，见下
 //          "current_interval_remaining_percent",
 //          "current_interval_status",
 //          "weekly_start_time", "weekly_end_time", "weekly_remains_time",
@@ -31,10 +31,12 @@ public struct MiniMaxProvider: ProviderFetcher, CredentialAcceptingProvider {
     public let displayName = "MiniMax Token Plan"
     public let description = "MiniMax Token Plan subscription usage and rate limits"
 
-    /// 端点：国内区优先，失败后回退国际区。
+    /// 端点：国内区优先，失败后回退国际区；新的 token_plan 拿不到时再试旧一代的 coding_plan。
     static let usageEndpoints = [
         "https://api.minimaxi.com/v1/token_plan/remains",
-        "https://api.minimax.io/v1/token_plan/remains"
+        "https://api.minimax.io/v1/token_plan/remains",
+        "https://api.minimaxi.com/v1/api/openplatform/coding_plan/remains",
+        "https://api.minimax.io/v1/api/openplatform/coding_plan/remains"
     ]
     static let userAgent = "AIUsage-MiniMaxMonitor/1.0"
 
@@ -123,13 +125,13 @@ public struct MiniMaxProvider: ProviderFetcher, CredentialAcceptingProvider {
         region: ProviderAPIRegion
     ) async throws -> (root: [String: Any], resolved: ProviderAPIRegion) {
         var sawAuthFailure = false
+        var sawInactivePlan = false
         var lastError: Error?
-        let endpoints = region.orderedEndpoints(
+        let candidates = region.candidates(
             Self.usageEndpoints,
             chinaContains: ["minimaxi.com"],
             internationalContains: ["minimax.io"]
         )
-        let candidates = region.allowsCrossRegionFallback ? endpoints : Array(endpoints.prefix(1))
 
         for endpoint in candidates {
             guard let url = URL(string: endpoint) else { continue }
@@ -163,9 +165,14 @@ public struct MiniMaxProvider: ProviderFetcher, CredentialAcceptingProvider {
                     continue
                 }
 
-                if json["model_remains"] != nil {
+                if let entries = json["model_remains"] as? [Any], !entries.isEmpty {
                     let resolved: ProviderAPIRegion = endpoint.contains("minimaxi.com") ? .china : .international
                     return (json, resolved)
+                }
+                // Key 有效但套餐未激活时返回 {"model_remains": null, "base_resp": {"status_code": 0}}。
+                if json.keys.contains("model_remains") {
+                    sawInactivePlan = true
+                    continue
                 }
                 lastError = ProviderError("empty_usage", "MiniMax Token Plan response did not include `model_remains`.")
             } catch {
@@ -173,6 +180,9 @@ public struct MiniMaxProvider: ProviderFetcher, CredentialAcceptingProvider {
             }
         }
 
+        if sawInactivePlan {
+            throw ProviderError("empty_usage", "This MiniMax key has no active Token Plan quota.")
+        }
         if sawAuthFailure {
             throw ProviderError(
                 "invalid_credentials",
@@ -209,62 +219,66 @@ public struct MiniMaxProvider: ProviderFetcher, CredentialAcceptingProvider {
     }
 
     private func parseIntervalWindow(_ entry: [String: Any], now: Date) -> RawQuotaWindow? {
-        let limit = KimiProvider.num(entry["current_interval_total_count"])
-        let used = KimiProvider.num(entry["current_interval_usage_count"])
+        let total = KimiProvider.num(entry["current_interval_total_count"])
+        let remainingCount = KimiProvider.num(entry["current_interval_usage_count"])
         let remainingPercent = KimiProvider.num(entry["current_interval_remaining_percent"])
         let endTime = KimiProvider.num(entry["end_time"])
         let remainsMs = KimiProvider.num(entry["remains_time"])
 
-        if !hasSignal(limit: limit, used: used, remainingPercent: remainingPercent) { return nil }
+        if !hasSignal(total: total, remainingCount: remainingCount, remainingPercent: remainingPercent) { return nil }
 
         var window = RawQuotaWindow()
-        applyQuotaSignals(to: &window, limit: limit, used: used, remainingPercent: remainingPercent)
+        applyQuotaSignals(to: &window, total: total, remainingCount: remainingCount, remainingPercent: remainingPercent)
         window.resetAt = resetISOString(endTimeMs: endTime, remainsMs: remainsMs, now: now)
         return window
     }
 
     private func parseWeeklyWindow(_ entry: [String: Any], now: Date) -> RawQuotaWindow? {
-        let limit = KimiProvider.num(entry["current_weekly_total_count"])
-        let used = KimiProvider.num(entry["current_weekly_usage_count"])
+        let total = KimiProvider.num(entry["current_weekly_total_count"])
+        let remainingCount = KimiProvider.num(entry["current_weekly_usage_count"])
         let remainingPercent = KimiProvider.num(entry["current_weekly_remaining_percent"])
         let endTime = KimiProvider.num(entry["weekly_end_time"])
         let remainsMs = KimiProvider.num(entry["weekly_remains_time"])
 
-        if !hasSignal(limit: limit, used: used, remainingPercent: remainingPercent) { return nil }
+        if !hasSignal(total: total, remainingCount: remainingCount, remainingPercent: remainingPercent) { return nil }
 
         var window = RawQuotaWindow()
-        applyQuotaSignals(to: &window, limit: limit, used: used, remainingPercent: remainingPercent)
+        applyQuotaSignals(to: &window, total: total, remainingCount: remainingCount, remainingPercent: remainingPercent)
         window.resetAt = resetISOString(endTimeMs: endTime, remainsMs: remainsMs, now: now)
         return window
     }
 
     /// 任一信号存在就值得展示——0/0 但带 99% remaining 也保留，UI 能告知「尚未消耗」。
-    private func hasSignal(limit: Double?, used: Double?, remainingPercent: Double?) -> Bool {
-        if let limit, limit > 0 { return true }
-        if let used, used > 0 { return true }
+    private func hasSignal(total: Double?, remainingCount: Double?, remainingPercent: Double?) -> Bool {
+        if let total, total > 0 { return true }
+        if let remainingCount, remainingCount > 0 { return true }
         if let remainingPercent, remainingPercent >= 0 { return true }
         return false
     }
 
+    /// 百分比优先：Token Plan 只给百分比、count 字段为 0。
+    /// 只有 count 时注意 `*_usage_count` 名不副实——返回的是**剩余**额度（MiniMax-M2 issue #99，
+    /// ClaudeBar PR #359 同样处理），已用 = total − usage_count。未经实测。
     private func applyQuotaSignals(
         to window: inout RawQuotaWindow,
-        limit: Double?,
-        used: Double?,
+        total: Double?,
+        remainingCount: Double?,
         remainingPercent: Double?
     ) {
-        if let limit { window.entitlement = Int(limit.rounded()) }
+        if let total { window.entitlement = Int(total.rounded()) }
 
-        if let limit, limit > 0, let used {
-            let usedPct = min(100, max(0, used / limit * 100))
-            window.usedPercent = usedPct
-            window.remainingPercent = 100 - usedPct
-            window.remaining = Int(max(0, limit - used).rounded())
-        } else if let remainingPercent {
-            // MiniMax 在未激活/未消耗时常返回 percent=99/100 即使 count 为 0。
-            // 保留 percent 信号以便 UI 显示「健康」，不臆造 used / remaining 绝对值。
+        if let remainingPercent {
             let clamped = min(100, max(0, remainingPercent))
             window.remainingPercent = clamped
             window.usedPercent = 100 - clamped
+            if let total, total > 0, let remainingCount {
+                window.remaining = Int(max(0, remainingCount).rounded())
+            }
+        } else if let total, total > 0, let remainingCount {
+            let remainingPct = min(100, max(0, remainingCount / total * 100))
+            window.remainingPercent = remainingPct
+            window.usedPercent = 100 - remainingPct
+            window.remaining = Int(max(0, remainingCount).rounded())
         }
     }
 
