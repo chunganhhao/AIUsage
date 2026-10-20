@@ -381,6 +381,8 @@ extension ProviderRefreshCoordinator {
             "Source": "来源",
             "Project": "项目",
             "Tracked Models": "跟踪模型",
+            "Quota Windows": "额度窗口",
+            "Antigravity meters quota per model group, each with a 5-hour and a weekly limit, so the dashboard lists every window and puts the tightest ones first.": "Antigravity 按模型组计量额度，每组都有 5 小时和每周两个限额，所以面板会列出每个窗口，并把最紧张的放在前面。",
             "Main Pool": "主额度",
             "Assistant Pool": "助手额度",
             "Bonus Credits": "奖励额度",
@@ -495,6 +497,8 @@ extension ProviderRefreshCoordinator {
         result = replacingRegex(#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#,
                                 in: result,
                                 template: "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。")
+        result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5 小时")
+        result = replacingRegex(#"^(.+) · Weekly$"#, in: result, template: "$1 · 每周")
         result = replacingRegex(#"^Kiro reported (\d[\d,]*) usage lanes\. This card shows the three tightest ones first so attention stays on the lanes that will run out soonest\.$"#,
                                 in: result,
                                 template: "Kiro 报告了 $1 个用量通道，这张卡片会优先展示最紧张的三个，方便你先关注最先见底的通道。")

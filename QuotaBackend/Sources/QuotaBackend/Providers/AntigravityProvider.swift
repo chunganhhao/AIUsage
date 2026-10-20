@@ -3,7 +3,8 @@ import Foundation
 // MARK: - Antigravity Provider
 // Uses Keychain-imported credentials (OAuth or IDE session),
 // refreshes OAuth token when needed, and calls Google Cloud Code
-// Assist API for per-model quotas.
+// Assist API for grouped (5-hour + weekly) quotas, falling back to
+// the legacy per-model quotas.
 
 public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAcceptingProvider {
     public let id = "antigravity"
@@ -13,7 +14,14 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     let homeDirectory: String
     let timeoutSeconds: Double
 
-    static let quotaURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+    // Antigravity 2.x 按模型组计量（每组一个 5 小时窗口 + 一个每周窗口）。daily 部署是 IDE 实际计量的那份，
+    // prod 上 Gemini 的 5 小时窗口可能一直停在 100%，所以 daily 优先、prod 兜底；
+    // 两者都拿不到（免费账号 403、旧部署 404 等）再退回旧的按模型接口——它的 remainingFraction 已经不再变化。
+    static let quotaSummaryURLs = [
+        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
+    ]
+    static let quotaURL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
     static let loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
     static let oauthRefreshURL = "https://oauth2.googleapis.com/token"
     static let userAgent = "antigravity/2.24.0 Darwin/arm64"
@@ -76,9 +84,9 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         }
 
         var subscription = await loadCodeAssist(accessToken: accessToken)
-        let quotaResponse: [String: Any]
+        let quota: QuotaSnapshot
         do {
-            quotaResponse = try await fetchAvailableModels(accessToken: accessToken, projectId: subscription.projectId)
+            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId)
         } catch let error as ProviderError where error.code == "unauthorized" {
             guard let refreshToken = authFile.refreshToken, !refreshToken.isEmpty else { throw error }
             let refreshed = try await refreshAccessToken(refreshToken: refreshToken)
@@ -87,13 +95,13 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             authFile.expired = iso8601String(refreshed.expiryDate)
             persistRefreshedToken(at: authContext.url, originalData: originalData, refreshed: refreshed)
             subscription = await loadCodeAssist(accessToken: accessToken)
-            quotaResponse = try await fetchAvailableModels(accessToken: accessToken, projectId: subscription.projectId)
+            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId)
         }
         return buildUsage(
             authContext: authContext,
             authFile: authFile,
             subscription: subscription,
-            quotaResponse: quotaResponse
+            quota: quota
         )
     }
 
@@ -334,12 +342,18 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let projectId: String?
     }
 
-    private struct ModelQuota {
+    struct ModelQuota {
         let id: String
         let label: String
         let remainingPercent: Double
         let resetAt: String?
         let providerLabel: String?
+    }
+
+    private struct QuotaSnapshot {
+        let models: [ModelQuota]
+        /// true = 来自 retrieveUserQuotaSummary 的分组窗口；false = 旧的按模型配额。
+        let isGrouped: Bool
     }
 
     private func loadCodeAssist(accessToken: String) async -> SubscriptionInfo {
@@ -371,11 +385,44 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         )
     }
 
-    private func fetchAvailableModels(accessToken: String, projectId: String?) async throws -> [String: Any] {
-        guard let url = URL(string: Self.quotaURL) else {
+    private func fetchQuota(accessToken: String, projectId: String?) async throws -> QuotaSnapshot {
+        for summaryURL in Self.quotaSummaryURLs {
+            try Task.checkCancellation()
+            do {
+                let response = try await postQuotaRequest(
+                    summaryURL,
+                    accessToken: accessToken,
+                    projectId: projectId,
+                    timeout: min(timeoutSeconds, 8)
+                )
+                if let models = parseQuotaSummary(response) {
+                    return QuotaSnapshot(models: models, isGrouped: true)
+                }
+            } catch let error as ProviderError where error.code == "unauthorized" {
+                throw error
+            } catch {
+                // 403 / 404 / 超时：这份部署拿不到分组额度，换下一个来源。
+                continue
+            }
+        }
+
+        let response = try await postQuotaRequest(
+            Self.quotaURL,
+            accessToken: accessToken,
+            projectId: projectId,
+            timeout: timeoutSeconds
+        )
+        return QuotaSnapshot(models: parseModels(response), isGrouped: false)
+    }
+
+    private func postQuotaRequest(_ urlString: String,
+                                  accessToken: String,
+                                  projectId: String?,
+                                  timeout: Double) async throws -> [String: Any] {
+        guard let url = URL(string: urlString) else {
             throw ProviderError("invalid_url", "Antigravity quota URL is invalid.")
         }
-        var request = URLRequest(url: url, timeoutInterval: timeoutSeconds)
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
@@ -384,8 +431,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         var body: [String: Any] = [:]
         if let projectId, !projectId.isEmpty {
             body["project"] = projectId
-        } else {
-            body["project"] = "aicode-consumers"
         }
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
@@ -413,8 +458,8 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     private func buildUsage(authContext: AuthContext,
                             authFile: AntigravityAuthFile,
                             subscription: SubscriptionInfo,
-                            quotaResponse: [String: Any]) -> ProviderUsage {
-        let models = parseModels(quotaResponse)
+                            quota: QuotaSnapshot) -> ProviderUsage {
+        let models = quota.models
         let lowestPercent = models.map(\.remainingPercent).min()
         let sortedModels = models.sorted {
             if $0.remainingPercent == $1.remainingPercent {
@@ -438,6 +483,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         usage.extra["projectId"] = AnyCodable(subscription.projectId ?? authFile.projectId ?? "")
         usage.extra["lowestPercentLeft"] = AnyCodable(lowestPercent ?? -1)
         usage.extra["modelCount"] = AnyCodable(models.count)
+        usage.extra["quotaSource"] = AnyCodable(quota.isGrouped ? "groups" : "models")
         usage.extra["authFileCount"] = AnyCodable(authContext.fileCount)
         usage.extra["selectedAuthFile"] = AnyCodable(authContext.url.lastPathComponent)
         usage.extra["trackedModels"] = AnyCodable(sortedModels.map { model in
@@ -453,38 +499,60 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         return usage
     }
 
-    private func parseModels(_ response: [String: Any]) -> [ModelQuota] {
-        // Antigravity 2.x pooled dual-window group architecture
-        if let groups = response["groups"] as? [[String: Any]], !groups.isEmpty {
-            var models: [ModelQuota] = []
-            for group in groups {
-                let groupName = (group["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? "Models"
-                let buckets = group["buckets"] as? [[String: Any]] ?? []
-                for bucket in buckets {
-                    guard let frac = doubleValue(bucket["remainingFraction"]) else { continue }
-                    let isDisabled = bucket["disabled"] as? Bool ?? false
-                    let bucketName = (bucket["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    let bucketId = bucket["bucketId"] as? String ?? ""
-                    let resetAt = bucket["resetTime"] as? String
-                    let remainingPercent = isDisabled ? 0.0 : min(100.0, max(0.0, frac * 100.0))
+    /// `retrieveUserQuotaSummary`：`groups[].buckets[]`，同组模型共享一个 5 小时窗口和一个每周窗口。
+    /// 返回 nil 表示没有可用窗口（旧部署、桶全被禁用等），由调用方换下一个来源。
+    func parseQuotaSummary(_ response: [String: Any]) -> [ModelQuota]? {
+        guard let groups = response["groups"] as? [[String: Any]] else { return nil }
+        var models: [ModelQuota] = []
 
-                    let label = bucketName.isEmpty ? groupName : "\(groupName) (\(bucketName))"
-                    let providerLabel = groupName.localizedCaseInsensitiveContains("Gemini") ? "Google" : "Claude/3P"
+        for group in groups {
+            let groupName = summaryGroupName(group["displayName"] as? String)
+            for bucket in group["buckets"] as? [[String: Any]] ?? [] {
+                // 禁用的桶不计入：周额度用尽时 5 小时桶会被禁用（周桶自己已经是 0%）；
+                // 套餐不含该模型组时也会禁用，按 0% 算会把整个账号误报成用尽。
+                if bucket["disabled"] as? Bool == true { continue }
 
-                    models.append(ModelQuota(
-                        id: "\(groupName)-\(bucketId)",
-                        label: label,
-                        remainingPercent: remainingPercent,
-                        resetAt: resetAt,
-                        providerLabel: providerLabel
-                    ))
-                }
-            }
-            if !models.isEmpty {
-                return models
+                let resetAt = (bucket["resetTime"] as? String)
+                    .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+                // proto3 JSON 会省略零值：用尽的桶没有 remainingFraction，只剩 resetTime。
+                guard let fraction = doubleValue(bucket["remainingFraction"]) ?? (resetAt == nil ? nil : 0) else { continue }
+
+                let bucketId = (bucket["bucketId"] as? String) ?? ""
+                models.append(ModelQuota(
+                    id: bucketId.isEmpty ? "\(groupName)-\(models.count)" : bucketId,
+                    label: summaryWindowLabel(groupName: groupName, bucket: bucket),
+                    remainingPercent: min(100, max(0, fraction * 100)),
+                    resetAt: resetAt,
+                    providerLabel: nil
+                ))
             }
         }
 
+        return models.isEmpty ? nil : models
+    }
+
+    /// "Gemini Models" → "Gemini"，"Claude and GPT models" → "Claude + GPT"；其他组名原样保留。
+    private func summaryGroupName(_ raw: String?) -> String {
+        var name = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if name.lowercased().hasSuffix(" models") {
+            name = String(name.dropLast(" models".count))
+        }
+        name = name.replacingOccurrences(of: " and ", with: " + ")
+        return name.isEmpty ? "Models" : name
+    }
+
+    private func summaryWindowLabel(groupName: String, bucket: [String: Any]) -> String {
+        let window = (bucket["window"] as? String)?.lowercased()
+        let bucketId = (bucket["bucketId"] as? String)?.lowercased() ?? ""
+        if window == "5h" || bucketId.hasSuffix("-5h") { return "\(groupName) · 5h" }
+        if window == "weekly" || bucketId.hasSuffix("-weekly") { return "\(groupName) · Weekly" }
+        if let name = (bucket["displayName"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !name.isEmpty {
+            return "\(groupName) · \(name)"
+        }
+        return groupName
+    }
+
+    private func parseModels(_ response: [String: Any]) -> [ModelQuota] {
         let rawModels = response["models"] as? [String: Any] ?? [:]
         var models: [ModelQuota] = []
 
