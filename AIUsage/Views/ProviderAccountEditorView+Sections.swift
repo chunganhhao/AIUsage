@@ -128,7 +128,7 @@ extension ProviderAccountEditorView {
                 consoleTitle: L("Get API Key", "获取 API Key"),
                 supportsRegion: true,
                 consoleURL: { region in
-                    region == .international ? "https://platform.moonshot.ai/" : "https://www.kimi.com/code/console"
+                    region == .international ? "https://www.kimi.ai/code/console" : "https://www.kimi.com/code/console"
                 }
             )
         case "minimax":

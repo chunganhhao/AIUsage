@@ -3,12 +3,14 @@ import Foundation
 // MARK: - Kimi Code Provider
 // 监控 Kimi Code 订阅套餐的用量配额（本周用量 + 频控窗口），与官方 CLI `/usage` 命令同源。
 // 数据来源: GET https://api.kimi.com/coding/v1/usages（国内区）
-//          GET https://api.moonshot.ai/v1/usages（全球区回退）
+//          GET https://api.kimi.ai/coding/v1/usages（国际区），https://api.moonshot.ai/v1/usages（旧的全球区回退）
 //   Header: Authorization: Bearer <Kimi Code API Key 或 OAuth access token>
 // 返回结构: { usage: {used, limit, reset_at/reset_in, ...},
 //            limits: [{ name, detail:{used, limit}, window:{duration, timeUnit} }] }
 //   - usage  → 本周/总额度（primary）
 //   - limits → 频控窗口（如 5 小时滚动窗口）（secondary / tertiary）
+// 新版还会给 `usages: { limit_5h, limit_7d, limit_month_total }` 比例池（used_ratio 0–1 + reset_time），
+// 有就优先用；`user.membership.level` 是会员档位。比例池格式取自 CodexBar 的 KimiModels，未经实测。
 // 认证: Kimi Code API Key（sk-...，从 https://www.kimi.com/code/console 创建），
 //      或从本地 ~/.kimi-code/config.toml、~/.kimi/config.toml 自动发现。
 
@@ -17,9 +19,10 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
     public let displayName = "Kimi Code"
     public let description = "Kimi Code subscription usage and rate limits"
 
-    /// 用量端点：先国内区，失败再全球区。
+    /// 用量端点：先国内区，再国际区，最后旧的全球区地址。
     static let usageEndpoints = [
         "https://api.kimi.com/coding/v1/usages",
+        "https://api.kimi.ai/coding/v1/usages",
         "https://api.moonshot.ai/v1/usages"
     ]
     static let userAgent = "AIUsage-KimiMonitor/1.0"
@@ -88,32 +91,20 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
             ?? email
             ?? "kimi-\(Self.stableFingerprint(apiKey))"
 
-        if let plan = Self.resolvePlan(root) {
+        if let plan = Self.resolveMembershipPlan(root) ?? Self.resolvePlan(root) {
             usage.accountPlan = plan
         }
 
-        // 解析配额窗口。
-        let weekly = Self.parseWeeklyWindow(root, now: now)
-        var rateLimits = Self.parseRateLimitWindows(root, now: now) // 按时长升序，最短（5 小时）在前
-
         // 对齐 Codex：主窗口 = 最紧的滚动频控窗口（官方「5 小时内最多可使用额度」），
-        // 次窗口 = 周限。这样卡片首行就是 5 小时额度、第二行才是 7 天/本周。
+        // 次窗口 = 周限，第三个是月度总额度（新格式）或下一个频控窗口（旧格式）。
         var extra: [String: AnyCodable] = [:]
-        if !rateLimits.isEmpty {
-            usage.primary = rateLimits.removeFirst().window
-            extra["primaryLabel"] = AnyCodable("5h Window")
-            if let w = weekly {
-                usage.secondary = w.window
-                extra["secondaryLabel"] = AnyCodable("Weekly Window")
+        for (slot, entry) in Self.orderedWindows(root, now: now).prefix(3).enumerated() {
+            switch slot {
+            case 0: usage.primary = entry.window
+            case 1: usage.secondary = entry.window
+            default: usage.tertiary = entry.window
             }
-            if let next = rateLimits.first {
-                usage.tertiary = next.window
-                extra["tertiaryLabel"] = AnyCodable(next.label)
-            }
-        } else if let w = weekly {
-            // 没有频控窗口时退回只展示周限。
-            usage.primary = w.window
-            extra["primaryLabel"] = AnyCodable("Weekly Window")
+            extra[["primaryLabel", "secondaryLabel", "tertiaryLabel"][slot]] = AnyCodable(entry.label)
         }
 
         if let model = Self.resolveModelEntitlement(root) { extra["modelEntitlement"] = AnyCodable(model) }
@@ -132,12 +123,11 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
     ) async throws -> (root: [String: Any], resolved: ProviderAPIRegion) {
         var sawAuthFailure = false
         var lastError: Error?
-        let endpoints = region.orderedEndpoints(
+        let candidates = region.candidates(
             Self.usageEndpoints,
             chinaContains: ["api.kimi.com"],
-            internationalContains: ["moonshot.ai"]
+            internationalContains: ["kimi.ai", "moonshot.ai"]
         )
-        let candidates = region.allowsCrossRegionFallback ? endpoints : Array(endpoints.prefix(1))
 
         for endpoint in candidates {
             guard let url = URL(string: endpoint) else { continue }
@@ -166,7 +156,7 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
                 }
 
                 let root = Self.dict(json["data"]) ?? json
-                if root["usage"] != nil || root["limits"] != nil {
+                if root["usage"] != nil || root["limits"] != nil || Self.dict(root["usages"]) != nil {
                     let resolved: ProviderAPIRegion = endpoint.contains("api.kimi.com") ? .china : .international
                     return (root, resolved)
                 }
@@ -187,7 +177,7 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
         case .china:
             return "Kimi Code API key was rejected by the China endpoint (api.kimi.com). Check the key, or switch to International."
         case .international:
-            return "Kimi Code API key was rejected by the International endpoint (api.moonshot.ai). Check the key, or switch to China."
+            return "Kimi Code API key was rejected by the International endpoint (api.kimi.ai). Check the key, or switch to China."
         case .auto:
             return "Kimi Code API key is invalid or unauthorized for both the China and global endpoints."
         }
@@ -199,6 +189,39 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
         let label: String
         let durationSeconds: Double?
         let window: RawQuotaWindow
+    }
+
+    /// 卡片窗口顺序：5 小时 → 每周 → 第三个（月度总额度或下一个频控窗口）。比例池给了的窗口优先，
+    /// 没给的再用旧的 `usage` / `limits` 补。
+    static func orderedWindows(_ root: [String: Any], now: Date) -> [ParsedWindow] {
+        let pools = parseRatioPools(root, now: now)
+        var rateLimits = parseRateLimitWindows(root, now: now) // 按时长升序，最短（5 小时）在前
+        let legacyShortest = rateLimits.isEmpty ? nil : rateLimits.removeFirst()
+
+        let fiveHour = pools.fiveHour.map { ParsedWindow(label: "5h Window", durationSeconds: 5 * 3600, window: $0) }
+            ?? legacyShortest.map { ParsedWindow(label: "5h Window", durationSeconds: $0.durationSeconds, window: $0.window) }
+        let weekly = pools.weekly.map { ParsedWindow(label: "Weekly Window", durationSeconds: 7 * 86400, window: $0) }
+            ?? parseWeeklyWindow(root, now: now).map { ParsedWindow(label: "Weekly Window", durationSeconds: $0.durationSeconds, window: $0.window) }
+        let third = pools.monthly.map { ParsedWindow(label: "Monthly Window", durationSeconds: 30 * 86400, window: $0) }
+            ?? rateLimits.first
+        return [fiveHour, weekly, third].compactMap { $0 }
+    }
+
+    /// 新版 `usages` 比例池：limit_5h / limit_7d / limit_month_total，各含 used_ratio（0–1）与 reset_time。
+    static func parseRatioPools(_ root: [String: Any], now: Date)
+        -> (fiveHour: RawQuotaWindow?, weekly: RawQuotaWindow?, monthly: RawQuotaWindow?) {
+        guard let pools = dict(root["usages"]) else { return (nil, nil, nil) }
+        func window(_ key: String) -> RawQuotaWindow? {
+            guard let pool = dict(pools[key]),
+                  let ratio = num(pool["used_ratio"]), ratio.isFinite, ratio >= 0 else { return nil }
+            var window = RawQuotaWindow()
+            let usedPercent = min(1, ratio) * 100
+            window.usedPercent = usedPercent
+            window.remainingPercent = 100 - usedPercent
+            window.resetAt = parseResetDate(pool, now: now).map { SharedFormatters.iso8601String(from: $0) }
+            return window
+        }
+        return (window("limit_5h"), window("limit_7d"), window("limit_month_total"))
     }
 
     static func parseWeeklyWindow(_ root: [String: Any], now: Date) -> ParsedWindow? {
@@ -321,6 +344,22 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
 
     // MARK: - Plan / Model Entitlement
 
+    /// `user.membership.level`：官方 V1 会员商品目录的档位名（CodexBar 同款映射）；其它版本保留原值。
+    static func resolveMembershipPlan(_ root: [String: Any]) -> String? {
+        guard let level = firstString(dict(dict(root["user"])?["membership"]), ["level"]),
+              level != "LEVEL_UNSPECIFIED" else { return nil }
+        let version = firstString(root, ["version"])
+        guard version == nil || version == "GOODS_VERSION_V1" else { return level }
+        switch level {
+        case "LEVEL_FREE": return "Adagio"
+        case "LEVEL_TRIAL": return "Andante"
+        case "LEVEL_BASIC": return "Moderato"
+        case "LEVEL_INTERMEDIATE": return "Allegretto"
+        case "LEVEL_ADVANCED": return "Allegro"
+        default: return level
+        }
+    }
+
     private static func resolvePlan(_ root: [String: Any]) -> String? {
         let keys = ["plan", "plan_name", "subscription_plan", "tier", "membership", "level", "product"]
         for key in keys {
@@ -383,6 +422,7 @@ public struct KimiProvider: ProviderFetcher, CredentialAcceptingProvider {
             let isKimiCode = sectionType?.lowercased() == "kimi"
                 || lowerSection.contains("kimi")
                 || lowerBase.contains("kimi.com/coding")
+                || lowerBase.contains("kimi.ai/coding")
                 || lowerBase.contains("moonshot")
                 || key.hasPrefix("sk-kimi")
             guard isKimiCode else { return }

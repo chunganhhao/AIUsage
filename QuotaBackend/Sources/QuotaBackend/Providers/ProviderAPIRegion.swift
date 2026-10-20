@@ -23,27 +23,6 @@ public enum ProviderAPIRegion: String, Codable, CaseIterable, Sendable {
         }
     }
 
-    /// 按偏好重排端点：显式区域把对应端点放最前；`.auto` 保持传入顺序。
-    public func orderedEndpoints(_ endpoints: [String], chinaContains: [String], internationalContains: [String]) -> [String] {
-        guard endpoints.count > 1 else { return endpoints }
-        func matches(_ url: String, needles: [String]) -> Bool {
-            let lower = url.lowercased()
-            return needles.contains { lower.contains($0) }
-        }
-        switch self {
-        case .auto:
-            return endpoints
-        case .china:
-            let preferred = endpoints.filter { matches($0, needles: chinaContains) }
-            let rest = endpoints.filter { !matches($0, needles: chinaContains) }
-            return preferred + rest
-        case .international:
-            let preferred = endpoints.filter { matches($0, needles: internationalContains) }
-            let rest = endpoints.filter { !matches($0, needles: internationalContains) }
-            return preferred + rest
-        }
-    }
-
     /// 实际要尝试的端点：`.auto` 按传入顺序全部尝试；显式区域只试该区域的端点（保持原顺序），
     /// 同一区域有多个端点（如新旧两代接口）时可以在区域内回退。
     public func candidates(_ endpoints: [String], chinaContains: [String], internationalContains: [String]) -> [String] {
@@ -55,14 +34,6 @@ public enum ProviderAPIRegion: String, Codable, CaseIterable, Sendable {
         case .auto: return endpoints
         case .china: return endpoints.filter { matches($0, needles: chinaContains) }
         case .international: return endpoints.filter { matches($0, needles: internationalContains) }
-        }
-    }
-
-    /// 显式区域时是否允许跨区回退。`.auto` 始终尝试全部。
-    public var allowsCrossRegionFallback: Bool {
-        switch self {
-        case .auto: return true
-        case .china, .international: return false
         }
     }
 }
