@@ -760,7 +760,86 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         usage.tertiary = parseWindow(codeReviewLimit["primary_window"] as? [String: Any])
         usage.source = source
 
+        // 按量计费工作区的月度个人上限排前（计入告警），按模型的额外限额（如 Spark）随后（只展示）。
+        var extraWindows: [AnyCodable] = []
+        if let spendLimit = parseSpendControlWindow(json["spend_control"] as? [String: Any]) {
+            extraWindows.append(spendLimit)
+        }
+        extraWindows += parseAdditionalWindows(json["additional_rate_limits"])
+        if !extraWindows.isEmpty {
+            usage.extra["extraWindows"] = AnyCodable(extraWindows)
+        }
+        if let credits = creditsDisplay(json["credits"] as? [String: Any]) {
+            usage.extra["credits"] = AnyCodable(credits)
+        }
+
         return usage
+    }
+
+    /// `spend_control.individual_limit`：官方 TUI 的 "Monthly credit limit"。
+    private func parseSpendControlWindow(_ spendControl: [String: Any]?) -> AnyCodable? {
+        guard let limit = spendControl?["individual_limit"] as? [String: Any] else { return nil }
+        let usedPercent = (limit["used_percent"] as? NSNumber)?.doubleValue
+            ?? (limit["remaining_percent"] as? NSNumber).map { 100 - $0.doubleValue }
+        guard let usedPercent else { return nil }
+
+        var window = RawQuotaWindow()
+        window.usedPercent = min(100, max(0, usedPercent))
+        window.remainingPercent = 100 - (window.usedPercent ?? 0)
+        if let resetAtRaw = (limit["reset_at"] as? NSNumber)?.doubleValue, resetAtRaw > 0 {
+            let resetDate = Date(timeIntervalSince1970: resetAtRaw)
+            window.resetAt = SharedFormatters.iso8601String(from: resetDate)
+            window.resetDescription = formatResetDescription(resetDate)
+        }
+        return Self.extraWindowEntry(label: "Monthly Credit Limit", window: window, affectsStatus: true)
+    }
+
+    /// `additional_rate_limits[]`：按模型的单独限额，每个限额最多两个窗口。
+    private func parseAdditionalWindows(_ value: Any?) -> [AnyCodable] {
+        guard let limits = value as? [[String: Any]] else { return [] }
+        return limits.flatMap { limit -> [AnyCodable] in
+            let rateLimit = limit["rate_limit"] as? [String: Any] ?? [:]
+            let name = Self.limitDisplayName(
+                stringValue(limit["limit_name"]) ?? stringValue(limit["metered_feature"]) ?? ""
+            )
+            return [rateLimit["primary_window"], rateLimit["secondary_window"]].compactMap { raw in
+                guard let window = parseWindow(raw as? [String: Any]) else { return nil }
+                let span = window.label?.replacingOccurrences(of: " Window", with: "") ?? "Limit"
+                return Self.extraWindowEntry(label: "\(name) · \(span)", window: window, affectsStatus: false)
+            }
+        }
+    }
+
+    private func creditsDisplay(_ credits: [String: Any]?) -> String? {
+        guard let credits else { return nil }
+        if credits["unlimited"] as? Bool == true { return "Unlimited" }
+        guard credits["has_credits"] as? Bool == true else { return nil }
+        // 与官方 TUI 一致：余额取整显示，拿不到余额时只说明可用。
+        let balance = stringValue(credits["balance"]).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        guard let balance, balance.isFinite, balance > 0 else { return "Available" }
+        return "\(Int(balance.rounded())) credits"
+    }
+
+    private static func extraWindowEntry(label: String, window: RawQuotaWindow, affectsStatus: Bool) -> AnyCodable {
+        AnyCodable([
+            "label": AnyCodable(label),
+            "usedPercent": AnyCodable(window.usedPercent ?? 0),
+            "resetAt": AnyCodable(window.resetAt ?? ""),
+            "resetDescription": AnyCodable(window.resetDescription ?? ""),
+            "affectsStatus": AnyCodable(affectsStatus)
+        ] as [String: AnyCodable])
+    }
+
+    /// "gpt-5.3-codex-spark" → "GPT-5.3-Codex-Spark"，"codex_other" → "Codex Other"；已含大写的视为展示名原样保留。
+    static func limitDisplayName(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "Model" }
+        guard trimmed == trimmed.lowercased() else { return trimmed }
+        let separator = trimmed.contains("-") ? "-" : " "
+        return trimmed
+            .split(whereSeparator: { $0 == "-" || $0 == "_" || $0 == " " })
+            .map { part in part == "gpt" ? "GPT" : part.prefix(1).uppercased() + part.dropFirst() }
+            .joined(separator: separator)
     }
 
     private func parseWindow(_ window: [String: Any]?) -> RawQuotaWindow? {
@@ -884,11 +963,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     // MARK: - ChatGPT / Codex Plan Mapping
-    // 基于 openai/codex 的 KnownPlan（codex-rs/login/src/token_data.rs）做映射，但展示名贴合
-    // ChatGPT 现行方案命名。要点：
-    //   - 旧的 "team" 已更名为 "ChatGPT Business"，统一展示为 Business（旧账号 JWT 仍可能下发 team）；
-    //   - "hc" → Enterprise；含 *_usage_based 的按需计费变体归并到 Business / Enterprise；
-    //   - 个人计划：free / go / plus / pro。
+    // 基于 openai/codex 的 PlanType / KnownPlan（codex-rs/protocol/src/{account,auth}.rs）做映射，
+    // 个人方案展示名与官方一致（pro → Pro (More)，prolite → Pro，promax → Pro (Max)）。要点：
+    //   - 旧的 "team" 已更名为 "ChatGPT Business"，团队类方案统一展示为 Business（旧账号 JWT 仍可能下发 team）；
+    //   - ent26 / enterprise_cbp_* / "hc" → Enterprise；edu_* / sci_* 属于教育科研工作区。
 
     /// 规范化原始 plan 键：小写、去空白、空格/连字符→下划线，
     /// 以便同时兼容原始值（"self_serve_business_usage_based"）与展示名（"Self Serve Business Usage Based"）。
@@ -899,34 +977,52 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             .replacingOccurrences(of: "-", with: "_")
     }
 
-    /// 展示名（贴合 ChatGPT 现行方案命名）。未知值原样返回。
+    private static let businessPlanKeys: Set<String> = [
+        "team", "self_serve_business_prolite", "self_serve_business_usage_based", "business"
+    ]
+    private static let enterprisePlanKeys: Set<String> = [
+        "ent26", "enterprise", "enterprise_cbp_automation", "enterprise_cbp_usage_based", "hc"
+    ]
+    /// 含展示名形式（academic_researchers*），因为 workspaceType 也会拿展示名来判断。
+    private static let educationPlanKeys: Set<String> = [
+        "edu", "education", "edu_plus", "edu_pro",
+        "sci", "sci_plus", "academic_researchers", "academic_researchers_plus"
+    ]
+
+    /// 展示名（贴合 ChatGPT / Codex 现行方案命名）。未知值原样返回。
     public static func planDisplayName(forRaw raw: String?) -> String? {
         guard let raw, !raw.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
-        switch normalizePlanKey(raw) {
+        let key = normalizePlanKey(raw)
+        switch key {
         case "free": return "Free"
         case "go": return "Go"
         case "plus": return "Plus"
-        case "pro": return "Pro"
-        // ChatGPT Team 已更名为 Business，旧 team 值统一展示为 Business。
-        case "team", "self_serve_business_usage_based", "business": return "Business"
-        case "enterprise_cbp_usage_based", "enterprise", "hc": return "Enterprise"
-        case "education", "edu": return "Edu"
-        default: return raw
+        case "pro": return "Pro (More)"
+        case "prolite": return "Pro"
+        case "promax": return "Pro (Max)"
+        case "edu_plus": return "Edu Plus"
+        case "edu_pro": return "Edu Pro"
+        case "sci": return "Academic Researchers"
+        case "sci_plus": return "Academic Researchers Plus"
+        default:
+            if businessPlanKeys.contains(key) { return "Business" }
+            if enterprisePlanKeys.contains(key) { return "Enterprise" }
+            if key == "edu" || key == "education" { return "Edu" }
+            return raw
         }
     }
 
-    /// Derive a workspace type label from the plan string.
-    /// 个人计划 (free/go/plus/pro) → "Personal"；团队/企业/教育 → 对应工作区名。
+    /// Derive a workspace type label from the plan string (raw value or display name).
+    /// 个人计划 (free/go/plus/pro*) → "Personal"；团队/企业/教育科研 → 对应工作区名。
     static func workspaceType(fromPlan plan: String?) -> String {
         guard let plan, !plan.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             return "Personal"
         }
-        switch normalizePlanKey(plan) {
-        case "team", "self_serve_business_usage_based", "business": return "Business"
-        case "enterprise_cbp_usage_based", "enterprise", "hc": return "Enterprise"
-        case "education", "edu": return "Edu"
-        default: return "Personal"
-        }
+        let key = normalizePlanKey(plan)
+        if businessPlanKeys.contains(key) { return "Business" }
+        if enterprisePlanKeys.contains(key) { return "Enterprise" }
+        if educationPlanKeys.contains(key) { return "Edu" }
+        return "Personal"
     }
 }
 
