@@ -96,13 +96,13 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             quotaResponse: quotaResponse
         )
 
-        // MARK: - Smart Circuit Breaker (Granular Model-Level)
-        if let circuitBreakerInfo = applySmartCircuitBreaker(at: authContext.url, quotaResponse: quotaResponse) {
+        // MARK: - Smart Circuit Breaker
+        if let circuitBreakerInfo = applySmartCircuitBreaker(
+            at: authContext.url,
+            quotaResponse: quotaResponse,
+            email: authFile.email ?? emailFromFilename(authContext.url.lastPathComponent)
+        ) {
             usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
-            usage.extra["circuitBreakerPartialTripped"] = AnyCodable(circuitBreakerInfo.isPartial)
-            if let pool = circuitBreakerInfo.trippedPool {
-                usage.extra["circuitBreakerTrippedPool"] = AnyCodable(pool)
-            }
             usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
         }
 
@@ -465,221 +465,42 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         return usage
     }
 
-    // MARK: - Smart Circuit Breaker Implementation (Granular Model-Level)
+    // MARK: - Smart Circuit Breaker Implementation
 
     private struct CircuitBreakerResult {
         let tripped: Bool
-        let isPartial: Bool
-        let trippedPool: String? // "claude" or "gemini"
         let reason: String
     }
 
-    private func applySmartCircuitBreaker(at fileURL: URL, quotaResponse: [String: Any]) -> CircuitBreakerResult? {
-        guard fileURL.path.contains("CLIProxyAPI/auth") else { return nil }
+    private func applySmartCircuitBreaker(
+        at fileURL: URL,
+        quotaResponse: [String: Any],
+        email: String?
+    ) -> CircuitBreakerResult? {
         let models = parseModels(quotaResponse)
         guard !models.isEmpty else { return nil }
 
-        // Categorize buckets into Claude/3P vs Gemini pools
-        var claudeBuckets: [ModelQuota] = []
-        var geminiBuckets: [ModelQuota] = []
+        // Find the lowest remaining quota bucket
+        guard let lowest = models.min(by: { $0.remainingPercent < $1.remainingPercent }) else { return nil }
+        let minPercent = lowest.remainingPercent
+        let shouldTrip = minPercent <= 5.0
+        let reason = shouldTrip ? "\(lowest.label) còn \(Int(minPercent))% (<= 5%)" : "Tất cả hạn mức > 5%"
 
-        for m in models {
-            let lowerLabel = m.label.lowercased()
-            let lowerId = m.id.lowercased()
-            let provider = (m.providerLabel ?? "").lowercased()
-            let isClaude = lowerLabel.contains("claude") || lowerLabel.contains("gpt") || lowerLabel.contains("anthropic") || lowerId.contains("claude") || lowerId.contains("gpt") || provider.contains("claude") || provider.contains("anthropic")
-            if isClaude {
-                claudeBuckets.append(m)
-            } else {
-                geminiBuckets.append(m)
-            }
+        let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
+            providerPrefix: "antigravity",
+            email: email,
+            currentFileURL: fileURL
+        )
+        guard !targets.isEmpty else { return nil }
+
+        if let outcome = QuotaCircuitBreakerHelper.syncCircuitBreaker(
+            targets: targets,
+            shouldTrip: shouldTrip,
+            reason: reason
+        ) {
+            return CircuitBreakerResult(tripped: outcome.tripped, reason: outcome.reason)
         }
-
-        let claudeMin = claudeBuckets.map(\.remainingPercent).min()
-        let geminiMin = geminiBuckets.map(\.remainingPercent).min()
-
-        let isClaudeLow = claudeMin.map { $0 <= 5.0 } ?? false
-        let isGeminiLow = geminiMin.map { $0 <= 5.0 } ?? false
-
-        // Determine tripping mode
-        let shouldTripTotal: Bool
-        let shouldTripClaudeOnly: Bool
-        let shouldTripGeminiOnly: Bool
-        let reason: String
-
-        if isClaudeLow && isGeminiLow {
-            shouldTripTotal = true
-            shouldTripClaudeOnly = false
-            shouldTripGeminiOnly = false
-            reason = "Cả Claude (\(Int(claudeMin ?? 0))%) và Gemini (\(Int(geminiMin ?? 0))%) đều <= 5%"
-        } else if isClaudeLow && geminiBuckets.isEmpty {
-            shouldTripTotal = true
-            shouldTripClaudeOnly = false
-            shouldTripGeminiOnly = false
-            reason = "Claude/GPT còn \(Int(claudeMin ?? 0))% (<= 5%)"
-        } else if isGeminiLow && claudeBuckets.isEmpty {
-            shouldTripTotal = true
-            shouldTripClaudeOnly = false
-            shouldTripGeminiOnly = false
-            reason = "Gemini còn \(Int(geminiMin ?? 0))% (<= 5%)"
-        } else if isClaudeLow && !isGeminiLow {
-            shouldTripTotal = false
-            shouldTripClaudeOnly = true
-            shouldTripGeminiOnly = false
-            reason = "Claude/GPT còn \(Int(claudeMin ?? 0))% (<= 5%), Gemini \(Int(geminiMin ?? 0))% đang hoạt động"
-        } else if !isClaudeLow && isGeminiLow {
-            shouldTripTotal = false
-            shouldTripClaudeOnly = false
-            shouldTripGeminiOnly = true
-            reason = "Gemini còn \(Int(geminiMin ?? 0))% (<= 5%), Claude \(Int(claudeMin ?? 0))% đang hoạt động"
-        } else {
-            shouldTripTotal = false
-            shouldTripClaudeOnly = false
-            shouldTripGeminiOnly = false
-            reason = "Hạn mức bình thường (> 5%)"
-        }
-
-        guard let data = try? Data(contentsOf: fileURL),
-              var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return nil
-        }
-
-        let currentDisabled = (json["disabled"] as? Bool) ?? ((json["disabled"] as? Int) == 1)
-        let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
-        let isPartialByBreaker = json["circuit_breaker_partial"] as? Bool ?? false
-        let previousPool = json["circuit_breaker_tripped_pool"] as? String
-
-        // BẢO VỆ BẮT BUỘC: Nếu tài khoản đang bị vô hiệu hóa THỦ CÔNG bởi người dùng
-        // (disabled == true nhưng không có cờ breaker), Circuit Breaker TUYỆT ĐỐI KHÔNG CAN THIỆP!
-        let isManuallyDisabled = currentDisabled && !isTrippedByBreaker
-        if isManuallyDisabled {
-            return nil
-        }
-
-        func applyModelExclusion(excludingClaude: Bool, excludingGemini: Bool) {
-            if let hints = json["antigravity_capability_hints"] as? [String: Any],
-               let modelIDs = hints["model_ids"] as? [String] {
-                let allModelIDs = (json["all_model_ids"] as? [String]) ?? modelIDs
-                json["all_model_ids"] = allModelIDs
-
-                var excluded: [String] = []
-                if excludingClaude {
-                    excluded.append(contentsOf: allModelIDs.filter { id in
-                        let lower = id.lowercased()
-                        return lower.contains("claude") || lower.contains("gpt-") || lower.hasPrefix("chat_")
-                    })
-                }
-                if excludingGemini {
-                    excluded.append(contentsOf: allModelIDs.filter { id in
-                        let lower = id.lowercased()
-                        return lower.contains("gemini") || lower.hasPrefix("tab_")
-                    })
-                }
-
-                if excluded.isEmpty {
-                    json.removeValue(forKey: "excluded-models")
-                    json.removeValue(forKey: "excluded_models")
-                    var updatedHints = hints
-                    updatedHints["model_ids"] = allModelIDs
-                    json["antigravity_capability_hints"] = updatedHints
-                } else {
-                    json["excluded-models"] = excluded
-                    json["excluded_models"] = excluded
-                    let remaining = allModelIDs.filter { !excluded.contains($0) }
-                    var updatedHints = hints
-                    updatedHints["model_ids"] = remaining
-                    json["antigravity_capability_hints"] = updatedHints
-                }
-            } else {
-                if excludingClaude {
-                    let excluded = ["claude-sonnet-4-6", "claude-opus-4-6-thinking", "gpt-oss-120b-medium"]
-                    json["excluded-models"] = excluded
-                    json["excluded_models"] = excluded
-                } else if excludingGemini {
-                    let excluded = ["gemini-3.8-flash-high", "gemini-3.1-flash-image", "gemini-3.1-flash-lite", "gemini-3.5-flash-lite"]
-                    json["excluded-models"] = excluded
-                    json["excluded_models"] = excluded
-                } else {
-                    json.removeValue(forKey: "excluded-models")
-                    json.removeValue(forKey: "excluded_models")
-                }
-            }
-        }
-
-        var didChange = false
-
-        if shouldTripTotal {
-            if !currentDisabled || isPartialByBreaker {
-                json["disabled"] = true
-                json["circuit_breaker_tripped"] = true
-                json["circuit_breaker_partial"] = false
-                json.removeValue(forKey: "circuit_breaker_tripped_pool")
-                json["circuit_breaker_reason"] = reason
-                json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
-                applyModelExclusion(excludingClaude: false, excludingGemini: false)
-                didChange = true
-            }
-            if didChange, let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            return CircuitBreakerResult(tripped: true, isPartial: false, trippedPool: nil, reason: reason)
-        } else if shouldTripClaudeOnly {
-            if currentDisabled && isTrippedByBreaker {
-                json["disabled"] = false
-                json["circuit_breaker_tripped"] = false
-                didChange = true
-            }
-            if !isPartialByBreaker || previousPool != "claude" {
-                json["circuit_breaker_partial"] = true
-                json["circuit_breaker_tripped_pool"] = "claude"
-                json["circuit_breaker_reason"] = reason
-                json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
-                applyModelExclusion(excludingClaude: true, excludingGemini: false)
-                didChange = true
-            }
-            if didChange, let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            return CircuitBreakerResult(tripped: false, isPartial: true, trippedPool: "claude", reason: reason)
-        } else if shouldTripGeminiOnly {
-            if currentDisabled && isTrippedByBreaker {
-                json["disabled"] = false
-                json["circuit_breaker_tripped"] = false
-                didChange = true
-            }
-            if !isPartialByBreaker || previousPool != "gemini" {
-                json["circuit_breaker_partial"] = true
-                json["circuit_breaker_tripped_pool"] = "gemini"
-                json["circuit_breaker_reason"] = reason
-                json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
-                applyModelExclusion(excludingClaude: false, excludingGemini: true)
-                didChange = true
-            }
-            if didChange, let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            return CircuitBreakerResult(tripped: false, isPartial: true, trippedPool: "gemini", reason: reason)
-        } else {
-            // Case D: Healthy - Auto-recovery
-            if isTrippedByBreaker || isPartialByBreaker {
-                if !currentDisabled || isTrippedByBreaker {
-                    json["disabled"] = false
-                }
-                json["circuit_breaker_tripped"] = false
-                json["circuit_breaker_partial"] = false
-                json.removeValue(forKey: "circuit_breaker_tripped_pool")
-                json["circuit_breaker_recovered_at"] = ISO8601DateFormatter().string(from: Date())
-                applyModelExclusion(excludingClaude: false, excludingGemini: false)
-                didChange = true
-            }
-            if didChange, let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            if isTrippedByBreaker || isPartialByBreaker {
-                return CircuitBreakerResult(tripped: false, isPartial: false, trippedPool: nil, reason: "Quota recovered")
-            }
-            return nil
-        }
+        return nil
     }
 
     private func parseModels(_ response: [String: Any]) -> [ModelQuota] {

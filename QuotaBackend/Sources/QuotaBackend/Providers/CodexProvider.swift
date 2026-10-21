@@ -946,15 +946,14 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
     private func postProcessUsage(_ usage: inout ProviderUsage, fileURL: URL?) {
         guard let fileURL else { return }
-        if let circuitBreakerInfo = applySmartCircuitBreaker(at: fileURL, usage: usage) {
+        let email = usage.accountEmail
+        if let circuitBreakerInfo = applySmartCircuitBreaker(at: fileURL, usage: usage, email: email) {
             usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
             usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
         }
     }
 
-    private func applySmartCircuitBreaker(at fileURL: URL, usage: ProviderUsage) -> CircuitBreakerResult? {
-        guard fileURL.path.contains("CLIProxyAPI/auth") else { return nil }
-
+    private func applySmartCircuitBreaker(at fileURL: URL, usage: ProviderUsage, email: String?) -> CircuitBreakerResult? {
         var shouldTrip = false
         var reason = ""
 
@@ -966,38 +965,24 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             shouldTrip = true
             let label = secondary.label ?? "Weekly Window"
             reason = "\(label) còn \(Int(rem))% (<= 5%)"
+        } else {
+            reason = "Hạn mức bình thường (> 5%)"
         }
 
-        guard let data = try? Data(contentsOf: fileURL),
-              var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            return nil
+        let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
+            providerPrefix: "codex",
+            email: email,
+            currentFileURL: fileURL
+        )
+        guard !targets.isEmpty else { return nil }
+
+        if let outcome = QuotaCircuitBreakerHelper.syncCircuitBreaker(
+            targets: targets,
+            shouldTrip: shouldTrip,
+            reason: reason
+        ) {
+            return CircuitBreakerResult(tripped: outcome.tripped, reason: outcome.reason)
         }
-
-        let currentDisabled = (json["disabled"] as? Bool) ?? ((json["disabled"] as? Int) == 1)
-        let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
-
-        if shouldTrip && !currentDisabled {
-            json["disabled"] = true
-            json["circuit_breaker_tripped"] = true
-            json["circuit_breaker_reason"] = reason
-            json["circuit_breaker_tripped_at"] = ISO8601DateFormatter().string(from: Date())
-            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            return CircuitBreakerResult(tripped: true, reason: reason)
-        } else if !shouldTrip && currentDisabled && isTrippedByBreaker {
-            // Auto-recovery when quota is healthy again (> 5%)
-            json["disabled"] = false
-            json["circuit_breaker_tripped"] = false
-            json["circuit_breaker_recovered_at"] = ISO8601DateFormatter().string(from: Date())
-            if let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
-            }
-            return CircuitBreakerResult(tripped: false, reason: "Quota recovered")
-        } else if currentDisabled && isTrippedByBreaker {
-            return CircuitBreakerResult(tripped: true, reason: json["circuit_breaker_reason"] as? String ?? reason)
-        }
-
         return nil
     }
 }
