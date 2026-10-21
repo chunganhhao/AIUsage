@@ -549,6 +549,13 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let isPartialByBreaker = json["circuit_breaker_partial"] as? Bool ?? false
         let previousPool = json["circuit_breaker_tripped_pool"] as? String
 
+        // BẢO VỆ BẮT BUỘC: Nếu tài khoản đang bị vô hiệu hóa THỦ CÔNG bởi người dùng
+        // (disabled == true nhưng không có cờ breaker), Circuit Breaker TUYỆT ĐỐI KHÔNG CAN THIỆP!
+        let isManuallyDisabled = currentDisabled && !isTrippedByBreaker
+        if isManuallyDisabled {
+            return nil
+        }
+
         func applyModelExclusion(excludingClaude: Bool, excludingGemini: Bool) {
             if let hints = json["antigravity_capability_hints"] as? [String: Any],
                let modelIDs = hints["model_ids"] as? [String] {
@@ -602,7 +609,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         var didChange = false
 
         if shouldTripTotal {
-            if !currentDisabled || !isTrippedByBreaker || isPartialByBreaker {
+            if !currentDisabled || isPartialByBreaker {
                 json["disabled"] = true
                 json["circuit_breaker_tripped"] = true
                 json["circuit_breaker_partial"] = false
@@ -619,11 +626,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         } else if shouldTripClaudeOnly {
             if currentDisabled && isTrippedByBreaker {
                 json["disabled"] = false
+                json["circuit_breaker_tripped"] = false
                 didChange = true
             }
             if !isPartialByBreaker || previousPool != "claude" {
-                json["disabled"] = false
-                json["circuit_breaker_tripped"] = false
                 json["circuit_breaker_partial"] = true
                 json["circuit_breaker_tripped_pool"] = "claude"
                 json["circuit_breaker_reason"] = reason
@@ -638,11 +644,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         } else if shouldTripGeminiOnly {
             if currentDisabled && isTrippedByBreaker {
                 json["disabled"] = false
+                json["circuit_breaker_tripped"] = false
                 didChange = true
             }
             if !isPartialByBreaker || previousPool != "gemini" {
-                json["disabled"] = false
-                json["circuit_breaker_tripped"] = false
                 json["circuit_breaker_partial"] = true
                 json["circuit_breaker_tripped_pool"] = "gemini"
                 json["circuit_breaker_reason"] = reason
