@@ -9,10 +9,10 @@ private let globalConfigLog = Logger(subsystem: "com.aiusage.desktop", category:
 
 struct GlobalConfigSection: View {
     @EnvironmentObject var viewModel: ProxyViewModel
+    @ObservedObject private var store = NodeProfileStore.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var showingEditor = false
 
-    private var store: NodeProfileStore { viewModel.profileStore }
     private var keyCount: Int { store.globalConfig.settings.count }
 
     var body: some View {
@@ -76,13 +76,21 @@ struct GlobalConfigSection: View {
         .sheet(isPresented: $showingEditor) {
             GlobalConfigEditorView(store: store)
         }
+        .alert(L("Could not apply common config", "通用配置未能应用"), isPresented: Binding(
+            get: { store.commonConfigError != nil },
+            set: { if !$0 { store.commonConfigError = nil } }
+        )) {
+            Button(L("OK", "确定"), role: .cancel) { store.commonConfigError = nil }
+        } message: {
+            Text(store.commonConfigError ?? "")
+        }
     }
 }
 
 // MARK: - Global Config Editor View (Sheet)
 
 private struct GlobalConfigEditorView: View {
-    let store: NodeProfileStore
+    @ObservedObject var store: NodeProfileStore
     @Environment(\.dismiss) private var dismiss
     @State private var jsonText = ""
     @State private var jsonError: String?
@@ -100,6 +108,13 @@ private struct GlobalConfigEditorView: View {
                     hasUnsavedChanges = true
                     showSaveSuccess = false
                 }
+            if let error = store.commonConfigError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+            }
             Divider()
             footerBar
         }
@@ -118,8 +133,8 @@ private struct GlobalConfigEditorView: View {
                 Text(L("Common Config", "通用配置"))
                     .font(.system(size: 13, weight: .semibold))
                 Text(L(
-                    "Shared fragment merged into settings.json on activation. Node values override.",
-                    "激活节点时合并写入 settings.json，节点配置优先级更高。"
+                    "Saved changes apply immediately to the active configuration. Node values override.",
+                    "保存或切换合并开关后立即更新已激活的配置；节点配置优先。"
                 ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -218,7 +233,7 @@ private struct GlobalConfigEditorView: View {
                 return
             }
             store.globalConfig.settings = dict
-            store.saveGlobalConfig()
+            guard store.saveGlobalConfig() else { return }
             jsonError = nil
             hasUnsavedChanges = false
             withAnimation(.easeInOut(duration: 0.25)) { showSaveSuccess = true }

@@ -392,7 +392,8 @@ final class OpenCodeConfigManager {
     /// - baseURL: 含 /v1 的本地代理地址（SDK 在其后拼 /chat/completions、/messages、/responses）。
     /// - clientKey: 固定 client key（写入受管块 apiKey；代理据此鉴权）。
     /// - virtualModel: 固定虚拟模型名（CLI 永远发它，由代理改写为激活节点真实模型）。
-    func activateGlobal(interface: OpenCodeProtocol, baseURL: String, clientKey: String, virtualModel: String) throws {
+    func activateGlobal(interface: OpenCodeProtocol, baseURL: String, clientKey: String, virtualModel: String,
+                        commonSettings: [String: Any]? = nil) throws {
         let model = virtualModel.nilIfBlank ?? "model"
         let hadSession = session != nil
         // v2 凭据在 opencode.db，不受 withManagedFilesTransaction 的文件快照保护，失败时需据此手动回滚。
@@ -402,7 +403,7 @@ final class OpenCodeConfigManager {
             try withManagedFilesTransaction {
                 guard authStore.removeManagedCredentials() else { throw OpenCodeConfigError.failedToWriteFile }
 
-                var root = pristine
+                var root = mergedBase(pristine: pristine, commonSettings: commonSettings)
                 if root["$schema"] == nil {
                     root["$schema"] = "https://opencode.ai/config.json"
                 }

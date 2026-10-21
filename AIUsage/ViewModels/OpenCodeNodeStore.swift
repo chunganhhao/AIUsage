@@ -47,6 +47,7 @@ final class OpenCodeNodeStore: ObservableObject {
     /// 通用配置片段（与 Claude 页同构）：激活时按节点合并策略深合并进受管层，
     /// 受管块与用户原文之间的中间层。持久化于 ~/.config/aiusage/opencode-global-config.json。
     @Published var globalConfig: GlobalConfig = .empty
+    @Published var commonConfigError: String?
     /// 多节点同时激活时顶层 model 指向的「默认模型节点」（独立于通用配置）。
     /// nil 表示未显式选择，重写受管配置时回退到节点列表中排第一个的激活节点。
     @Published private(set) var openCodeDefaultNodeId: String?
@@ -201,22 +202,25 @@ final class OpenCodeNodeStore: ObservableObject {
         globalConfig = config
     }
 
-    func saveGlobalConfig() {
+    @discardableResult
+    func saveGlobalConfig() -> Bool {
+        commonConfigError = nil
         do {
             let data = try globalConfig.toFileData()
             let dir = (Self.globalConfigPath as NSString).deletingLastPathComponent
             try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try data.write(to: URL(fileURLWithPath: Self.globalConfigPath), options: .atomic)
-        } catch {
-            openCodeStoreLog.error("Failed to save OpenCode global config: \(String(describing: error), privacy: .public)")
-        }
-        // 通用配置变化即时反映到生效中的节点（全量重写所有激活节点）。
-        if !activeNodeIds.isEmpty {
-            do {
+            // 全局代理与普通节点互斥；两条路径都只重写配置，不重启代理。
+            if GlobalProxyManager.opencode.isEnabled {
+                try GlobalProxyManager.opencode.reapplyCLIConfig()
+            } else if !activeNodeIds.isEmpty {
                 try rewriteManagedConfig()
-            } catch {
-                openCodeStoreLog.error("Failed to reapply common config: \(String(describing: error), privacy: .public)")
             }
+            return true
+        } catch {
+            commonConfigError = error.localizedDescription
+            openCodeStoreLog.error("Failed to save or apply OpenCode global config: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 

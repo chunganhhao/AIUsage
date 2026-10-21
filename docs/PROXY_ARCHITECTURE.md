@@ -724,9 +724,11 @@ usage 走**旁路解析**（非流式读响应体顶层 `usage`，流式读 `res
 
 Codex 与 Claude 一致采用「实时文件 + 受管理片段」双层心智，二者职责严格区分：
 
-- **通用配置基底**（`CodexGlobalConfig`，存 `~/.config/aiusage/codex-global-config.json`，由 `NodeProfileStore` 持久化）：带 `enabled`（Merge 开关）+ 原文 `tomlText`，仅在激活节点/订阅时合并写入 `config.toml`；类比 Claude 的 `GlobalConfig`/`settings.json` 片段。
+- **通用配置基底**（`CodexGlobalConfig`，存 `~/.config/aiusage/codex-global-config.json`，由 `NodeProfileStore` 持久化）：带 `enabled`（Merge 开关）+ 原文 `tomlText`；普通节点与全局代理激活时均合并写入 `config.toml`，保存或切换开关也会立即更新已激活的配置，不重启代理。没有激活节点时只保存片段，不接管客户端文件。
 - **节点原文 TOML**（`ProxySettings.extraTOML`）：单个 Codex 节点的额外顶层键，激活时与通用配置合并，**优先级更高**。
 - **`config.toml` 实时文件**：磁盘上真实生效的文件本身（含上面注入的受管理块），只读/编辑入口与上面两层解耦。
+
+三家的全局代理适配器均读取通用配置。Claude 遵循节点合并策略，采用「用户原文 ← 通用片段 ← 节点片段 ← Gateway 路由键」；`~/.claude/settings.aiusage-common.json` 仅记录被覆盖字段的原值与已应用值（0600），关闭合并、删除字段或断开时恢复原值，并保留不同于上次写入值的外部修改。OpenCode 继续复用现有备份/事务与节点合并策略。保存或应用失败返回失败并在编辑器/开关处提示，不显示虚假的保存成功。`bash scripts/run_common_config_regression.sh` 验证保存调用链、配置读回、优先级、关闭合并、JSONC 与错误路径。
 
 ### 鉴权链（两段密钥分离）
 

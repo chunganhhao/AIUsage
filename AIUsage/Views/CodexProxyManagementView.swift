@@ -399,6 +399,14 @@ struct CodexGlobalConfigSection: View {
         .sheet(isPresented: $showingFragmentEditor) {
             CodexGlobalConfigEditorView(store: store)
         }
+        .alert(L("Could not apply common config", "通用配置未能应用"), isPresented: Binding(
+            get: { store.commonConfigError != nil },
+            set: { if !$0 { store.commonConfigError = nil } }
+        )) {
+            Button(L("OK", "确定"), role: .cancel) { store.commonConfigError = nil }
+        } message: {
+            Text(store.commonConfigError ?? "")
+        }
     }
 
     // 通用配置基底片段卡片（Merge 开关 + 编辑原文 TOML）
@@ -412,7 +420,7 @@ struct CodexGlobalConfigSection: View {
                 Text(L("Common Config", "通用配置"))
                     .font(.subheadline.weight(.semibold))
                 Text(keyCount > 0
-                     ? L("\(keyCount) top-level entries · merged on activation", "\(keyCount) 个顶层条目 · 激活时合并")
+                     ? L("\(keyCount) top-level entries · live updates when active", "\(keyCount) 个顶层条目 · 激活期间即时更新")
                      : L("Not configured", "未配置"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)

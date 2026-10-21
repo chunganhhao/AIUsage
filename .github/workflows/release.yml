@@ -96,6 +96,10 @@ jobs:
         shell: bash
         run: bash scripts/run_global_proxy_cancellation_regression.sh
 
+      - name: Run common config regression
+        shell: bash
+        run: bash scripts/run_common_config_regression.sh
+
       # Import the stable self-signed code signing certificate (issue #35).
       # Skipped automatically if the secret is absent, in which case the
       # packaging script falls back to ad-hoc signing.

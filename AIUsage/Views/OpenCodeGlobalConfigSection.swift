@@ -75,13 +75,21 @@ struct OpenCodeGlobalConfigSection: View {
         .sheet(isPresented: $showingEditor) {
             OpenCodeGlobalConfigEditorView(store: store)
         }
+        .alert(L("Could not apply common config", "通用配置未能应用"), isPresented: Binding(
+            get: { store.commonConfigError != nil },
+            set: { if !$0 { store.commonConfigError = nil } }
+        )) {
+            Button(L("OK", "确定"), role: .cancel) { store.commonConfigError = nil }
+        } message: {
+            Text(store.commonConfigError ?? "")
+        }
     }
 }
 
 // MARK: - Editor Sheet
 
 private struct OpenCodeGlobalConfigEditorView: View {
-    let store: OpenCodeNodeStore
+    @ObservedObject var store: OpenCodeNodeStore
     @Environment(\.dismiss) private var dismiss
     @State private var jsonText = ""
     @State private var jsonError: String?
@@ -99,6 +107,13 @@ private struct OpenCodeGlobalConfigEditorView: View {
                     guard !isLoading else { return }
                     hasUnsavedChanges = true
                 }
+            if let error = store.commonConfigError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+            }
             Divider()
             footerBar
         }
@@ -115,8 +130,8 @@ private struct OpenCodeGlobalConfigEditorView: View {
                 Text(L("Common Config", "通用配置"))
                     .font(.system(size: 13, weight: .semibold))
                 Text(L(
-                    "AIUsage fragment merged into \(targetFileName) on activation (your config ← common ← managed node block).",
-                    "激活节点时，AIUsage 片段会合并进 \(targetFileName)（用户配置 ← 通用配置 ← 受管节点块）。"
+                    "Saved changes apply immediately to active \(targetFileName) (your config ← common ← managed node block).",
+                    "保存或切换合并开关后立即更新已激活的 \(targetFileName)（用户配置 ← 通用配置 ← 受管节点块）。"
                 ))
                 .font(.caption2)
                 .foregroundStyle(.secondary)
@@ -224,7 +239,7 @@ private struct OpenCodeGlobalConfigEditorView: View {
             return
         }
         store.globalConfig.settings = dict
-        store.saveGlobalConfig()
+        guard store.saveGlobalConfig() else { return }
         jsonError = nil
         hasUnsavedChanges = false
         dismiss()
