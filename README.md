@@ -58,13 +58,13 @@
   </tr>
   <tr>
     <td width="132" align="center">
-      <a href="https://api-aimodels.com/register?aff=DrSm"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
       <strong>Sucloud</strong>
     </td>
     <td>
       <strong>400+ models across text, image, video, and music.</strong><br>
       A multi-channel model hub with transparent pricing and broad coverage, including Claude official channels, AWSB, CCMax, Kiro, Seedance, Kling, Veo, HappyHorse, and more.<br>
-      <a href="https://api-aimodels.com/register?aff=DrSm"><strong>Visit Sucloud →</strong></a>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><strong>Visit Sucloud →</strong></a>
     </td>
   </tr>
   <tr>

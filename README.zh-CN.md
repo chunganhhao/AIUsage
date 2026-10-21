@@ -58,13 +58,13 @@
   </tr>
   <tr>
     <td width="132" align="center">
-      <a href="https://api-aimodels.com/register?aff=DrSm"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
       <strong>Sucloud</strong>
     </td>
     <td>
       <strong>覆盖文本、图像、视频与音乐的 400+ 模型平台。</strong><br>
       多渠道模型聚合、价格透明，覆盖 Claude 官方渠道、AWSB、CCMax、Kiro、Seedance、Kling、Veo、HappyHorse 等。<br>
-      <a href="https://api-aimodels.com/register?aff=DrSm"><strong>访问 Sucloud →</strong></a>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><strong>访问 Sucloud →</strong></a>
     </td>
   </tr>
   <tr>
