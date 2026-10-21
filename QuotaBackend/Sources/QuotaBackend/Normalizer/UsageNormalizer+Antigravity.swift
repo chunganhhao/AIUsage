@@ -58,11 +58,23 @@ extension UsageNormalizer {
             : "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first."
 
         let isTripped = (usage.extra["circuitBreakerTripped"]?.value as? Bool) == true
+        let isPartialTripped = (usage.extra["circuitBreakerPartialTripped"]?.value as? Bool) == true
+        let trippedPool = extraString(usage, "circuitBreakerTrippedPool")
+        let reason = extraString(usage, "circuitBreakerReason") ?? "Quota <= 5%"
+
         if isTripped {
             base.status = "watch"
             base.statusLabel = "Protected (CPA Paused)"
-            let reason = extraString(usage, "circuitBreakerReason") ?? "Quota <= 5%"
-            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục (> 5%), tài khoản sẽ tự động kích hoạt lại."
+            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt toàn bộ tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục (> 5%), tài khoản sẽ tự động kích hoạt lại."
+        } else if isPartialTripped {
+            base.status = "watch"
+            if trippedPool == "claude" {
+                base.statusLabel = "Claude Paused (Gemini Active)"
+                base.spotlight = "🛡️ Cầu dao thông minh (Đa tầng): Đã tạm ngắt model Claude khỏi CLIProxyAPI (\(reason)). Các model Gemini của tài khoản này vẫn hoạt động bình thường cho bot RonC & Hermes."
+            } else if trippedPool == "gemini" {
+                base.statusLabel = "Gemini Paused (Claude Active)"
+                base.spotlight = "🛡️ Cầu dao thông minh (Đa tầng): Đã tạm ngắt model Gemini khỏi CLIProxyAPI (\(reason)). Các model Claude của tài khoản này vẫn hoạt động bình thường."
+            }
         }
 
         return base
