@@ -1,4 +1,7 @@
 import Foundation
+#if canImport(QuotaBackend)
+import QuotaBackend
+#endif
 
 print("=== STARTING CIRCUIT BREAKER TESTS ===")
 
