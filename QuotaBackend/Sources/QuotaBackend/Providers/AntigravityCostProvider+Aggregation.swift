@@ -111,6 +111,8 @@ extension AntigravityCostProvider {
             var dict: [String: AnyCodable] = [
                 "bucket": AnyCodable(bucket.bucket),
                 "label": AnyCodable(bucket.label),
+                "usd": AnyCodable(bucket.estimatedCostUsd),
+                "tokens": AnyCodable(bucket.totalTokens),
                 "estimatedCostUsd": AnyCodable(bucket.estimatedCostUsd),
                 "totalTokens": AnyCodable(bucket.totalTokens)
             ]

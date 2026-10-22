@@ -141,7 +141,10 @@ struct DashboardView: View {
             HeatmapSpec(id: "codex-cost", providers: codexLocalProviders, label: "Codex", asset: "codex", accent: HeatmapBrandColor.codex(colorScheme)),
             HeatmapSpec(id: "opencode", providers: opencodeLocalProviders, label: "OpenCode", asset: "opencode", accent: HeatmapBrandColor.openCode(colorScheme)),
             HeatmapSpec(id: "antigravity-cost", providers: antigravityLocalProviders, label: "Antigravity", asset: "antigravity", accent: HeatmapBrandColor.antigravity(colorScheme))
-        ].filter { !$0.providers.isEmpty }
+        ].filter { spec in
+            guard let provider = spec.providers.first, let summary = provider.costSummary else { return false }
+            return (summary.overall?.tokens ?? 0) > 0 || (summary.overall?.usd ?? 0) > 0
+        }
     }
 
     private func heatmap(for spec: HeatmapSpec) -> some View {
