@@ -20,6 +20,7 @@ final class StubURLProtocol: URLProtocol {
     private static let lock = NSLock()
     private static var _hosts: [String] = []
     private static var _responses: [String: (status: Int, body: String)] = [:]
+    private static var _handlers: [String: (RecordedRequest) -> (status: Int, body: String)] = [:]
     private static var _requests: [RecordedRequest] = []
 
     /// Hosts match exactly or as a parent domain ("googleapis.com" covers "daily-cloudcode-pa.googleapis.com").
@@ -27,6 +28,7 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock {
             _hosts = hosts
             _responses = [:]
+            _handlers = [:]
             _requests = []
         }
         URLProtocol.registerClass(StubURLProtocol.self)
@@ -41,12 +43,19 @@ final class StubURLProtocol: URLProtocol {
         lock.withLock {
             _hosts = []
             _responses = [:]
+            _handlers = [:]
             _requests = []
         }
     }
 
     static func respond(_ url: String, status: Int = 200, body: String) {
         lock.withLock { _responses[url] = (status, body) }
+    }
+
+    /// Computes the response per request (e.g. from the Authorization header) and
+    /// may simulate side effects; takes precedence over `respond(_:status:body:)`.
+    static func respond(_ url: String, handler: @escaping (RecordedRequest) -> (status: Int, body: String)) {
+        lock.withLock { _handlers[url] = handler }
     }
 
     static var requests: [RecordedRequest] { lock.withLock { _requests } }
@@ -72,10 +81,11 @@ final class StubURLProtocol: URLProtocol {
             headers: request.allHTTPHeaderFields ?? [:],
             body: Self.readBody(request)
         )
-        let (status, text) = Self.lock.withLock { () -> (Int, String) in
+        let (handler, canned) = Self.lock.withLock { () -> (((RecordedRequest) -> (status: Int, body: String))?, (status: Int, body: String)) in
             Self._requests.append(recorded)
-            return Self._responses[key] ?? (404, "{}")
+            return (Self._handlers[key], Self._responses[key] ?? (404, "{}"))
         }
+        let (status, text) = handler?(recorded) ?? canned
         let response = HTTPURLResponse(url: url, statusCode: status, httpVersion: "HTTP/1.1",
                                        headerFields: ["Content-Type": "application/json"])!
         client?.urlProtocol(self, didReceive: response, cacheStoragePolicy: .notAllowed)

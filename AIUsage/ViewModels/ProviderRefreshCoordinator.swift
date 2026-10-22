@@ -54,6 +54,10 @@ final class ProviderRefreshCoordinator: ObservableObject {
     var providerTitleForId: (String) -> String = { $0 }
 
     private init() {
+        // 复制给内置 CPA 的 Codex 账号与订阅监控共用一条 refresh_token 链，刷新时要一起读写。
+        if let cliProxyPaths = try? CLIProxyPaths() {
+            CodexLinkedCredentialCopies.registerDirectory(cliProxyPaths.authDirectory)
+        }
         setupAutoRefresh()
         setupClaudeCodeAutoRefresh()
         setupCallAnalyticsAutoSync()

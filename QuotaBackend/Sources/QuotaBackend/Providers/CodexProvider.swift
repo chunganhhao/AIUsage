@@ -76,12 +76,19 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         var effectiveCreds = creds
         var proactiveRefreshFailure: ProviderError?
-        if !creds.isApiKeyMode, creds.needsRefresh, let refreshToken = creds.refreshToken {
+        let refreshPaths = credentialRefreshPaths(
+            credentialPath: credentialPath,
+            sourcePath: credential.metadata["sourcePath"],
+            credentialId: credential.id
+        )
+        // 有其他副本时每次都在锁内对齐一次（不需要刷新时不发网络请求），
+        // 已经分叉的副本不必等到下次刷新才修好。
+        if !creds.isApiKeyMode, creds.needsRefresh || refreshPaths.count > 1, let refreshToken = creds.refreshToken {
             do {
                 effectiveCreds = try await refreshCredentials(
                     creds,
                     refreshToken: refreshToken,
-                    persistTo: credentialRefreshPaths(credentialPath: credentialPath, sourcePath: credential.metadata["sourcePath"])
+                    persistTo: refreshPaths
                 )
             } catch let refreshError as ProviderError {
                 // A managed copy may hold a refresh token that another Codex
@@ -116,7 +123,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                     let refreshed = try await refreshCredentials(
                         effectiveCreds,
                         refreshToken: refreshToken,
-                        persistTo: credentialRefreshPaths(credentialPath: credentialPath, sourcePath: credential.metadata["sourcePath"])
+                        persistTo: refreshPaths,
+                        rejectedAccessToken: effectiveCreds.accessToken
                     )
                     refreshedCredentials = refreshed
                 } catch let refreshError as ProviderError {
@@ -428,24 +436,19 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             )
         }
 
-        let tokens = json["tokens"] as? [String: Any] ?? [:]
-        let accessToken = stringValue(tokens["access_token"])
-            ?? stringValue(tokens["accessToken"])
-            ?? stringValue(json["access_token"])
-            ?? stringValue(json["accessToken"])
+        // CPA 刷新时只改写顶层字段，嵌套 tokens 会留着旧值；两组都在时取签发时间更新的一组。
+        let nested = tokenFields(json["tokens"] as? [String: Any] ?? [:])
+        let flat = tokenFields(json)
+        let flatIsNewer = tokenIssuedAt(flat.access) > tokenIssuedAt(nested.access)
+        let primary = flatIsNewer ? flat : nested
+        let secondary = flatIsNewer ? nested : flat
 
-        guard let accessToken else {
+        guard let accessToken = primary.access ?? secondary.access else {
             throw ProviderError("missing_tokens", "\(path) exists but has no access token.")
         }
 
-        let refreshToken = stringValue(tokens["refresh_token"])
-            ?? stringValue(tokens["refreshToken"])
-            ?? stringValue(json["refresh_token"])
-            ?? stringValue(json["refreshToken"])
-        let idToken = stringValue(tokens["id_token"])
-            ?? stringValue(tokens["idToken"])
-            ?? stringValue(json["id_token"])
-            ?? stringValue(json["idToken"])
+        let refreshToken = primary.refresh ?? secondary.refresh
+        let idToken = primary.id ?? secondary.id
         let identity = CodexAccountIdentity(authJSON: json)
         let accountId = identity.accountId
         let accountEmail = stringValue(json["email"])
@@ -484,50 +487,113 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         )
     }
 
+    /// `rejectedAccessToken`：usage 接口刚拒绝的 token。它可能被上游提前作废，
+    /// 即使没到过期时间也不能再作为「已是最新」直接返回。
     private func refreshCredentials(
         _ creds: Credentials,
         refreshToken: String,
-        persistTo paths: [String]
+        persistTo paths: [String],
+        rejectedAccessToken: String? = nil
     ) async throws -> Credentials {
         let key = Self.refreshLockKey(creds: creds, path: paths.first, refreshToken: refreshToken)
         return try await CodexOAuthRefreshSerializer.shared.run(key: key) {
             try await self.performSerializedRefresh(
                 creds,
                 fallbackRefreshToken: refreshToken,
-                persistTo: paths
+                persistTo: paths,
+                rejectedAccessToken: rejectedAccessToken
             )
         }
     }
 
+    /// `paths` 是同一账号的全部副本，第一个是凭据自己的文件。锁内重读全部副本：
+    /// 等锁期间 CPA、Codex CLI 或并发请求可能已经轮换过 token，旧 refresh_token 不能再用。
     func performSerializedRefresh(
         _ creds: Credentials,
         fallbackRefreshToken: String,
-        persistTo paths: [String]
+        persistTo paths: [String],
+        rejectedAccessToken: String? = nil
     ) async throws -> Credentials {
-        var current = creds
-        if let path = paths.first, let disk = try? loadCredentials(from: path), !disk.isApiKeyMode {
-            guard canReuseCredentials(creds, disk) else {
-                throw ProviderError("account_mismatch", "The auth file now belongs to a different Codex account.")
-            }
-            current = disk
-            if !disk.needsRefresh {
-                return disk
-            }
+        let paths = uniqueRefreshPaths(paths)
+        var copies = try sameAccountCopies(of: creds, at: paths)
+        var current = freshest(copies.map(\.creds)) ?? creds
+        if current.accessToken != rejectedAccessToken, !current.needsRefresh {
+            syncStaleCopies(copies, to: current)
+            return current
         }
-        let token = current.refreshToken ?? fallbackRefreshToken
-        let refreshed = try await performOAuthRefresh(current, refreshToken: token)
-        for path in uniqueRefreshPaths(paths) {
-            persistRefreshedCredentials(refreshed, replacing: current, to: path)
+
+        var token = current.refreshToken ?? fallbackRefreshToken
+        let refreshed: Credentials
+        do {
+            refreshed = try await performOAuthRefresh(current, refreshToken: token)
+        } catch let error as ProviderError where Self.refreshTokenWasRejected(error) {
+            // 刷新请求期间其他副本可能刚用同一个 refresh_token 换到了新 token：采用它，不判失效。
+            copies = (try? sameAccountCopies(of: creds, at: paths)) ?? copies
+            guard let newer = freshest(copies.map(\.creds)),
+                  let newerToken = newer.refreshToken, newerToken != token else { throw error }
+            current = newer
+            if newer.accessToken != rejectedAccessToken, !newer.needsRefresh {
+                syncStaleCopies(copies, to: newer)
+                return newer
+            }
+            token = newerToken
+            refreshed = try await performOAuthRefresh(newer, refreshToken: token)
+        }
+        for copy in copies {
+            persistRefreshedCredentials(refreshed, replacing: copy.creds, to: copy.path)
         }
         return refreshed
     }
 
-    private func credentialRefreshPaths(credentialPath: String?, sourcePath: String?) -> [String] {
-        uniqueRefreshPaths([credentialPath, sourcePath].compactMap { raw in
+    private struct CredentialCopy {
+        let path: String
+        let creds: Credentials
+    }
+
+    /// 凭据自己的文件换了账号必须报错；其他副本换了账号只跳过，不读也不写。
+    private func sameAccountCopies(of creds: Credentials, at paths: [String]) throws -> [CredentialCopy] {
+        var copies: [CredentialCopy] = []
+        for (index, path) in paths.enumerated() {
+            guard let disk = try? loadCredentials(from: path), !disk.isApiKeyMode else { continue }
+            guard canReuseCredentials(creds, disk) else {
+                if index == 0 {
+                    throw ProviderError("account_mismatch", "The auth file now belongs to a different Codex account.")
+                }
+                continue
+            }
+            copies.append(CredentialCopy(path: path, creds: disk))
+        }
+        return copies
+    }
+
+    /// 签发时间最新的一份；时间相同保留靠前的（凭据自己的文件）。
+    private func freshest(_ candidates: [Credentials]) -> Credentials? {
+        candidates.reduce(nil) { best, candidate in
+            guard let best else { return candidate }
+            return tokenIssuedAt(candidate.accessToken) > tokenIssuedAt(best.accessToken) ? candidate : best
+        }
+    }
+
+    /// 把采用的 token 补写到更旧的副本，免得它们之后拿已作废的 refresh_token 去刷新。
+    private func syncStaleCopies(_ copies: [CredentialCopy], to adopted: Credentials) {
+        let adoptedAt = tokenIssuedAt(adopted.accessToken)
+        for copy in copies where copy.creds.accessToken != adopted.accessToken
+            && tokenIssuedAt(copy.creds.accessToken) < adoptedAt {
+            persistRefreshedCredentials(adopted, replacing: copy.creds, to: copy.path)
+        }
+    }
+
+    private static func refreshTokenWasRejected(_ error: ProviderError) -> Bool {
+        ["refresh_token_reused", "refresh_token_invalid", "refresh_token_expired"].contains(error.code)
+    }
+
+    private func credentialRefreshPaths(credentialPath: String?, sourcePath: String?, credentialId: String) -> [String] {
+        let local = [credentialPath, sourcePath].compactMap { raw -> String? in
             let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !trimmed.isEmpty else { return nil }
             return NSString(string: trimmed).expandingTildeInPath
-        })
+        }
+        return uniqueRefreshPaths(local + CodexLinkedCredentialCopies.paths(forCredentialId: credentialId))
     }
 
     private func uniqueRefreshPaths(_ paths: [String]) -> [String] {
@@ -625,17 +691,30 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
               canReuseCredentials(original, disk) else { return }
         guard var json = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return }
 
+        // CPA 副本同时带嵌套 tokens 和顶层字段（CPA 读顶层），两处都要写。
+        let hasNestedTokens = json["tokens"] is [String: Any]
         if var tokens = json["tokens"] as? [String: Any] {
             tokens["access_token"] = creds.accessToken
             if let rt = creds.refreshToken { tokens["refresh_token"] = rt }
             if let it = creds.idToken { tokens["id_token"] = it }
             json["tokens"] = tokens
-        } else {
+        }
+        if !hasNestedTokens || json["access_token"] != nil {
             json["access_token"] = creds.accessToken
             if let rt = creds.refreshToken { json["refresh_token"] = rt }
             if let it = creds.idToken { json["id_token"] = it }
         }
-        json["last_refresh"] = SharedFormatters.iso8601String(from: Date())
+        let payload = decodeJWTPayload(token: creds.accessToken)
+        if json["expired"] != nil {
+            if let exp = payload?["exp"] as? Double {
+                json["expired"] = SharedFormatters.iso8601String(from: Date(timeIntervalSince1970: exp))
+            } else {
+                json.removeValue(forKey: "expired")
+            }
+        }
+        // 采用其他副本的 token 时记录它的真实签发时间，按 last_refresh 判断刷新时才不会推迟。
+        let issuedAt = (payload?["iat"] as? Double).map { Date(timeIntervalSince1970: $0) }
+        json["last_refresh"] = SharedFormatters.iso8601String(from: min(issuedAt ?? Date(), Date()))
 
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
             guard FileManager.default.contents(atPath: path) == originalData else { return }
@@ -712,7 +791,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             let refreshed = try await refreshCredentials(
                 creds,
                 refreshToken: refreshToken,
-                persistTo: [authContext.url.path]
+                persistTo: [authContext.url.path],
+                rejectedAccessToken: creds.accessToken
             )
             let response = try await requestUsage(creds: refreshed, url: usageURL)
             return parseResponse(
@@ -941,6 +1021,26 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             return nil
         }
         return json
+    }
+
+    private struct TokenFields {
+        let access: String?
+        let refresh: String?
+        let id: String?
+    }
+
+    private func tokenFields(_ object: [String: Any]) -> TokenFields {
+        TokenFields(
+            access: stringValue(object["access_token"]) ?? stringValue(object["accessToken"]),
+            refresh: stringValue(object["refresh_token"]) ?? stringValue(object["refreshToken"]),
+            id: stringValue(object["id_token"]) ?? stringValue(object["idToken"])
+        )
+    }
+
+    /// access_token 的签发时间（iat，缺失时用 exp），用来比较同一账号哪份 token 更新。
+    private func tokenIssuedAt(_ accessToken: String?) -> Double {
+        let payload = decodeJWTPayload(token: accessToken)
+        return (payload?["iat"] as? Double) ?? (payload?["exp"] as? Double) ?? 0
     }
 
     private func decodeEmail(fromJWT token: String?) -> String? {
