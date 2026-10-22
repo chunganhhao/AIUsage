@@ -480,11 +480,33 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let models = parseModels(quotaResponse)
         guard !models.isEmpty else { return nil }
 
-        // Find the lowest remaining quota bucket
-        guard let lowest = models.min(by: { $0.remainingPercent < $1.remainingPercent }) else { return nil }
-        let minPercent = lowest.remainingPercent
-        let shouldTrip = minPercent <= 5.0
-        let reason = shouldTrip ? "\(lowest.label) còn \(Int(minPercent))% (<= 5%)" : "Tất cả hạn mức > 5%"
+        // Tiered circuit breaker evaluation:
+        // Weekly window: threshold <= 3.0%
+        // 5-Hour window (and other windows): threshold <= 5.0%
+        var trippedBucket: (model: ModelQuota, threshold: Double)?
+
+        for m in models {
+            let lower = (m.label + " " + m.id).lowercased()
+            let isWeekly = lower.contains("week")
+            let threshold = isWeekly ? 3.0 : 5.0
+            if m.remainingPercent <= threshold {
+                if let current = trippedBucket {
+                    if (m.remainingPercent - threshold) < (current.model.remainingPercent - current.threshold) {
+                        trippedBucket = (m, threshold)
+                    }
+                } else {
+                    trippedBucket = (m, threshold)
+                }
+            }
+        }
+
+        let shouldTrip = trippedBucket != nil
+        let reason: String
+        if let tripped = trippedBucket {
+            reason = "\(tripped.model.label) còn \(Int(tripped.model.remainingPercent))% (<= \(Int(tripped.threshold))%)"
+        } else {
+            reason = "Tất cả hạn mức an toàn (Weekly > 3%, 5h > 5%)"
+        }
 
         let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
             providerPrefix: "antigravity",

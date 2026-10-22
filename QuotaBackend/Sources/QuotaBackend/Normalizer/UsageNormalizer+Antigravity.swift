@@ -65,7 +65,7 @@ extension UsageNormalizer {
         if isTripped {
             base.status = "watch"
             base.statusLabel = "Protected (CPA Paused)"
-            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt toàn bộ tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục (> 5%), tài khoản sẽ tự động kích hoạt lại."
+            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt toàn bộ tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục, tài khoản sẽ tự động kích hoạt lại."
         } else if isPartialTripped {
             base.status = "watch"
             if trippedPool == "claude" {

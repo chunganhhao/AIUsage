@@ -961,12 +961,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             shouldTrip = true
             let label = primary.label ?? "Primary Window"
             reason = "\(label) còn \(Int(rem))% (<= 5%)"
-        } else if let secondary = usage.secondary, let rem = secondary.remainingPercent, rem <= 5.0 {
+        } else if let secondary = usage.secondary, let rem = secondary.remainingPercent, rem <= 3.0 {
             shouldTrip = true
             let label = secondary.label ?? "Weekly Window"
-            reason = "\(label) còn \(Int(rem))% (<= 5%)"
+            reason = "\(label) còn \(Int(rem))% (<= 3%)"
         } else {
-            reason = "Hạn mức bình thường (> 5%)"
+            reason = "Hạn mức an toàn (Weekly > 3%, Primary > 5%)"
         }
 
         let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
