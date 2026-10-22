@@ -84,22 +84,22 @@ let afterManualJSON = try! JSONSerialization.jsonObject(with: afterManualData) a
 assert(afterManualJSON["disabled"] as? Bool == true, "Test 4 FAILED: Must NOT re-enable manually disabled account")
 print("Test 4 (User manual disable protection): PASSED\n")
 
-// Test 5: Display threshold boundary test (Weekly 3% display, 5-Hour 5% display)
+// Test 5: Exact threshold boundary test (Weekly <= 3.0%, 5-Hour <= 5.0%)
 func evaluateTieredThreshold(remainingPercent: Double, isWeekly: Bool) -> Bool {
     let threshold: Double = isWeekly ? 3.0 : 5.0
-    return remainingPercent <= threshold || Int(remainingPercent) <= Int(threshold)
+    return remainingPercent <= threshold
 }
 
-// 5A: pbichafnh51 live case (3.1614% Weekly -> displays as 3% in UI)
-assert(evaluateTieredThreshold(remainingPercent: 3.1614915, isWeekly: true) == true, "Test 5A FAILED: 3.16% Weekly must trip")
-// 5B: 3.99% Weekly -> displays as 3% in UI
-assert(evaluateTieredThreshold(remainingPercent: 3.99, isWeekly: true) == true, "Test 5B FAILED: 3.99% Weekly must trip")
-// 5C: 4.0% Weekly -> displays as 4% in UI -> safe
-assert(evaluateTieredThreshold(remainingPercent: 4.0, isWeekly: true) == false, "Test 5C FAILED: 4.0% Weekly must not trip")
-// 5D: 5.2% 5-Hour -> displays as 5% in UI -> must trip
-assert(evaluateTieredThreshold(remainingPercent: 5.2, isWeekly: false) == true, "Test 5D FAILED: 5.2% 5-Hour must trip")
-// 5E: 6.0% 5-Hour -> displays as 6% in UI -> safe
-assert(evaluateTieredThreshold(remainingPercent: 6.0, isWeekly: false) == false, "Test 5E FAILED: 6.0% 5-Hour must not trip")
-print("Test 5 (Display threshold boundary 3%/5%): PASSED\n")
+// 5A: pbichafnh51 live case (3.1614% Weekly > 3.0% -> safe, stays active)
+assert(evaluateTieredThreshold(remainingPercent: 3.1614915, isWeekly: true) == false, "Test 5A FAILED: 3.16% Weekly must stay active")
+// 5B: Exact 3.0% Weekly -> trips breaker
+assert(evaluateTieredThreshold(remainingPercent: 3.0, isWeekly: true) == true, "Test 5B FAILED: 3.0% Weekly must trip")
+// 5C: 2.9% Weekly -> trips breaker
+assert(evaluateTieredThreshold(remainingPercent: 2.9, isWeekly: true) == true, "Test 5C FAILED: 2.9% Weekly must trip")
+// 5D: 5.2% 5-Hour -> safe, stays active
+assert(evaluateTieredThreshold(remainingPercent: 5.2, isWeekly: false) == false, "Test 5D FAILED: 5.2% 5-Hour must stay active")
+// 5E: Exact 5.0% 5-Hour -> trips breaker
+assert(evaluateTieredThreshold(remainingPercent: 5.0, isWeekly: false) == true, "Test 5E FAILED: 5.0% 5-Hour must trip")
+print("Test 5 (Strict float boundary Weekly <= 3.0%, 5-Hour <= 5.0%): PASSED\n")
 
 print("=== ALL 5 CIRCUIT BREAKER TESTS PASSED PERFECTLY! ===")

@@ -481,16 +481,15 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         guard !models.isEmpty else { return nil }
 
         // Tiered circuit breaker evaluation:
-        // Weekly window: threshold <= 3.0% (trips if <= 3.0% or displaying 3% in UI, i.e. Int(percent) <= 3)
-        // 5-Hour window (and other windows): threshold <= 5.0% (trips if <= 5.0% or displaying 5% in UI, i.e. Int(percent) <= 5)
+        // Weekly window: threshold <= 3.0%
+        // 5-Hour window (and other windows): threshold <= 5.0%
         var trippedBucket: (model: ModelQuota, threshold: Double)?
 
         for m in models {
             let lower = (m.label + " " + m.id).lowercased()
             let isWeekly = lower.contains("week")
             let threshold = isWeekly ? 3.0 : 5.0
-            let isTripped = m.remainingPercent <= threshold || Int(m.remainingPercent) <= Int(threshold)
-            if isTripped {
+            if m.remainingPercent <= threshold {
                 if let current = trippedBucket {
                     if (m.remainingPercent - threshold) < (current.model.remainingPercent - current.threshold) {
                         trippedBucket = (m, threshold)
