@@ -957,11 +957,11 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         var shouldTrip = false
         var reason = ""
 
-        if let primary = usage.primary, let rem = primary.remainingPercent, rem <= 5.0 {
+        if let primary = usage.primary, let rem = primary.remainingPercent, (rem <= 5.0 || Int(rem) <= 5) {
             shouldTrip = true
             let label = primary.label ?? "Primary Window"
             reason = "\(label) còn \(Int(rem))% (<= 5%)"
-        } else if let secondary = usage.secondary, let rem = secondary.remainingPercent, rem <= 3.0 {
+        } else if let secondary = usage.secondary, let rem = secondary.remainingPercent, (rem <= 3.0 || Int(rem) <= 3) {
             shouldTrip = true
             let label = secondary.label ?? "Weekly Window"
             reason = "\(label) còn \(Int(rem))% (<= 3%)"
