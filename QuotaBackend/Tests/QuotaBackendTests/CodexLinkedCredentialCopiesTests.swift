@@ -131,6 +131,34 @@ final class CodexLinkedCredentialCopiesTests: XCTestCase {
         XCTAssertEqual(CodexLinkedCredentialCopies.paths(forCredentialId: ""), [])
     }
 
+    /// 重新登录会换凭据 ID，CPA 副本上还是旧标记：按原生身份关联，但只认 AIUsage 复制过去的文件。
+    func testEarlierLoginMarkerLinksBySameIdentityOnly() throws {
+        let token = try accessToken("A0", issuedDaysAgo: 1)
+        let key = CodexAccountIdentity(accountId: "business-1", userId: "member-a").nativeKey
+        let previousLogin = try writeCPACopy(flat: (token, "R0"), nested: (token, "R0"), owner: "OLD-CRED", name: "a.json")
+        try writeCPACopy(flat: (token, "R0"), nested: (token, "R0"), owner: "OLD-CRED", user: "member-b", name: "b.json")
+        let cpaOwnLogin = cpaDirectory.appendingPathComponent("c.json")
+        var unmarked = try json(at: previousLogin)
+        unmarked.removeValue(forKey: "aiusage_credential_id")
+        try JSONSerialization.data(withJSONObject: unmarked).write(to: cpaOwnLogin)
+
+        XCTAssertEqual(CodexLinkedCredentialCopies.paths(forCredentialId: credentialId, nativeIdentityKey: key), [previousLogin.path])
+        XCTAssertEqual(CodexLinkedCredentialCopies.paths(forCredentialId: credentialId), [])
+    }
+
+    /// 线上实际情况：新版本刷新了监控副本，但 CPA 副本标记的是重新登录前的凭据，没被写回。
+    func testCopyMarkedWithEarlierCredentialIsHealedToo() async throws {
+        let consumed = try accessToken("A0", issuedDaysAgo: 8)
+        let fresh = try accessToken("A1", issuedDaysAgo: 0)
+        let own = try writeOwnCopy(access: fresh, refresh: "R1", refreshedDaysAgo: 0)
+        let cpa = try writeCPACopy(flat: (consumed, "R0"), nested: (consumed, "R0"), owner: "OLD-CRED")
+
+        _ = try await CodexProvider(homeDirectory: directory.path).fetchUsage(with: credential(for: own))
+
+        XCTAssertTrue(oauthRequests.isEmpty)
+        XCTAssertEqual(try CodexProvider().loadCredentials(from: cpa.path).refreshToken, "R1")
+    }
+
     /// CPA 已经轮换过 token（只改写顶层字段）：监控必须直接采用，不能再拿已作废的旧 refresh_token 去刷新。
     func testAdoptsNewerCPACopyInsteadOfReusingRotatedRefreshToken() async throws {
         let stale = try accessToken("A0", issuedDaysAgo: 9)

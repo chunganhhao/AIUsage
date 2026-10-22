@@ -79,7 +79,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         let refreshPaths = credentialRefreshPaths(
             credentialPath: credentialPath,
             sourcePath: credential.metadata["sourcePath"],
-            credentialId: credential.id
+            credentialId: credential.id,
+            nativeIdentityKey: CodexAccountIdentity(accountId: creds.accountId, userId: creds.jwtUserId).nativeKey
         )
         // 有其他副本时每次都在锁内对齐一次（不需要刷新时不发网络请求），
         // 已经分叉的副本不必等到下次刷新才修好。
@@ -587,13 +588,19 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         ["refresh_token_reused", "refresh_token_invalid", "refresh_token_expired"].contains(error.code)
     }
 
-    private func credentialRefreshPaths(credentialPath: String?, sourcePath: String?, credentialId: String) -> [String] {
+    private func credentialRefreshPaths(
+        credentialPath: String?,
+        sourcePath: String?,
+        credentialId: String,
+        nativeIdentityKey: String?
+    ) -> [String] {
         let local = [credentialPath, sourcePath].compactMap { raw -> String? in
             let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !trimmed.isEmpty else { return nil }
             return NSString(string: trimmed).expandingTildeInPath
         }
-        return uniqueRefreshPaths(local + CodexLinkedCredentialCopies.paths(forCredentialId: credentialId))
+        let linked = CodexLinkedCredentialCopies.paths(forCredentialId: credentialId, nativeIdentityKey: nativeIdentityKey)
+        return uniqueRefreshPaths(local + linked)
     }
 
     private func uniqueRefreshPaths(_ paths: [String]) -> [String] {
