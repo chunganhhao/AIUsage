@@ -141,7 +141,7 @@ final class ProviderRefreshCoordinator: ObservableObject {
             // hold up Claude's refresh. Each call goes through
             // `refreshingProviderIDs` so concurrent refreshes of the same
             // provider still deduplicate inside `refreshProviderNow`.
-            let active = ["claude", "codex-cost", "opencode"].filter(selectedProviderIds().contains)
+            let active = ["claude", "codex-cost", "opencode", "antigravity-cost"].filter(selectedProviderIds().contains)
             await withTaskGroup(of: Void.self) { group in
                 for providerId in active {
                     group.addTask { @MainActor [weak self] in

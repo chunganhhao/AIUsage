@@ -6,6 +6,7 @@ on:
     branches:
       - main
       - patch*
+      - personal-build
 
 permissions:
   contents: write
