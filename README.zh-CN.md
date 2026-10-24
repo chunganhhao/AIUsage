@@ -35,17 +35,6 @@
 <table>
   <tr>
     <td width="132" align="center">
-      <strong>Sidrune AI</strong>
-    </td>
-    <td>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><img src="docs/images/sidrune-ai-banner.png" alt="Sidrune AI — 一套 API 接入主流 AI 模型，注册获赠 3 美元额度。" width="100%"></a><br>
-      一套 API，接入 GPT、Claude 及其他主流 AI 模型。<br>
-      新用户注册即获赠 3 美元 API 额度。活动代码：<code>SDRAIUSAGE</code>。<br>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><strong>注册 Sidrune AI →</strong></a>
-    </td>
-  </tr>
-  <tr>
-    <td width="132" align="center">
       <a href="https://api-models.com/sign-up?aff=mfLW"><img src="docs/images/api-models-logo-light.png" alt="API Models" width="88"></a><br>
       <strong>API Models</strong>
     </td>

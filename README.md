@@ -35,17 +35,6 @@
 <table>
   <tr>
     <td width="132" align="center">
-      <strong>Sidrune AI</strong>
-    </td>
-    <td>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><img src="docs/images/sidrune-ai-banner.png" alt="Sidrune AI — One API. Every leading AI model. Sign up and get $3 credit." width="100%"></a><br>
-      One API for GPT, Claude, and other leading AI models.<br>
-      Sign up and get $3 in API credit. Promo: <code>SDRAIUSAGE</code>.<br>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><strong>Sign up with Sidrune AI →</strong></a>
-    </td>
-  </tr>
-  <tr>
-    <td width="132" align="center">
       <a href="https://api-models.com/sign-up?aff=mfLW"><img src="docs/images/api-models-logo-light.png" alt="API Models" width="88"></a><br>
       <strong>API Models</strong>
     </td>
