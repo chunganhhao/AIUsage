@@ -258,7 +258,8 @@ public enum UsageNormalizer {
             label: label,
             remainingPercent: remaining,
             usedPercent: window.usedPercent ?? remaining.map { 100 - $0 },
-            value: "\(formatInt(rem)) left",
+            // Copilot 允许超额：remaining 为负数时显示超出多少，而不是 "-740 left"。
+            value: rem < 0 ? "\(formatInt(-rem)) over" : "\(formatInt(rem)) left",
             note: note,
             resetAt: window.resetAt
         )

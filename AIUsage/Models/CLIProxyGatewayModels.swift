@@ -1349,6 +1349,8 @@ nonisolated struct CLIProxyAccountIdentity: Equatable, Sendable {
     let email: String?
     let planType: String?
 
+    /// 界面显示请用 `resolvedPlanDisplayName`（Codex 走 CodexProvider 的官方方案名）。
+    /// 本文件不 import QuotaBackend：CPA 回归脚本用 swiftc 单独编译它。
     var planDisplayName: String? {
         guard let planType else { return nil }
         switch planType.lowercased() {

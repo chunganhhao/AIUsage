@@ -45,15 +45,21 @@ enum ClaudeSettingsError: LocalizedError {
 class ClaudeSettingsManager {
     static let shared = ClaudeSettingsManager()
 
+    private let directory: URL
+
+    init(directory: URL = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".claude")) {
+        self.directory = directory
+    }
+
     private var settingsPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return (home as NSString).appendingPathComponent(".claude/settings.json")
+        directory.appendingPathComponent("settings.json").path
     }
 
     private var backupPath: String {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return (home as NSString).appendingPathComponent(".claude/settings.backup.json")
+        directory.appendingPathComponent("settings.backup.json").path
     }
+
+    private var overlayStateURL: URL { directory.appendingPathComponent("settings.aiusage-common.json") }
 
     func readSettings() throws -> [String: Any] {
         guard let data = FileManager.default.contents(atPath: settingsPath) else {
@@ -124,9 +130,18 @@ class ClaudeSettingsManager {
         var nodeExtraCACerts: String?
     }
 
-    /// Legacy partial write: only updates managed env keys + model (kept for backward compat).
-    func writeEnv(_ config: EnvConfig) throws {
-        var settings = try readSettings()
+    /// 通用/节点片段先合并，路由键最后写入；保留用户其它设置。
+    func writeEnv(_ config: EnvConfig, settingsOverlay: [String: Any]? = nil) throws {
+        let original = try removingPreviousOverlay(from: readSettings())
+        var overlay = settingsOverlay ?? [:]
+        overlay.removeValue(forKey: "model")
+        if var env = overlay["env"] as? [String: Any] {
+            for key in managedEnvKeys { env.removeValue(forKey: key) }
+            // Gateway 使用自己的 token，不能被节点遗留的 API key 抢占。
+            env.removeValue(forKey: "ANTHROPIC_API_KEY")
+            overlay["env"] = env
+        }
+        var settings = GlobalConfig.deepMerge(base: original, override: overlay)
         var env = settings["env"] as? [String: Any] ?? [:]
 
         let routeDescription = AppSettings.shared.t(
@@ -180,7 +195,28 @@ class ClaudeSettingsManager {
             settings.removeValue(forKey: "model")
         }
 
-        try writeSettings(settings)
+        settings = try preserveSubscriptionStatusLine(settings)
+        // 只记录片段覆盖的字段；重启后关闭合并/删除字段也能恢复原值。
+        // 文件写入失败时回滚记录，不将未应用的片段当作已生效。
+        let previousState = try readOverlayStateData()
+        let state: [String: Any] = [
+            "original": Self.overlayProjection(original, keys: overlay),
+            "applied": Self.overlayProjection(settings, keys: overlay),
+        ]
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let stateData = try JSONSerialization.data(withJSONObject: state, options: [.sortedKeys])
+        do {
+            try stateData.write(to: overlayStateURL, options: .atomic)
+            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: overlayStateURL.path)
+            try writeSettings(settings)
+        } catch {
+            if let previousState {
+                try previousState.write(to: overlayStateURL, options: .atomic)
+            } else if FileManager.default.fileExists(atPath: overlayStateURL.path) {
+                try FileManager.default.removeItem(at: overlayStateURL)
+            }
+            throw error
+        }
     }
 
     /// Claude Code accepts only low...xhigh as a durable settings value.
@@ -204,16 +240,18 @@ class ClaudeSettingsManager {
         try writeSettings(settings)
     }
 
-    /// Full replacement write: backs up current file, then writes the entire settings dict.
-    func writeFullSettings(_ settings: [String: Any]) throws {
+    /// Full replacement write: backs up current file (unless reapplying while already active), then writes the entire settings dict.
+    func writeFullSettings(_ settings: [String: Any], preserveExistingBackup: Bool = false) throws {
         let preserved = try preserveSubscriptionStatusLine(settings)
-        backupCurrentSettings()
+        if !preserveExistingBackup {
+            backupCurrentSettings()
+        }
         try writeSettings(preserved)
         claudeSettingsLog.info("Full settings.json replacement written successfully")
     }
 
     func clearEnv() throws {
-        var settings = try readSettings()
+        var settings = try removingPreviousOverlay(from: readSettings())
         var env = settings["env"] as? [String: Any] ?? [:]
         for key in managedEnvKeys {
             env.removeValue(forKey: key)
@@ -221,6 +259,55 @@ class ClaudeSettingsManager {
         settings["env"] = env
         settings.removeValue(forKey: "model")
         try writeSettings(settings)
+        if FileManager.default.fileExists(atPath: overlayStateURL.path) {
+            try FileManager.default.removeItem(at: overlayStateURL)
+        }
+    }
+
+    private func readOverlayStateData() throws -> Data? {
+        guard FileManager.default.fileExists(atPath: overlayStateURL.path) else { return nil }
+        return try Data(contentsOf: overlayStateURL)
+    }
+
+    private func removingPreviousOverlay(from current: [String: Any]) throws -> [String: Any] {
+        guard let data = try readOverlayStateData() else { return current }
+        guard let state = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let original = state["original"] as? [String: Any],
+              let applied = state["applied"] as? [String: Any] else {
+            throw ClaudeSettingsError.unreadableSettings
+        }
+        return Self.removingOverlay(current: current, original: original, applied: applied)
+    }
+
+    /// 只还原仍等于上次写入值的字段，保留用户在外部修改的值及新增字段。
+    private static func removingOverlay(current: [String: Any], original: [String: Any],
+                                        applied: [String: Any]) -> [String: Any] {
+        var result = current
+        for (key, value) in applied {
+            guard let live = current[key] else { continue }
+            if let liveObject = live as? [String: Any], let appliedObject = value as? [String: Any],
+               original[key] == nil || original[key] is [String: Any] {
+                let restored = removingOverlay(current: liveObject,
+                                               original: original[key] as? [String: Any] ?? [:],
+                                               applied: appliedObject)
+                result[key] = restored.isEmpty && original[key] == nil ? nil : restored
+            } else if NSDictionary(dictionary: [key: live]).isEqual(to: [key: value]) {
+                result[key] = original[key]
+            }
+        }
+        return result
+    }
+
+    private static func overlayProjection(_ source: [String: Any], keys: [String: Any]) -> [String: Any] {
+        var result: [String: Any] = [:]
+        for (key, value) in keys {
+            if let nested = value as? [String: Any], let sourceObject = source[key] as? [String: Any] {
+                result[key] = overlayProjection(sourceObject, keys: nested)
+            } else {
+                result[key] = source[key]
+            }
+        }
+        return result
     }
 
     /// Restore settings.json from the backup created before the last full write.

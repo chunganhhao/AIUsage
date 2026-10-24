@@ -11,7 +11,8 @@ extension UsageNormalizer {
         let planNote = extraString(usage, "planNote")
 
         var windows: [WindowInfo] = []
-        if let w = usage.primary   { windows.append(createEntitlementWindow(label: "Premium", window: w)) }
+        let premiumLabel = extraString(usage, "premiumUnit") == "credits" ? "AI Credits" : "Premium"
+        if let w = usage.primary   { windows.append(createEntitlementWindow(label: premiumLabel, window: w)) }
         if let w = usage.secondary { windows.append(createEntitlementWindow(label: "Chat", window: w)) }
         if let w = usage.tertiary  { windows.append(createEntitlementWindow(label: "Completions", window: w)) }
 

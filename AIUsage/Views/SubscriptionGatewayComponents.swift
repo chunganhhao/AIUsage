@@ -455,7 +455,7 @@ func gatewayNativeIdentitySummary(_ identity: CLIProxyAccountIdentity?) -> Strin
     switch identity.providerID.lowercased() {
     case "codex":
         var parts: [String] = []
-        if let plan = identity.planDisplayName {
+        if let plan = identity.resolvedPlanDisplayName {
             parts.append(L("\(plan) plan", "\(plan) 套餐"))
         }
         if let accountID = identity.shortAccountID {

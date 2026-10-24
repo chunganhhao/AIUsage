@@ -74,15 +74,12 @@ enum ProviderAuthManager {
             )
         case "warp":
             return ProviderAuthPlan(
-                method: .desktopApp,
-                summary: L("Reads quota straight from the Warp app — no keys or passwords.",
-                           "直接读取 Warp 应用中的额度，无需填写任何凭证。"),
-                signInTitle: L("Open Warp", "打开 Warp"),
-                signedOutTitle: L("Warp isn't signed in on this Mac", "本机未检测到 Warp 登录"),
-                signedOutDetail: L("Open Warp and sign in. AIUsage detects it and connects automatically.",
-                                   "打开 Warp 并登录，AIUsage 检测到后会自动接入。"),
-                appBundleIdentifier: "dev.warp.Warp-Stable",
-                downloadURL: URL(string: "https://www.warp.dev")
+                method: .apiKey,
+                summary: L("Paste a personal Warp API key (wk-…) to track your credits through Warp's official API, including bonus credits.",
+                           "粘贴 Warp 个人 API Key（wk-…），通过 Warp 官方接口追踪积分，含奖励积分。"),
+                signInTitle: L("Connect", "连接"),
+                signedOutTitle: L("No Warp API key found", "未找到 Warp API Key"),
+                signedOutDetail: ""
             )
         case "kimi":
             return ProviderAuthPlan(

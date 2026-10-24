@@ -14,7 +14,7 @@ public struct KiroProvider: MultiAccountProviderFetcher, CredentialAcceptingProv
 
     static let defaultRegion = "us-east-1"
     static let refreshBufferSeconds: TimeInterval = 5 * 60
-    static let kiroVersion = "0.10.32"
+    static let kiroVersion = "0.11.132"
 
     public var supportedAuthMethods: [AuthMethod] { [.authFile, .auto] }
 

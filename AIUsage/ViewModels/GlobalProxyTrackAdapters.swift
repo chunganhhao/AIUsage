@@ -132,11 +132,14 @@ struct CodexGlobalProxyAdapter: GlobalProxyTrackAdapter {
     func adminPath(config: GlobalProxyConfig) -> String { "/__aiusage/admin/codex-upstream" }
 
     func activateCLIConfig(_ config: GlobalProxyConfig) throws {
+        let store = NodeProfileStore.shared
         try CodexConfigManager.shared.activate(
             baseURL: config.codexBaseURL,
             bearerToken: config.effectiveClientKey,
             model: config.virtualModel,
-            restrictModelCatalog: true
+            restrictModelCatalog: true,
+            globalTOML: store.codexGlobalConfig.hasContent ? store.codexGlobalConfig.tomlText : nil,
+            nodeTOML: config.activeNodeId.flatMap { store.profile(for: $0)?.metadata.proxy.extraTOML?.nilIfBlank }
         )
     }
 
@@ -324,6 +327,14 @@ struct ClaudeGlobalProxyAdapter: GlobalProxyTrackAdapter {
 
     func activateCLIConfig(_ config: GlobalProxyConfig) throws {
         guard track == .claude else { return }
+        let store = NodeProfileStore.shared
+        let profile = config.activeNodeId.flatMap { store.profile(for: $0) }
+        let mergeCommon = profile?.metadata.proxy.shouldMergeClaudeCommonConfig(globalEnabled: store.globalConfig.enabled)
+            ?? store.globalConfig.enabled
+        let settings = GlobalConfig.deepMerge(
+            base: mergeCommon ? store.globalConfig.settings : [:],
+            override: profile?.settings ?? [:]
+        )
         let activeNode = node(config.activeNodeId ?? "")
         let routes = activeNode.map { config.effectiveClaudeCodeModels(for: $0) }
         let smartRoutes = config.effectiveClaudeCodeCatalogMode == .smartRoutes
@@ -341,7 +352,7 @@ struct ClaudeGlobalProxyAdapter: GlobalProxyTrackAdapter {
             // it so the stable Default route is restored as a known model.
             enableGatewayModelDiscovery: true,
             nodeExtraCACerts: nil
-        ))
+        ), settingsOverlay: settings)
     }
 
     func restoreCLIConfig() throws {
@@ -496,11 +507,16 @@ struct OpenCodeGlobalProxyAdapter: GlobalProxyTrackAdapter {
     }
 
     func activateCLIConfig(_ config: GlobalProxyConfig) throws {
+        let store = OpenCodeNodeStore.shared
+        let commonSettings = config.activeNodeId.flatMap { id in
+            store.nodes.first { $0.id == id }.flatMap { store.commonSettings(for: $0) }
+        }
         try OpenCodeConfigManager.shared.activateGlobal(
             interface: config.effectiveOpenCodeInterface,
             baseURL: config.codexBaseURL,
             clientKey: config.effectiveClientKey,
-            virtualModel: config.virtualModel
+            virtualModel: config.virtualModel,
+            commonSettings: commonSettings
         )
     }
 

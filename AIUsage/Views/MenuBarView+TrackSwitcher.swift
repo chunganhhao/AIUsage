@@ -149,8 +149,10 @@ extension MenuBarView {
                     rows: subEntries.map { entry in
                         let isActive = activeId == nil
                             && ProviderActivationManager.shared.isActiveAccount(entry)
+                        let viewOnly = ProviderActivationManager.shared.isRemoteViewOnly(entry)
                         return MenuBarTrackPanelRow(id: entry.id, name: entry.accountPrimaryLabel,
-                                                    isActive: isActive) {
+                                                    subtitle: viewOnly ? ProviderActivationManager.remoteViewOnlyLabel : nil,
+                                                    isActive: isActive, isDisabled: viewOnly) {
                             try? ProviderActivationManager.shared.activateAccount(entry: entry)
                             closePanel()
                         }

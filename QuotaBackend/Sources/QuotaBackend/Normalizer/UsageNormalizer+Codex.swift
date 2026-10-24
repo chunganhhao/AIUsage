@@ -10,7 +10,11 @@ extension UsageNormalizer {
         if let w = usage.secondary { windows.append(createPercentWindow(label: w.label ?? "Weekly Window", window: w)) }
         if let w = usage.tertiary  { windows.append(createPercentWindow(label: "Code Review", window: w)) }
 
+        // 月度消费上限计入告警；按模型的额外限额只列在末尾，和官方 TUI 一样不影响账号状态。
+        let extraWindows = codexExtraWindows(usage)
+        windows += extraWindows.filter(\.affectsStatus).map(\.info)
         let remainingPercent = pickSmallestRemaining(windows)
+        windows += extraWindows.filter { !$0.affectsStatus }.map(\.info)
         let (status, statusLabel) = resolveStatus(remainingPercent)
         let plan = usage.accountPlan.map { titleCase($0) } ?? "Unknown"
 
@@ -42,6 +46,9 @@ extension UsageNormalizer {
         if wsType != "Personal" {
             metrics.append(MetricInfo(label: "Workspace", value: wsType))
         }
+        if let credits = extraString(usage, "credits") {
+            metrics.append(MetricInfo(label: "Credits", value: credits))
+        }
         metrics.append(MetricInfo(label: "Source", value: formatSourceLabel(usage.source)))
         base.metrics = metrics
 
@@ -57,5 +64,22 @@ extension UsageNormalizer {
         }
 
         return base
+    }
+
+    private static func codexExtraWindows(_ usage: ProviderUsage) -> [(info: WindowInfo, affectsStatus: Bool)] {
+        guard let items = usage.extra["extraWindows"]?.value as? [AnyCodable] else { return [] }
+        return items.compactMap { item in
+            guard let dict = item.value as? [String: AnyCodable],
+                  let label = dict["label"]?.value as? String,
+                  // AnyCodable 解码时先试 Int：整数百分比经过一次编解码会变成 Int。
+                  let usedPercent = (dict["usedPercent"]?.value as? NSNumber)?.doubleValue else { return nil }
+            var window = RawQuotaWindow()
+            window.usedPercent = usedPercent
+            window.remainingPercent = max(0, 100 - usedPercent)
+            window.resetAt = (dict["resetAt"]?.value as? String).flatMap { $0.isEmpty ? nil : $0 }
+            window.resetDescription = (dict["resetDescription"]?.value as? String).flatMap { $0.isEmpty ? nil : $0 }
+            let affectsStatus = dict["affectsStatus"]?.value as? Bool ?? false
+            return (createPercentWindow(label: label, window: window), affectsStatus)
+        }
     }
 }

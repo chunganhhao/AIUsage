@@ -79,20 +79,42 @@ extension AntigravityCostProvider {
     }
 
     func scanFiles(_ files: [String]) -> [String: CodexAggregateBucket] {
+        let byFile = scanFilesByPath(files)
         var out: [String: CodexAggregateBucket] = [:]
+        for fileBuckets in byFile.values {
+            for (dKey, bucket) in fileBuckets {
+                out[dKey, default: .empty].merge(bucket)
+            }
+        }
+        return out
+    }
+
+    static func canonicalTranscriptKey(_ filePath: String) -> String {
+        if filePath.hasSuffix("/transcript_full.jsonl") {
+            return String(filePath.dropLast("/transcript_full.jsonl".count)) + "/transcript.jsonl"
+        }
+        if filePath == "transcript_full.jsonl" {
+            return "transcript.jsonl"
+        }
+        return filePath
+    }
+
+    func scanFilesByPath(_ files: [String]) -> [String: [String: CodexAggregateBucket]] {
+        var out: [String: [String: CodexAggregateBucket]] = [:]
 
         for filePath in files {
+            let key = Self.canonicalTranscriptKey(filePath)
             #if canImport(Darwin)
             autoreleasepool {
                 let fileBuckets = processFile(filePath)
-                for (dKey, bucket) in fileBuckets {
-                    out[dKey, default: .empty].merge(bucket)
+                if !fileBuckets.isEmpty {
+                    out[key] = fileBuckets
                 }
             }
             #else
             let fileBuckets = processFile(filePath)
-            for (dKey, bucket) in fileBuckets {
-                out[dKey, default: .empty].merge(bucket)
+            if !fileBuckets.isEmpty {
+                out[key] = fileBuckets
             }
             #endif
         }
@@ -105,19 +127,17 @@ extension AntigravityCostProvider {
             return [:]
         }
 
-        var detectedModel = "gemini-3.8-flash"
-        if content.contains("`Model Selection` from None to Gemini 2.5 Flash") || content.contains("gemini-2.5-flash") {
-            detectedModel = "gemini-2.5-flash"
-        } else if content.contains("`Model Selection` from None to Gemini 2.5 Pro") || content.contains("gemini-2.5-pro") {
-            detectedModel = "gemini-2.5-pro"
-        } else if content.contains("Claude 3.7 Sonnet") || content.contains("claude-3-7-sonnet") {
-            detectedModel = "claude-3.7-sonnet"
-        }
-
-        let modelKey = detectedModel + Self.nonProxySourceSuffix
+        var currentModelKey = "gemini-3.8-flash" + Self.nonProxySourceSuffix
         var fileOut: [String: CodexAggregateBucket] = [:]
 
         content.enumerateLines { line, _ in
+            if line.contains("\"USER_INPUT\""),
+               line.contains("<USER_SETTINGS_CHANGE>"),
+               line.contains("Model Selection"),
+               let updatedModel = Self.extractSelectedModel(from: line) {
+                currentModelKey = updatedModel + Self.nonProxySourceSuffix
+            }
+
             guard line.contains("\"PLANNER_RESPONSE\"") && line.contains("\"input_tokens\"") else {
                 return
             }
@@ -142,20 +162,92 @@ extension AntigravityCostProvider {
 
             let dKey = self.dayKey(createdAt)
             var bucket = fileOut[dKey] ?? .empty
-            var m = bucket.models[modelKey] ?? CodexModelAggregate(model: modelKey)
+            var m = bucket.models[currentModelKey] ?? CodexModelAggregate(model: currentModelKey)
             m.inputTokens += inTokens
             m.outputTokens += outTokens
             m.cacheReadTokens += cacheRead
             m.totalTokens += total
             m.estimatedCostUsd = 0
 
-            bucket.models[modelKey] = m
+            bucket.models[currentModelKey] = m
             bucket.totalTokens += total
             bucket.usageRows += 1
             fileOut[dKey] = bucket
         }
 
         return fileOut
+    }
+
+    static func extractSelectedModel(from line: String) -> String? {
+        guard line.contains("<USER_SETTINGS_CHANGE>"),
+              let markerRange = line.range(of: "Model Selection") else { return nil }
+        let tail = line[markerRange.upperBound...]
+        guard let toRange = tail.range(of: " to ") else { return nil }
+        let afterTo = tail[toRange.upperBound...]
+        let rawModel: Substring
+        if let dotRange = afterTo.range(of: ". No need") {
+            rawModel = afterTo[..<dotRange.lowerBound]
+        } else if let escapedNewline = afterTo.range(of: "\\n") {
+            rawModel = afterTo[..<escapedNewline.lowerBound]
+        } else if let newline = afterTo.range(of: "\n") {
+            rawModel = afterTo[..<newline.lowerBound]
+        } else if let closeTag = afterTo.range(of: "</USER_SETTINGS_CHANGE>") {
+            rawModel = afterTo[..<closeTag.lowerBound]
+        } else {
+            rawModel = afterTo
+        }
+        let trimmed = String(rawModel).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        return normalizeSelectedModelName(trimmed)
+    }
+
+    static func normalizeSelectedModelName(_ raw: String) -> String? {
+        let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !cleaned.isEmpty, cleaned != "none" else { return nil }
+        if cleaned.contains("gemini 4 argon") || cleaned.contains("gemini-4-argon") {
+            return "gemini-4-argon"
+        }
+        if cleaned.contains("gemini 3.8 flash") || cleaned.contains("gemini-3.8-flash") {
+            return "gemini-3.8-flash"
+        }
+        if cleaned.contains("gemini 3.1 pro") || cleaned.contains("gemini-3.1-pro") {
+            return "gemini-3.1-pro"
+        }
+        if cleaned.contains("gemini 3 pro") || cleaned.contains("gemini-3-pro") {
+            return "gemini-3-pro"
+        }
+        if cleaned.contains("gemini 2.5 pro") || cleaned.contains("gemini-2.5-pro") {
+            return "gemini-2.5-pro"
+        }
+        if cleaned.contains("gemini 2.5 flash") || cleaned.contains("gemini-2.5-flash") {
+            return "gemini-2.5-flash"
+        }
+        if cleaned.contains("claude opus 4.6") || cleaned.contains("claude-opus-4-6") || cleaned.contains("claude-opus-4.6") {
+            return "claude-opus-4.6"
+        }
+        if cleaned.contains("claude sonnet 4.6") || cleaned.contains("claude-sonnet-4-6") || cleaned.contains("claude-sonnet-4.6") {
+            return "claude-sonnet-4.6"
+        }
+        if cleaned.contains("claude 3.7 sonnet") || cleaned.contains("claude-3-7-sonnet") || cleaned.contains("claude-3.7-sonnet") {
+            return "claude-3.7-sonnet"
+        }
+        if cleaned.contains("gpt-oss") {
+            return "gpt-oss-120b"
+        }
+        // Fallback for any newly introduced model in <USER_SETTINGS_CHANGE>:
+        // strip trailing parenthetical mode tags like "(high)" or "(thinking)" and slugify,
+        // so new models never inherit the previous model's token attribution.
+        let withoutParen: String
+        if let parenIndex = cleaned.firstIndex(of: "(") {
+            withoutParen = String(cleaned[..<parenIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            withoutParen = cleaned
+        }
+        let slug = withoutParen
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        return slug.isEmpty ? "unknown-model" : slug
     }
 
     // MARK: - Proxy Archive

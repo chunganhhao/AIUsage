@@ -21,6 +21,7 @@ class NodeProfileStore: ObservableObject {
     @Published var activatedProfileId: String?
     @Published var globalConfig: GlobalConfig = .empty
     @Published var codexGlobalConfig: CodexGlobalConfig = .empty
+    @Published var commonConfigError: String?
 
     private let fileManager = FileManager.default
 
@@ -511,6 +512,7 @@ class NodeProfileStore: ObservableObject {
 
     @discardableResult
     func saveGlobalConfig(_ config: GlobalConfig? = nil) -> Bool {
+        commonConfigError = nil
         if let config { globalConfig = config }
         let path = Self.globalConfigPath
         do {
@@ -518,8 +520,10 @@ class NodeProfileStore: ObservableObject {
             let dir = (path as NSString).deletingLastPathComponent
             try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try reapplyCommonConfig(isCodex: false)
             return true
         } catch {
+            commonConfigError = error.localizedDescription
             storeLog.error("Failed to save global config: \(String(describing: error), privacy: .public)")
             return false
         }
@@ -543,6 +547,7 @@ class NodeProfileStore: ObservableObject {
 
     @discardableResult
     func saveCodexGlobalConfig(_ config: CodexGlobalConfig? = nil) -> Bool {
+        commonConfigError = nil
         if let config { codexGlobalConfig = config }
         let path = Self.codexGlobalConfigPath
         do {
@@ -550,10 +555,48 @@ class NodeProfileStore: ObservableObject {
             let dir = (path as NSString).deletingLastPathComponent
             try fileManager.createDirectory(atPath: dir, withIntermediateDirectories: true)
             try data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            try reapplyCommonConfig(isCodex: true)
             return true
         } catch {
+            commonConfigError = error.localizedDescription
             storeLog.error("Failed to save Codex global config: \(String(describing: error), privacy: .public)")
             return false
+        }
+    }
+
+    /// 只更新当前接管的客户端配置，不启停或切换代理进程。
+    private func reapplyCommonConfig(isCodex: Bool) throws {
+        let gateway = isCodex ? GlobalProxyManager.codex : GlobalProxyManager.claude
+        if gateway.isEnabled {
+            try gateway.reapplyCLIConfig()
+            return
+        }
+        let viewModel = ProxyViewModel.shared
+        guard let id = viewModel.activatedId(isCodex: isCodex),
+              let config = viewModel.configurations.first(where: { $0.id == id }),
+              let profile = profile(for: id) else { return }
+        if isCodex {
+            let scheme = config.enableHTTPS ? "https" : "http"
+            let port = config.enableHTTPS ? config.effectiveHTTPSPort : config.port
+            try CodexConfigManager.shared.activate(
+                baseURL: "\(scheme)://\(config.host):\(port)/v1",
+                bearerToken: config.effectiveClientKey,
+                model: config.codexModel,
+                globalTOML: codexGlobalConfig.hasContent ? codexGlobalConfig.tomlText : nil,
+                nodeTOML: profile.metadata.proxy.extraTOML?.nilIfBlank
+            )
+        } else {
+            let mergeCommon = profile.metadata.proxy.shouldMergeClaudeCommonConfig(globalEnabled: globalConfig.enabled)
+            var settings = GlobalConfig.deepMerge(
+                base: mergeCommon ? globalConfig.settings : [:], override: profile.settings
+            )
+            if config.enableHTTPS {
+                var env = settings["env"] as? [String: Any] ?? [:]
+                env["NODE_EXTRA_CA_CERTS"] = TLSCertificateManager.shared.certFilePath
+                env["ANTHROPIC_BASE_URL"] = "https://\(config.host):\(config.effectiveHTTPSPort)"
+                settings["env"] = env
+            }
+            try ClaudeSettingsManager.shared.writeFullSettings(settings, preserveExistingBackup: true)
         }
     }
 

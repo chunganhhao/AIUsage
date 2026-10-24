@@ -10,6 +10,7 @@ enum TestTrack: String { case codex, desktop }
 struct TestConfig { var activeNodeId: String? = "node-a" }
 struct TestNode { let id: String; let name: String }
 struct TestAdapter {
+    func activateCLIConfig(_ config: TestConfig) throws {}
     func switchPayload(config: TestConfig, nodeId: String) -> [String: Any]? { ["node_id": nodeId] }
     func adminPath(config: TestConfig) -> String { "/__aiusage/admin/codex-upstream" }
 }
@@ -38,6 +39,7 @@ final class AppSettings {
     var isBusy = false
     var operationError: String?
     var isRuntimeEnabled = true
+    var isEnabled = true
     let track = TestTrack.codex
     func node(for id: String?) -> TestNode? { id.map { TestNode(id: $0, name: $0) } }
 }

@@ -49,11 +49,18 @@ public struct AntigravityCostProvider: ProviderFetcher {
         let brainDir = resolveBrainDirectory()
         let files = brainDir.flatMap { collectTranscriptFiles(brainDirectory: $0, scanWindowCutoff: scanWindowCutoff) } ?? []
 
-        let computedNonProxy = files.isEmpty ? [:] : scanFiles(files)
+        let scannedByFile = files.isEmpty ? [:] : scanFilesByPath(files)
+        var computedNonProxy: [String: CodexAggregateBucket] = [:]
+        for fileBuckets in scannedByFile.values {
+            for (dKey, bucket) in fileBuckets {
+                computedNonProxy[dKey, default: .empty].merge(bucket)
+            }
+        }
 
         let nonProxyDays = await Self.nonProxyArchive.freeze(
             homeDirectory: homeDirectory,
             computed: computedNonProxy,
+            scannedByFile: scannedByFile,
             todayKey: todayKey,
             completedFullHistory: shouldImportFullHistory
         )

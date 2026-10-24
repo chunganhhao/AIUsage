@@ -2,7 +2,7 @@ import Foundation
 
 // MARK: - Codex Global Config
 // Codex 版「通用配置基底」，存于 ~/.config/aiusage/codex-global-config.json。
-// 与 Claude 的 GlobalConfig 心智一致：启用后，激活 Codex 节点/订阅时把这份 TOML 基底片段
+// 与 Claude 的 GlobalConfig 心智一致：启用后，激活或保存当前配置时把这份 TOML 基底片段
 // 与节点的额外 TOML 按顶层键合并（节点键覆盖全局同名键），外科式注入 ~/.codex/config.toml。
 //
 // 之所以存为 JSON 而非 .toml：仅做容器（保存原文文本 + 开关），原文本身才是 TOML，

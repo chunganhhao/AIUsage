@@ -42,7 +42,11 @@ struct MenuBarAccountRow: View {
     private var isCostProvider: Bool { entry.liveProvider?.category == ProviderCategory.localCost }
     private var costMonthUsd: Double? { entry.liveProvider?.costSummary?.month?.usd }
     private var windows: [QuotaWindow] { entry.liveProvider?.windows ?? [] }
-    @State private var isWindowsExpanded = false
+    @State private var isWindowsExpandedOverride: Bool?
+
+    private var isWindowsExpanded: Bool {
+        isWindowsExpandedOverride ?? (entry.providerId == "antigravity" && windows.count <= 6)
+    }
 
     private var isPinnedToStatusBar: Bool {
         if isCostProvider {
@@ -222,7 +226,7 @@ struct MenuBarAccountRow: View {
 
             if hasOverflow {
                 Button {
-                    withAnimation(.easeInOut(duration: 0.2)) { isWindowsExpanded.toggle() }
+                    withAnimation(.easeInOut(duration: 0.2)) { isWindowsExpandedOverride = !isWindowsExpanded }
                 } label: {
                     HStack(spacing: 3) {
                         Image(systemName: isWindowsExpanded ? "chevron.up" : "chevron.down")

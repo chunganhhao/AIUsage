@@ -170,10 +170,10 @@ public enum BrowserDiscovery {
         ProviderAuthCapability(
             providerId: "warp",
             displayName: "Warp",
-            supportedMethods: [.auto],
+            supportedMethods: [.apiKey, .auto],
             cookieDomains: nil,
             cookieNames: nil,
-            instructions: "Reads Warp desktop app cache automatically. No token or API key needed — sign into the Warp terminal and usage data is detected from macOS defaults."
+            instructions: "Paste a personal Warp API key (wk-…) from Warp → Settings → Cloud platform → API keys. Accounts added before keys were supported keep reading the Warp desktop app cache."
         ),
         ProviderAuthCapability(
             providerId: "droid",

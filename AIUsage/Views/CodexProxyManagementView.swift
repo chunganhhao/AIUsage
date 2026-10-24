@@ -335,23 +335,28 @@ struct CodexSubscriptionSection: View {
 
             // 与节点列表统一的激活开关：开=激活该账号（互斥切换），关=停用（清除激活标记）。
             // 全局代理启用时单独激活被互斥拦截，开关禁用并提示去全局代理面板切换。
-            Toggle("", isOn: Binding(
-                get: { isActive },
-                set: { newValue in
-                    if newValue {
-                        try? activation.activateAccount(entry: entry)
-                    } else {
-                        activation.deactivateAccount(entry: entry)
+            // 远程模式下本机没有凭据的账号只读展示，不给开关。
+            if activation.isRemoteViewOnly(entry) {
+                GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
+            } else {
+                Toggle("", isOn: Binding(
+                    get: { isActive },
+                    set: { newValue in
+                        if newValue {
+                            try? activation.activateAccount(entry: entry)
+                        } else {
+                            activation.deactivateAccount(entry: entry)
+                        }
                     }
-                }
-            ))
-            .labelsHidden()
-            .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
-            .disabled(globalProxy.isEnabled)
-            .help(globalProxy.isEnabled
-                  ? L("Global proxy is enabled; switch the active node in the global proxy card.",
-                      "全局代理已启用，请在全局代理卡片切换激活节点。")
-                  : "")
+                ))
+                .labelsHidden()
+                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
+                .disabled(globalProxy.isEnabled)
+                .help(globalProxy.isEnabled
+                      ? L("Global proxy is enabled; switch the active node in the global proxy card.",
+                          "全局代理已启用，请在全局代理卡片切换激活节点。")
+                      : "")
+            }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
@@ -394,6 +399,14 @@ struct CodexGlobalConfigSection: View {
         .sheet(isPresented: $showingFragmentEditor) {
             CodexGlobalConfigEditorView(store: store)
         }
+        .alert(L("Could not apply common config", "通用配置未能应用"), isPresented: Binding(
+            get: { store.commonConfigError != nil },
+            set: { if !$0 { store.commonConfigError = nil } }
+        )) {
+            Button(L("OK", "确定"), role: .cancel) { store.commonConfigError = nil }
+        } message: {
+            Text(store.commonConfigError ?? "")
+        }
     }
 
     // 通用配置基底片段卡片（Merge 开关 + 编辑原文 TOML）
@@ -407,7 +420,7 @@ struct CodexGlobalConfigSection: View {
                 Text(L("Common Config", "通用配置"))
                     .font(.subheadline.weight(.semibold))
                 Text(keyCount > 0
-                     ? L("\(keyCount) top-level entries · merged on activation", "\(keyCount) 个顶层条目 · 激活时合并")
+                     ? L("\(keyCount) top-level entries · live updates when active", "\(keyCount) 个顶层条目 · 激活期间即时更新")
                      : L("Not configured", "未配置"))
                     .font(.caption2)
                     .foregroundStyle(.secondary)

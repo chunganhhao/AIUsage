@@ -11,6 +11,17 @@ private let subscriptionBridgeLog = Logger(
     category: "CLIProxySubscriptionBridge"
 )
 
+extension CLIProxyAccountIdentity {
+    /// Codex 与主卡片共用一套方案名（含 prolite / promax / ent26 等新值）；其他服务商沿用通用映射。
+    var resolvedPlanDisplayName: String? {
+        guard let planType else { return nil }
+        if providerID.lowercased() == "codex" {
+            return CodexProvider.planDisplayName(forRaw: planType)
+        }
+        return planDisplayName
+    }
+}
+
 enum CLIProxySubscriptionAddOutcome: Equatable {
     case added(displayName: String)
     case alreadyPresent(displayName: String)
@@ -139,7 +150,7 @@ extension CLIProxyGatewayManager {
         guard providerID == "codex",
               let data = try? Data(contentsOf: authURL),
               let identity = try? CLIProxyAccountIdentity.parse(data: data, providerHint: "codex"),
-              let plan = identity.planDisplayName else {
+              let plan = identity.resolvedPlanDisplayName else {
             return base.isEmpty ? candidate.title : base
         }
         if base.isEmpty { return "\(plan) · Codex" }

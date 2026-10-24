@@ -243,6 +243,13 @@ struct CodexGlobalConfigEditorView: View {
             }
             .background(Color(nsColor: .textBackgroundColor))
             checkBar
+            if let error = store.commonConfigError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(.horizontal, 16)
+            }
             Divider()
             footerBar
         }
@@ -259,8 +266,8 @@ struct CodexGlobalConfigEditorView: View {
                 Text(L("Common Config", "通用配置"))
                     .font(.system(size: 13, weight: .semibold))
                 Text(L(
-                    "Base TOML fragment merged into config.toml on activation. Node values override.",
-                    "激活节点/订阅时按顶层键合并写入 config.toml，节点配置优先级更高。"
+                    "Saved changes apply immediately to the active config.toml. Node values override.",
+                    "保存或切换合并开关后立即更新已激活的 config.toml；节点配置优先。"
                 ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -351,7 +358,7 @@ struct CodexGlobalConfigEditorView: View {
 
     private func saveToStore() {
         store.codexGlobalConfig.tomlText = text
-        store.saveCodexGlobalConfig()
+        guard store.saveCodexGlobalConfig() else { return }
         hasUnsavedChanges = false
         withAnimation(.easeInOut(duration: 0.25)) { showSaveSuccess = true }
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.5) {

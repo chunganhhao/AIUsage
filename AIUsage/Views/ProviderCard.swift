@@ -57,11 +57,15 @@ struct ProviderCard: View {
                     .font(.subheadline.weight(.semibold))
                     .lineLimit(1)
 
-                if isActiveProviderAccount && canActivateProvider {
+                if isActiveProviderAccount && activationManager.canActivateProvider(provider.providerId) {
                     Circle()
                         .fill(Color.green)
                         .frame(width: 6, height: 6)
                         .help(L("Active CLI account", "当前 CLI 账号"))
+                }
+
+                if isRemoteViewOnly {
+                    GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
                 }
 
                 if isPinnedToMenuBar {
@@ -391,7 +395,12 @@ struct ProviderCard: View {
     }
 
     private var canActivateProvider: Bool {
-        activationManager.canActivateProvider(provider.providerId) && accountEntry != nil
+        guard let entry = accountEntry else { return false }
+        return activationManager.canSwitch(to: entry)
+    }
+
+    private var isRemoteViewOnly: Bool {
+        accountEntry.map(activationManager.isRemoteViewOnly) ?? false
     }
 
     private var cpaSyncCandidate: CLIProxyAccountSyncCandidate? {

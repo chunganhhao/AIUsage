@@ -276,7 +276,7 @@ enum GatewayAccountListLogic {
         identity: CLIProxyAccountIdentity?
     ) -> String? {
         let technicalTypes = ["oauth", "runtime", "plugin", "credential", "auth"]
-        if let plan = identity?.planDisplayName, !plan.isEmpty {
+        if let plan = identity?.resolvedPlanDisplayName, !plan.isEmpty {
             return technicalTypes.contains(plan.lowercased()) ? nil : plan
         }
         if let type = file.accountType?.trimmingCharacters(in: .whitespacesAndNewlines),

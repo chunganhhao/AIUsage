@@ -59,7 +59,7 @@ struct CLIProxyAccountDetailSheet: View {
                             detailRow(L("Provider", "提供商"), currentFile.displayProvider)
                             detailRow(L("Source", "来源"), currentFile.gatewaySourceTitle)
                             detailRow(L("Auth file", "认证文件"), currentFile.name)
-                            if let plan = currentIdentity?.planDisplayName {
+                            if let plan = currentIdentity?.resolvedPlanDisplayName {
                                 detailRow(L("Plan", "套餐"), plan)
                             }
                             if let accountID = currentIdentity?.accountID {

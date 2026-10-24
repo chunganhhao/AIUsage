@@ -381,6 +381,7 @@ extension ProviderRefreshCoordinator {
             "Source": "来源",
             "Project": "项目",
             "Tracked Models": "跟踪模型",
+            "Quota Windows": "配额窗口",
             "Main Pool": "主额度",
             "Assistant Pool": "助手额度",
             "Bonus Credits": "奖励额度",
@@ -455,6 +456,8 @@ extension ProviderRefreshCoordinator {
             "Business": "商业",
             "Enterprise": "企业",
             "Edu": "教育",
+            "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first.": "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。",
+            "Antigravity groups models into shared 5-hour and weekly pools, and places the tightest window first.": "Antigravity 将模型归入共享的 5 小时与周限配额池，并把最紧张的窗口排在前面。",
             "Google stopped serving Gemini CLI for personal Google accounts (free, Google AI Pro and Ultra) on June 18, 2026. Only Gemini Code Assist Standard or Enterprise licenses still work — track personal accounts with Antigravity instead.": "Google 已于 2026 年 6 月 18 日停止为个人 Google 账号（免费、Google AI Pro / Ultra）提供 Gemini CLI，只有 Gemini Code Assist Standard / Enterprise 许可仍可使用。个人账号请改用 Antigravity 查看额度。"
     ]
 
@@ -465,6 +468,8 @@ extension ProviderRefreshCoordinator {
         var result = text
         result = replacingRegex(#"^Plan · (.+)$"#, in: result, template: "计划 · $1")
         result = replacingRegex(#"^Membership · (.+)$"#, in: result, template: "会员 · $1")
+        result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5小时")
+        result = replacingRegex(#"^(.+) · Weekly$"#, in: result, template: "$1 · 周限")
         result = replacingRegex(#"^(.+) left$"#, in: result, template: "剩余 $1")
         result = replacingRegex(#"^(.+) used$"#, in: result, template: "已用 $1")
         result = replacingRegex(#"^(\d[\d,]*) total$"#, in: result, template: "总量 $1")

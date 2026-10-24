@@ -25,4 +25,19 @@ final class GeminiProviderTests: XCTestCase {
         XCTAssertFalse(GeminiProvider.isIndividualTierDiscontinued(responseBody: body))
         XCTAssertFalse(GeminiProvider.isIndividualTierDiscontinued(responseBody: Data()))
     }
+
+    /// proto3 omits a zero remainingFraction: an exhausted bucket (resetTime only) must read 0%, not vanish.
+    func testExhaustedBucketWithoutFractionCountsAsZero() {
+        let buckets: [[String: Any]] = [
+            ["modelId": "gemini-3-pro", "tokenType": "REQUESTS", "remainingFraction": 0.6, "resetTime": "2026-10-21T00:00:00Z"],
+            ["modelId": "gemini-3-pro", "tokenType": "REQUESTS", "resetTime": "2026-10-21T00:00:00Z"],
+            ["modelId": "gemini-3-flash", "tokenType": "REQUESTS", "remainingFraction": 1],
+            ["modelId": "gemini-3-flash-lite", "tokenType": "REQUESTS"]
+        ]
+        let byModel = GeminiProvider.lowestBucketsByModel(buckets)
+
+        XCTAssertEqual(byModel["gemini-3-pro"]?.remainingFraction, 0)
+        XCTAssertEqual(byModel["gemini-3-flash"]?.remainingFraction, 1)
+        XCTAssertNil(byModel["gemini-3-flash-lite"], "No fraction and no reset time carries no signal")
+    }
 }

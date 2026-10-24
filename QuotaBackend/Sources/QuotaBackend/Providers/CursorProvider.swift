@@ -93,12 +93,14 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
     private func fetchWithCookie(_ cookieHeader: String, source: SourceInfo) async throws -> ProviderUsage {
         let userAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36"
 
-        // Fetch summary and user info in parallel
+        // Fetch summary and user info in parallel; plan info only tells unified plans apart (best effort).
         async let summaryTask = fetchJSON(url: Self.usageSummaryURL, cookie: cookieHeader, userAgent: userAgent)
         async let userInfoTask = (try? await fetchJSON(url: Self.authMeURL, cookie: cookieHeader, userAgent: userAgent))
+        async let planInfoTask = fetchPlanInfo(cookie: cookieHeader, userAgent: userAgent)
 
         let summary = try await summaryTask
         let userInfo = await userInfoTask
+        let planInfo = await planInfoTask
 
         // Fetch request usage if we have user ID
         var requestUsage: [String: Any]? = nil
@@ -107,7 +109,15 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
             requestUsage = try? await fetchJSON(url: usageURLString, cookie: cookieHeader, userAgent: userAgent)
         }
 
-        return parseResponse(summary: summary, userInfo: userInfo, requestUsage: requestUsage, source: source)
+        // 老的按请求计费套餐（gpt-4 maxRequestUsage）一定不是统一套餐，不再多发请求。
+        let unified = Self.legacyRequestQuota(requestUsage) != nil ? nil : await fetchUnifiedUsage(
+            cookie: cookieHeader,
+            userAgent: userAgent,
+            planInfo: planInfo,
+            summaryPercent: Self.legacyPlanPercent(summary["individualUsage"] as? [String: Any])
+        )
+
+        return parseResponse(summary: summary, userInfo: userInfo, requestUsage: requestUsage, unified: unified, source: source)
     }
 
     // MARK: - Cookie Import
@@ -327,7 +337,11 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
 
     // MARK: - Response Parsing (matches fetchCursorUsage.js parseCursorUsageResponse)
 
-    private func parseResponse(summary: [String: Any], userInfo: [String: Any]?, requestUsage: [String: Any]?, source: SourceInfo) -> ProviderUsage {
+    func parseResponse(summary: [String: Any],
+                       userInfo: [String: Any]?,
+                       requestUsage: [String: Any]?,
+                       unified: UnifiedUsage? = nil,
+                       source: SourceInfo) -> ProviderUsage {
         let billingEnd   = parseDate(summary["billingCycleEnd"] as? String)
         let resetDesc    = billingEnd.map { formatResetDescription($0) } ?? "Reset date unknown"
 
@@ -338,25 +352,14 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
         let planLimitRaw = doubleValue(plan?["limit"]) ?? 0
         let autoPercent = clamp(doubleValue(plan?["autoPercentUsed"]))
         let apiPercent  = clamp(doubleValue(plan?["apiPercentUsed"]))
-        let totalPercent = clamp(doubleValue(plan?["totalPercentUsed"]))
+        let planPercentUsed = Self.legacyPlanPercent(individual)
 
-        let planPercentUsed: Double
-        if let t = totalPercent { planPercentUsed = t }
-        else if let a = autoPercent, let ap = apiPercent { planPercentUsed = (a + ap) / 2 }
-        else if let a = autoPercent { planPercentUsed = a }
-        else if let ap = apiPercent { planPercentUsed = ap }
-        else if planLimitRaw > 0 { planPercentUsed = min(100, planUsedRaw / planLimitRaw * 100) }
-        else { planPercentUsed = 0 }
+        // Legacy request usage (old 500-request plans)
+        let legacyRequests = Self.legacyRequestQuota(requestUsage)
 
-        // Legacy request usage
-        let gpt4 = requestUsage?["gpt-4"] as? [String: Any]
-        let reqUsed = doubleValue(gpt4?["numRequestsTotal"] ?? gpt4?["numRequests"])
-        let reqLimit = doubleValue(gpt4?["maxRequestUsage"])
-        let isLegacy = reqLimit != nil && (reqLimit ?? 0) > 0
-
-        let primaryPercent: Double
-        if isLegacy, let ru = reqUsed, let rl = reqLimit, rl > 0 {
-            primaryPercent = min(100, max(0, ru / rl * 100))
+        let primaryPercent: Double?
+        if let legacyRequests {
+            primaryPercent = min(100, max(0, legacyRequests.used / legacyRequests.limit * 100))
         } else {
             primaryPercent = planPercentUsed
         }
@@ -377,9 +380,23 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
         usage.usageAccountId = accountId
         usage.accountPlan  = Self.formatMembership(membershipType)
 
-        usage.primary   = makePercentWindow(used: primaryPercent, billingEnd: billingEnd, resetDesc: resetDesc)
-        usage.secondary = autoPercent.map { makePercentWindow(used: $0, billingEnd: billingEnd, resetDesc: resetDesc) }
-        usage.tertiary  = apiPercent.map { makePercentWindow(used: $0, billingEnd: billingEnd, resetDesc: resetDesc) }
+        if let unified {
+            // 统一套餐只有一个共享的包含额度池；旧的 Auto / API 两个模型池不再适用。
+            let resetsAt = unified.resetsAt ?? (unified.period == .monthly ? billingEnd : nil)
+            let unifiedResetDesc = resetsAt.map { formatResetDescription($0) } ?? "Reset date unknown"
+            usage.accountPlan = unified.planName ?? usage.accountPlan
+            usage.primary = unified.usedPercent.map { makePercentWindow(used: $0, billingEnd: resetsAt, resetDesc: unifiedResetDesc) }
+            usage.extra["cursorPlanKind"] = AnyCodable("unified")
+            usage.extra["includedUsagePeriod"] = AnyCodable(unified.period.rawValue)
+            usage.extra["includedUsageResetDescription"] = AnyCodable(unifiedResetDesc)
+            if let prepaid = unified.prepaidBalanceUsd {
+                usage.extra["prepaid.availableUsd"] = AnyCodable(prepaid)
+            }
+        } else {
+            usage.primary   = primaryPercent.map { makePercentWindow(used: $0, billingEnd: billingEnd, resetDesc: resetDesc) }
+            usage.secondary = autoPercent.map { makePercentWindow(used: $0, billingEnd: billingEnd, resetDesc: resetDesc) }
+            usage.tertiary  = apiPercent.map { makePercentWindow(used: $0, billingEnd: billingEnd, resetDesc: resetDesc) }
+        }
 
         // Extra fields
         let onDemand = individual?["onDemand"] as? [String: Any]
@@ -392,6 +409,46 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
 
         usage.source = source
         return usage
+    }
+
+    /// 老套餐的包含额度百分比。`plan` 存在时沿用原有规则（拿不到任何信号时按 0）；
+    /// 部分企业席位没有 `plan`，改读 `overall` 的 used/limit，仍拿不到就是未知，而不是 0% 已用。
+    static func legacyPlanPercent(_ individual: [String: Any]?) -> Double? {
+        if let plan = individual?["plan"] as? [String: Any] {
+            if let total = clampedNumber(plan["totalPercentUsed"]) { return total }
+            let auto = clampedNumber(plan["autoPercentUsed"])
+            let api = clampedNumber(plan["apiPercentUsed"])
+            if let auto, let api { return (auto + api) / 2 }
+            if let value = auto ?? api { return value }
+            let used = number(plan["used"]) ?? 0
+            let limit = number(plan["limit"]) ?? 0
+            return limit > 0 ? min(100, used / limit * 100) : 0
+        }
+        guard let overall = individual?["overall"] as? [String: Any],
+              let used = number(overall["used"]),
+              let limit = number(overall["limit"]), limit > 0 else { return nil }
+        return min(100, max(0, used / limit * 100))
+    }
+
+    /// 老的按请求计费套餐（/api/usage 的 gpt-4 numRequests / maxRequestUsage）。
+    static func legacyRequestQuota(_ requestUsage: [String: Any]?) -> (used: Double, limit: Double)? {
+        let gpt4 = requestUsage?["gpt-4"] as? [String: Any]
+        guard let limit = number(gpt4?["maxRequestUsage"]), limit > 0,
+              let used = number(gpt4?["numRequestsTotal"] ?? gpt4?["numRequests"]) else { return nil }
+        return (used, limit)
+    }
+
+    private static func number(_ value: Any?) -> Double? {
+        switch value {
+        case let d as Double: return d
+        case let n as Int: return Double(n)
+        case let s as String: return Double(s)
+        default: return nil
+        }
+    }
+
+    private static func clampedNumber(_ value: Any?) -> Double? {
+        number(value).map { min(100, max(0, $0)) }
     }
 
     private func makePercentWindow(used: Double, billingEnd: Date?, resetDesc: String) -> RawQuotaWindow {

@@ -39,6 +39,10 @@ public struct CopilotProvider: ProviderFetcher, CredentialAcceptingProvider {
 
     private func fetchUsage(token: String, source: SourceInfo) async throws -> ProviderUsage {
         let (payload, email) = try await fetchCopilotData(token: token)
+        return makeUsage(payload: payload, email: email, source: source)
+    }
+
+    func makeUsage(payload: [String: Any], email: String?, source: SourceInfo) -> ProviderUsage {
         let quotaSnapshots = normalizeQuotaSnapshots(payload)
         let planResolution = resolvePlan(payload: payload, quotaSnapshots: quotaSnapshots)
 
@@ -69,6 +73,15 @@ public struct CopilotProvider: ProviderFetcher, CredentialAcceptingProvider {
         extra["copilotPlan"] = AnyCodable(payload["copilot_plan"] as? String ?? "")
         extra["accessTypeSKU"] = AnyCodable(payload["access_type_sku"] as? String ?? "")
         extra["planNote"] = AnyCodable(planResolution.note ?? "")
+        // 2026-06 起按 token 计费：premium_interactions 仍在，但单位从 premium requests 变成 AI Credits。
+        // 标志位在顶层还是快照内各来源说法不一，两处都认；按年付费的老套餐到期前仍是 requests。
+        let premium = quotaSnapshots.premiumInteractions
+        let tokenBased = payload["token_based_billing"] as? Bool == true
+            || premium?["token_based_billing"] as? Bool == true
+        extra["premiumUnit"] = AnyCodable(tokenBased ? "credits" : "requests")
+        if let creditsUsed = doubleValue(premium?["credits_used"]) {
+            extra["premiumCreditsUsed"] = AnyCodable(creditsUsed)
+        }
         usage.extra = extra
         usage.source = source
 
@@ -303,11 +316,15 @@ public struct CopilotProvider: ProviderFetcher, CredentialAcceptingProvider {
         let unlimited = snap["unlimited"] as? Bool ?? false
         let entitlement = intValue(snap["entitlement"])
         let remaining = intValue(snap["remaining"] ?? snap["quota_remaining"])
+        // quota_remaining 保留小数（与 GitHub 面板一致），超额后为负数；remaining 是它取整后的副本。
+        let quotaRemaining = doubleValue(snap["quota_remaining"])
         let providedPct = doubleValue(snap["percent_remaining"])
 
         let percentRemaining: Double
         if unlimited {
             percentRemaining = 100
+        } else if let quotaRemaining, entitlement > 0 {
+            percentRemaining = min(100, max(0, quotaRemaining / Double(entitlement) * 100))
         } else if let p = providedPct {
             percentRemaining = min(100, max(0, p))
         } else if entitlement > 0 {

@@ -9,7 +9,7 @@ import QuotaBackend
 // 只做调度，轨道差异（节点筛选、env/payload 投影、CLI 写入）全部下沉到 GlobalProxyTrackAdapter。
 //
 // 与每节点激活互斥：启用时停掉本轨当前激活节点并接管 CLI 配置；启用期间每节点激活被
-// performActivationTransaction 兜底拦截。切换激活节点走 admin 热替换，不重写 CLI 配置、不重启进程。
+// performActivationTransaction 兜底拦截。切换激活节点走 admin 热替换，并刷新节点配置片段，不重启进程。
 
 private let globalProxyManagerLog = Logger(subsystem: "com.aiusage.desktop", category: "GlobalProxyManager")
 
@@ -726,7 +726,7 @@ final class GlobalProxyManager: ObservableObject {
                 nodeName: selectedNode.name
             )
             config.activeNodeId = nodeId
-            if track == .claude && config.effectiveClaudeCodeCatalogMode == .fullNodeCatalog {
+            if isEnabled {
                 try adapter.activateCLIConfig(config)
             }
             guard persist() else {
@@ -741,7 +741,7 @@ final class GlobalProxyManager: ObservableObject {
                         nodeName: previousNode.name
                     )
                 }
-                if track == .claude && config.effectiveClaudeCodeCatalogMode == .fullNodeCatalog {
+                if isEnabled {
                     try? adapter.activateCLIConfig(config)
                 }
                 throw GlobalProxyRuntimeError.startFailed("failed to save Gateway route")
@@ -768,7 +768,7 @@ final class GlobalProxyManager: ObservableObject {
                     nodeName: previousNode.name
                 )
             }
-            if track == .claude && config.effectiveClaudeCodeCatalogMode == .fullNodeCatalog {
+            if isEnabled {
                 try? adapter.activateCLIConfig(config)
             }
             if acquiredNewLease, let consumer = nodeRuntimeConsumer {
@@ -798,6 +798,9 @@ final class GlobalProxyManager: ObservableObject {
                 nodeId: node.id,
                 nodeName: node.name
             )
+            if isEnabled {
+                try adapter.activateCLIConfig(config)
+            }
             if track == .desktop {
                 NotificationCenter.default.post(name: .claudeGatewayActiveNodeDidChange, object: nodeId)
             }

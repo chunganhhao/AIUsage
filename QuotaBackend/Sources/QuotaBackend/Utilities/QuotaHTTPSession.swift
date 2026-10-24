@@ -17,6 +17,10 @@ enum QuotaHTTP {
         return URLSession(configuration: configuration)
     }()
 
+    /// Tests only: replaces `session` so URLProtocol stubs can intercept quota
+    /// requests (a custom session ignores `URLProtocol.registerClass`).
+    static var sessionOverride: URLSession?
+
     /// Builds a request that opts out of caching on both the client and any
     /// intermediate proxy.
     static func request(url: URL, timeout: TimeInterval) -> URLRequest {
@@ -28,6 +32,6 @@ enum QuotaHTTP {
     }
 
     static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await session.data(for: request)
+        try await (sessionOverride ?? session).data(for: request)
     }
 }

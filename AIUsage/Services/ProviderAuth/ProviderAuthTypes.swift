@@ -14,9 +14,7 @@ struct ProviderAuthPlan {
         case kiro
         /// Cursor：AIUsage 内置浏览器登录 cursor.com。
         case embeddedWeb
-        /// Warp：读取应用缓存，没有凭证可填。
-        case desktopApp
-        /// Kimi / MiniMax / Droid：粘贴 API Key。
+        /// Kimi / MiniMax / Droid / Warp：粘贴 API Key。
         case apiKey
         /// 未单独适配的服务商：先完成它自己的登录，再回来重新检测。
         case manual
