@@ -30,11 +30,9 @@ extension ProviderAccountEditorView {
                     .fixedSize(horizontal: false, vertical: true)
             }
 
-            if authPlan.method != .desktopApp {
-                Label(L("Credentials stay in this Mac's Keychain.", "凭证只保存在本机钥匙串。"), systemImage: "lock.shield")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-            }
+            Label(L("Credentials stay in this Mac's Keychain.", "凭证只保存在本机钥匙串。"), systemImage: "lock.shield")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 
@@ -99,8 +97,6 @@ extension ProviderAccountEditorView {
         case .kiro where !appInstalled:
             return L("Authorize an AWS Builder ID in the browser. For Google or GitHub accounts, install Kiro and sign in there first.",
                      "在浏览器中授权 AWS Builder ID。Google / GitHub 账号请先安装 Kiro 并在应用中登录。")
-        case .desktopApp where !appInstalled:
-            return L("Install \(providerTitle) and sign in, then come back here.", "安装 \(providerTitle) 并登录后回到这里。")
         default:
             return authPlan.signedOutDetail
         }
@@ -128,7 +124,7 @@ extension ProviderAccountEditorView {
                 consoleTitle: L("Get API Key", "获取 API Key"),
                 supportsRegion: true,
                 consoleURL: { region in
-                    region == .international ? "https://platform.moonshot.ai/" : "https://www.kimi.com/code/console"
+                    region == .international ? "https://www.kimi.ai/code/console" : "https://www.kimi.com/code/console"
                 }
             )
         case "minimax":
@@ -144,6 +140,16 @@ extension ProviderAccountEditorView {
                         ? "https://platform.minimax.io/user-center/basic-information/interface-key"
                         : "https://platform.minimaxi.com/user-center/basic-information/interface-key"
                 }
+            )
+        case "warp":
+            return APIKeyForm(
+                title: "Warp API Key",
+                placeholder: "wk-…",
+                hint: L("In Warp, open Settings → Cloud platform → API keys, create a Personal key and paste it above.",
+                        "在 Warp 中打开 Settings → Cloud platform → API keys，新建一个 Personal Key 并粘贴到上方。"),
+                consoleTitle: L("How to get a key", "如何获取 Key"),
+                supportsRegion: false,
+                consoleURL: { _ in "https://docs.warp.dev/reference/cli/api-keys/" }
             )
         case "droid":
             return APIKeyForm(
