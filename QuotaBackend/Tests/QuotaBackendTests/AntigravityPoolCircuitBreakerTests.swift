@@ -15,7 +15,8 @@ final class AntigravityPoolCircuitBreakerTests: XCTestCase {
     }
 
     private func update(_ json: [String: Any], _ models: [AntigravityProvider.ModelQuota], global: [String] = []) throws -> [String: Any] {
-        try XCTUnwrap(AntigravityPoolCircuitBreaker.updatedCredential(json, models: models, global: global))
+        let result = try AntigravityPoolCircuitBreaker.updatedCredential(json, models: models, global: global)
+        return try XCTUnwrap(result)
     }
 
     func testScreenshotBlocksClaudeAndArgonButKeepsGeminiAndAccountActive() throws {
@@ -174,6 +175,6 @@ final class AntigravityPoolCircuitBreakerTests: XCTestCase {
         try JSONSerialization.data(withJSONObject: ["email": "fixture@example.invalid"]).write(to: target)
         let found = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(providerPrefix: "antigravity", email: "fixture@example.invalid",
             currentFileURL: home.appendingPathComponent("AuthImports/fixture.json"), homeDirectory: home.path)
-        XCTAssertEqual(found, [target])
+        XCTAssertEqual(found.map { $0.resolvingSymlinksInPath() }, [target.resolvingSymlinksInPath()])
     }
 }
