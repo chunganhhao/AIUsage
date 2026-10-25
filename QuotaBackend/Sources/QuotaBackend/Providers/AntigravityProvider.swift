@@ -111,7 +111,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             models: quota.models,
             email: authFile.email ?? emailFromFilename(authContext.url.lastPathComponent)
         ) {
-            usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
+            usage.extra["circuitBreakerTripped"] = AnyCodable(false)
+            usage.extra["circuitBreakerPartialTripped"] = AnyCodable(!circuitBreakerInfo.blockedPools.isEmpty)
+            usage.extra["circuitBreakerTrippedPool"] = AnyCodable(circuitBreakerInfo.blockedPools.joined(separator: ", "))
+            usage.extra["circuitBreakerError"] = AnyCodable(circuitBreakerInfo.error ?? "")
             usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
         }
 
@@ -362,7 +365,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let resetAt: String?
         let providerLabel: String?
 
-        /// Gemini 4 Argon 为付费账号附带的独立周限额池，用尽时不应影响主模型组（Gemini / Claude + GPT）的状态或触发断路器。
+        /// Argon is an independent pool: protect it separately, without lowering the core-pool headline.
         var isAuxiliary: Bool {
             id.localizedCaseInsensitiveContains("argon")
                 || label.localizedCaseInsensitiveContains("argon")
@@ -527,8 +530,9 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     // MARK: - Smart Circuit Breaker Implementation
 
     private struct CircuitBreakerResult {
-        let tripped: Bool
+        let blockedPools: [String]
         let reason: String
+        let error: String?
     }
 
     private func applySmartCircuitBreaker(
@@ -536,57 +540,22 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         models: [ModelQuota],
         email: String?
     ) -> CircuitBreakerResult? {
-        // 仅依据核心模型池（Gemini / Claude + GPT）评估断路器，避免附加池（Gemini 4 Argon）用尽时误关停整个账号。
-        let coreModels = models.filter { !$0.isAuxiliary }
-        guard !coreModels.isEmpty else { return nil }
-
-        // Tiered circuit breaker evaluation:
-        // Weekly window: threshold <= 3.0%
-        // 5-Hour window (and other windows): threshold <= 5.0%
-        var trippedBucket: (model: ModelQuota, threshold: Double)?
-
-        for m in coreModels {
-            let lower = (m.label + " " + m.id).lowercased()
-            let isWeekly = lower.contains("week")
-            let threshold = isWeekly ? 3.0 : 5.0
-            if m.remainingPercent <= threshold {
-                if let current = trippedBucket {
-                    if (m.remainingPercent - threshold) < (current.model.remainingPercent - current.threshold) {
-                        trippedBucket = (m, threshold)
-                    }
-                } else {
-                    trippedBucket = (m, threshold)
-                }
-            }
-        }
-
-        let shouldTrip = trippedBucket != nil
-        let reason: String
-        if let tripped = trippedBucket {
-            reason = "\(tripped.model.label) còn \(Int(tripped.model.remainingPercent))% (<= \(Int(tripped.threshold))%)"
-        } else {
-            reason = "Tất cả hạn mức an toàn (Weekly > 3%, 5h > 5%)"
-        }
-
         let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
-            providerPrefix: "antigravity",
-            email: email,
-            currentFileURL: fileURL
+            providerPrefix: "antigravity", email: email, currentFileURL: fileURL,
+            homeDirectory: homeDirectory
         )
-        guard !targets.isEmpty else { return nil }
-
-        if let outcome = QuotaCircuitBreakerHelper.syncCircuitBreaker(
-            targets: targets,
-            shouldTrip: shouldTrip,
-            reason: reason
-        ) {
-            return CircuitBreakerResult(tripped: outcome.tripped, reason: outcome.reason)
+        let runtime = URL(fileURLWithPath: homeDirectory)
+            .appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI")
+        do {
+            guard let outcome = try AntigravityPoolCircuitBreaker.sync(targets: targets, models: models, runtime: runtime) else {
+                return nil
+            }
+            return CircuitBreakerResult(blockedPools: outcome.blockedPools, reason: outcome.reason, error: nil)
+        } catch {
+            return CircuitBreakerResult(blockedPools: [], reason: "Pool protection not synchronized", error: error.localizedDescription)
         }
-        return nil
     }
 
-    /// `retrieveUserQuotaSummary`：`groups[].buckets[]`，同组模型共享一个 5 小时窗口和一个每周窗口，
-    /// 付费 Pro 账号额外包含独立的 `Gemini 4 Argon` 周限额组。
     /// 返回 nil 表示没有可用窗口（旧部署、桶全被禁用等），由调用方换下一个来源。
     func parseQuotaSummary(_ response: [String: Any]) -> [ModelQuota]? {
         guard let groups = response["groups"] as? [[String: Any]] else { return nil }
