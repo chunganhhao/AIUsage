@@ -43,13 +43,13 @@ strip_bundle_detritus() {
       find -H "$target" -type l -exec xattr -ds "$attr" {} + 2>/dev/null || true
     done
 
-    if ! xattr -lr "$target" 2>/dev/null | rg -q "$attrs_pattern"; then
+    if [[ ! "$(xattr -lr "$target" 2>/dev/null)" =~ $attrs_pattern ]]; then
       return 0
     fi
   done
 
   echo "Failed to strip all detritus from $target" >&2
-  xattr -lr "$target" 2>/dev/null | rg "$attrs_pattern" >&2 || true
+  xattr -lr "$target" >&2 || true
   return 1
 }
 

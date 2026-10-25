@@ -49,7 +49,7 @@ jobs:
           HELPER="$VERIFY_ROOT/AIUsage.app/Contents/Helpers/QuotaServer"
           test -x "$HELPER"
           codesign --verify --deep --strict "$VERIFY_ROOT/AIUsage.app"
-          strings "$HELPER" | rg -F 'Pool protection requires CLIProxyAPI >= 8.0.43'
+          python3 -c 'from pathlib import Path; import sys; assert b"Pool protection requires CLIProxyAPI >= 8.0.43" in Path(sys.argv[1]).read_bytes(); print("Packaged pool-protection marker verified")' "$HELPER"
           shasum -a 256 dist/*.zip dist/*.dmg > dist/SHA256SUMS
           printf 'commit=%s\nworkflow_run=%s\n' "$GITHUB_SHA" "$GITHUB_RUN_ID" > dist/build-provenance.txt
 
