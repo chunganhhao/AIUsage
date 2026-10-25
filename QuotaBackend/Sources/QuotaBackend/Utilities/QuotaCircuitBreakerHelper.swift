@@ -16,7 +16,8 @@ public enum QuotaCircuitBreakerHelper {
     public static func findTargetCPAAuthFiles(
         providerPrefix: String,
         email: String?,
-        currentFileURL: URL?
+        currentFileURL: URL?,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> [URL] {
         var targets: [URL] = []
         var seenPaths = Set<String>()
@@ -36,9 +37,7 @@ public enum QuotaCircuitBreakerHelper {
 
         // 2. Scan the standard CLIProxyAPI auth directory
         let fileManager = FileManager.default
-        guard let appSupport = fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first else {
-            return targets
-        }
+        let appSupport = URL(fileURLWithPath: homeDirectory).appendingPathComponent("Library/Application Support")
 
         let authDir = appSupport
             .appendingPathComponent("AIUsage", isDirectory: true)

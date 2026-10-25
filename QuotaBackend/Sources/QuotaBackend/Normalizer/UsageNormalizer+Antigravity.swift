@@ -68,24 +68,15 @@ extension UsageNormalizer {
                 ? "Antigravity groups models into shared 5-hour and weekly pools, and places the tightest window first."
                 : "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first.")
 
-        let isTripped = (usage.extra["circuitBreakerTripped"]?.value as? Bool) == true
-        let isPartialTripped = (usage.extra["circuitBreakerPartialTripped"]?.value as? Bool) == true
-        let trippedPool = extraString(usage, "circuitBreakerTrippedPool")
-        let reason = extraString(usage, "circuitBreakerReason") ?? "Quota <= 5%"
-
-        if isTripped {
+        if let error = extraString(usage, "circuitBreakerError"), !error.isEmpty {
             base.status = "watch"
-            base.statusLabel = "Protected (CPA Paused)"
-            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt toàn bộ tài khoản này khỏi CLIProxyAPI để chống ban (\(reason)). Khi quota hồi phục, tài khoản sẽ tự động kích hoạt lại."
-        } else if isPartialTripped {
+            base.statusLabel = "Pool Protection Needs Attention"
+            base.spotlight = "Không thể đồng bộ cầu dao theo pool: \(error) Không xác nhận bảo vệ thành công."
+        } else if (usage.extra["circuitBreakerPartialTripped"]?.value as? Bool) == true {
+            let pools = extraString(usage, "circuitBreakerTrippedPool") ?? ""
             base.status = "watch"
-            if trippedPool == "claude" {
-                base.statusLabel = "Claude Paused (Gemini Active)"
-                base.spotlight = "🛡️ Cầu dao thông minh (Đa tầng): Đã tạm ngắt model Claude khỏi CLIProxyAPI (\(reason)). Các model Gemini của tài khoản này vẫn hoạt động bình thường cho bot RonC & Hermes."
-            } else if trippedPool == "gemini" {
-                base.statusLabel = "Gemini Paused (Claude Active)"
-                base.spotlight = "🛡️ Cầu dao thông minh (Đa tầng): Đã tạm ngắt model Gemini khỏi CLIProxyAPI (\(reason)). Các model Claude của tài khoản này vẫn hoạt động bình thường."
-            }
+            base.statusLabel = "Pools Paused: \(pools)"
+            base.spotlight = "🛡️ \(extraString(usage, "circuitBreakerReason") ?? "") Quota Weekly phải > 3%, 5h phải > 5% mới gỡ chặn cửa sổ tương ứng."
         }
 
         return base
