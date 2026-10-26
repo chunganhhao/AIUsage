@@ -365,6 +365,11 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let remainingPercent: Double
         let resetAt: String?
         let providerLabel: String?
+
+        /// Argon has an independent allowance and must not lower the core-pool headline.
+        var isAuxiliary: Bool {
+            id.localizedCaseInsensitiveContains("argon") || label.localizedCaseInsensitiveContains("argon")
+        }
     }
 
     private struct QuotaSnapshot {
@@ -477,8 +482,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
                             subscription: SubscriptionInfo,
                             quota: QuotaSnapshot) -> ProviderUsage {
         let models = quota.models
-        let lowestPercent = models.map(\.remainingPercent).min()
+        let coreModels = models.filter { !$0.isAuxiliary }
+        let lowestPercent = (coreModels.isEmpty ? models : coreModels).map(\.remainingPercent).min()
         let sortedModels = models.sorted {
+            if $0.isAuxiliary != $1.isAuxiliary { return !$0.isAuxiliary }
             if $0.remainingPercent == $1.remainingPercent {
                 return $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
             }
