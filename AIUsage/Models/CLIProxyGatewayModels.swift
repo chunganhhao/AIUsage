@@ -271,10 +271,9 @@ nonisolated struct CLIProxyGatewaySettings: Codable, Equatable, Sendable {
         // CPA：max-retry-interval<=0 时 shouldRetryAfterError 直接放弃，429 几乎无法换号。
         value.maxRetryInterval = min(max(value.maxRetryInterval, 1), 1_800)
         value.maxRetryCredentials = min(max(value.maxRetryCredentials, 0), 64)
-        // 额度/429 换号是网关应有行为，不开放成用户选项；始终强制开启。
-        value.quotaSwitchProject = true
+        // Personal build only: retain the user's persisted routing/credits policy.
+        // Upstream defaults remain unchanged; no claim about provider TOS behavior.
         value.quotaSwitchPreviewModel = true
-        value.quotaAntigravityCredits = true
         value.accountModelProbeIntervalSeconds = min(max(value.accountModelProbeIntervalSeconds, 15), 3_600)
         value.proxyURL = value.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return value

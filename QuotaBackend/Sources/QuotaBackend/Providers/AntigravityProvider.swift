@@ -24,7 +24,9 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     static let quotaURL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
     static let loadCodeAssistURL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
     static let oauthRefreshURL = "https://oauth2.googleapis.com/token"
-    static let userAgent = "antigravity/2.24.0 Darwin/arm64"
+    // Personal compatibility override: preserves the previously installed build's
+    // UA and matches this user's installed Antigravity 2.25.0; not an upstream change.
+    static let userAgent = "antigravity/hub/2.25.0 (os_type=darwin; arch=arm64; aidev_client)"
 
     // Antigravity 的 Google「桌面应用」OAuth 客户端凭据（非用户私密：随安装包公开分发，
     // 桌面应用 client_secret 在 OAuth 规范里本就非机密）。新版已打进 Go 二进制
@@ -86,7 +88,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         var subscription = await loadCodeAssist(accessToken: accessToken)
         let quota: QuotaSnapshot
         do {
-            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId)
+            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId ?? authFile.projectId)
         } catch let error as ProviderError where error.code == "unauthorized" {
             guard let refreshToken = authFile.refreshToken, !refreshToken.isEmpty else { throw error }
             let refreshed = try await refreshAccessToken(refreshToken: refreshToken)
@@ -95,7 +97,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             authFile.expired = iso8601String(refreshed.expiryDate)
             persistRefreshedToken(at: authContext.url, originalData: originalData, refreshed: refreshed)
             subscription = await loadCodeAssist(accessToken: accessToken)
-            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId)
+            quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId ?? authFile.projectId)
         }
         var usage = buildUsage(
             authContext: authContext,

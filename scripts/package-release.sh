@@ -103,6 +103,7 @@ mkdir -p "$APP_STAGING_ROOT"
 echo "Creating sanitized app bundle staging copy..."
 ditto --norsrc --noextattr --noqtn --noacl "$SOURCE_APP_PATH" "$APP_PATH"
 strip_bundle_detritus "$APP_PATH"
+/usr/libexec/PlistBuddy -c "Add :AIUsageBuildCommit string $(git -C "$ROOT_DIR" rev-parse HEAD)" "$APP_PATH/Contents/Info.plist"
 
 # Defensive migration cleanup for incremental DerivedData produced before the
 # helper moved into the standard nested-code directory.

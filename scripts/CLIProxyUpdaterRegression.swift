@@ -323,6 +323,21 @@ struct CLIProxyUpdaterRegression {
         try expect(migrated.quotaSwitchProject, "legacy settings did not default quota switch-project on")
         try expect(migrated.maxRetryInterval == 30, "legacy settings did not default max-retry-interval to 30")
 
+        let personalPaths = try CLIProxyPaths(root: root.appendingPathComponent("personal-policy"))
+        let personalStore = CLIProxyConfigStore(paths: personalPaths)
+        var personal = CLIProxyGatewaySettings.default
+        personal.requestRetry = 1
+        personal.quotaSwitchProject = false
+        personal.quotaAntigravityCredits = false
+        try personalStore.saveSettings(personal)
+        let retained = personalStore.loadSettings()
+        try expect(!retained.quotaSwitchProject && !retained.quotaAntigravityCredits && retained.requestRetry == 1,
+                   "personal build changed persisted routing policy")
+        try personalStore.writeRuntimeConfig(settings: retained, secrets: CLIProxySecrets(managementKey: "management-fixture", clientAPIKey: "client-fixture"))
+        let personalYAML = try String(contentsOf: personalPaths.configURL, encoding: .utf8)
+        try expect(personalYAML.contains("switch-project: false") && personalYAML.contains("antigravity-credits: false") && personalYAML.contains("request-retry: 1"),
+                   "personal build did not preserve runtime YAML routing policy")
+
         let generatedPluginBlock = "plugins:\n  enabled: true\n  dir: \"\(paths.pluginsDirectory.path)\""
         let persistedPluginBlock = """
         plugins:

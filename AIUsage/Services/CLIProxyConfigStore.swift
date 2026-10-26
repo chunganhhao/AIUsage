@@ -115,7 +115,7 @@ nonisolated struct CLIProxyConfigStore {
             try document.setNestedScalar(
                 section: "quota-exceeded",
                 key: "switch-project",
-                value: "true"
+                value: value.quotaSwitchProject ? "true" : "false"
             )
             try document.setNestedScalar(
                 section: "quota-exceeded",
@@ -125,7 +125,7 @@ nonisolated struct CLIProxyConfigStore {
             try document.setNestedScalar(
                 section: "quota-exceeded",
                 key: "antigravity-credits",
-                value: "true"
+                value: value.quotaAntigravityCredits ? "true" : "false"
             )
             try document.setNestedScalar(
                 section: "plugins",
