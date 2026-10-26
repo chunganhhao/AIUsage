@@ -39,7 +39,8 @@ class AppState: ObservableObject {
         ProviderCatalogItem(id: "gemini", titleEn: "Gemini CLI", titleZh: "Gemini CLI", summaryEn: "Gemini Code Assist Standard / Enterprise quotas. Google ended personal-account access on June 18, 2026", summaryZh: "Gemini Code Assist Standard / Enterprise 配额；个人账号已于 2026-06-18 被 Google 停用", channel: "cli", kind: .official, restrictionEn: "Enterprise only", restrictionZh: "仅企业版"),
         ProviderCatalogItem(id: "claude", titleEn: "Claude", titleZh: "Claude", summaryEn: "Proxy costs and Claude Code non-proxy tokens", summaryZh: "Claude 代理费用与 Code 非代理 Token", channel: "local", kind: .costTracking),
         ProviderCatalogItem(id: "codex-cost", titleEn: "Codex", titleZh: "Codex", summaryEn: "Proxy cost ledger plus non-proxy Codex token usage", summaryZh: "Codex 代理费用账本与非代理 Token 用量", channel: "local", kind: .costTracking),
-        ProviderCatalogItem(id: "opencode", titleEn: "OpenCode", titleZh: "OpenCode", summaryEn: "Local token and cost ledger from OpenCode sessions", summaryZh: "基于 OpenCode 本地会话的 Token 与费用账本", channel: "local", kind: .costTracking)
+        ProviderCatalogItem(id: "opencode", titleEn: "OpenCode", titleZh: "OpenCode", summaryEn: "Local token and cost ledger from OpenCode sessions", summaryZh: "基于 OpenCode 本地会话的 Token 与费用账本", channel: "local", kind: .costTracking),
+        ProviderCatalogItem(id: "antigravity-cost", titleEn: "Antigravity", titleZh: "Antigravity", summaryEn: "Token-only ledger from local Antigravity transcripts; no proxy costs", summaryZh: "本地 Antigravity 会话 Token 账本；不包含代理费用", channel: "local", kind: .costTracking)
     ]
 
     private static let initialState: InitialState = {
