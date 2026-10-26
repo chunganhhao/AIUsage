@@ -596,7 +596,8 @@ class NodeProfileStore: ObservableObject {
                 env["ANTHROPIC_BASE_URL"] = "https://\(config.host):\(config.effectiveHTTPSPort)"
                 settings["env"] = env
             }
-            try ClaudeSettingsManager.shared.writeFullSettings(settings)
+            // 节点已激活，当前 settings.json 是节点配置：不能再备份它，否则停用时恢复的是代理配置而非激活前的原始设置。
+            try ClaudeSettingsManager.shared.writeFullSettings(settings, preserveExistingBackup: true)
         }
     }
 
