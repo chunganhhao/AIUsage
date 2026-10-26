@@ -88,6 +88,26 @@ final class AntigravityTranscriptLedgerTests: XCTestCase {
         XCTAssertEqual(unscanned["2026-10-01"]?.totalTokens, 250)
     }
 
+    func testV1MigrationPreservesPurgedModelWhenFirstRescanAlreadyGrew() async throws {
+        for currentCount in [150, 200, 250] {
+            let root = try home()
+            var old = bucket(100, model: "live (Non-Proxy)")
+            old.merge(bucket(100, model: "purged (Non-Proxy)"))
+            let url = AntigravityNonProxyUsageArchiveStore.fileURL(homeDirectory: root.path, version: 1)
+            try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+            try JSONEncoder().encode(AntigravityUsageArchive(version: 1, updatedAt: "", days: ["2026-10-01": old])).write(to: url)
+            let store = AntigravityNonProxyUsageArchiveStore()
+            let scan = bucket(currentCount, model: "live (Non-Proxy)")
+            let migrated = try await store.freeze(homeDirectory: root.path, computed: ["2026-10-01": scan], scannedByFile: ["file": ["2026-10-01": scan]], todayKey: "2026-10-26", completedFullHistory: true)
+            XCTAssertEqual(migrated["2026-10-01"]?.totalTokens, currentCount + 100)
+            XCTAssertEqual(migrated["2026-10-01"]?.models["purged (Non-Proxy)"]?.totalTokens, 100)
+            XCTAssertEqual(migrated["2026-10-01"]?.models["purged (Non-Proxy)"]?.inputTokens, 100)
+            let reloaded = AntigravityNonProxyUsageArchiveStore()
+            let unscanned = try await reloaded.freeze(homeDirectory: root.path, computed: [:], scannedByFile: [:], todayKey: "2026-10-27", completedFullHistory: false)
+            XCTAssertEqual(unscanned["2026-10-01"]?.totalTokens, currentCount + 100)
+        }
+    }
+
     func testFullHistoryRequestAndPersistenceFailureAreVisible() async throws {
         let root = try home(); let store = AntigravityNonProxyUsageArchiveStore()
         _ = try await store.freeze(homeDirectory: root.path, computed: [:], scannedByFile: [:], todayKey: "2026-10-26", completedFullHistory: true)

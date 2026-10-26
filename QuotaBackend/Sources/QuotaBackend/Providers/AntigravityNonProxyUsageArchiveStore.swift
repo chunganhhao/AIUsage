@@ -45,7 +45,6 @@ actor AntigravityNonProxyUsageArchiveStore {
         for (day, bucket) in archive.days {
             let represented = oldRepresented[day] ?? .empty
             let missing = max(0, bucket.totalTokens - represented.totalTokens)
-            guard missing > 0 else { continue }
             var remainder = CodexAggregateBucket.empty
             for (name, model) in bucket.models {
                 let old = represented.models[name]
@@ -58,12 +57,16 @@ actor AntigravityNonProxyUsageArchiveStore {
                     cacheCreateTokens: max(0, model.cacheCreateTokens - (old?.cacheCreateTokens ?? 0)), estimatedCostUsd: 0)
                 remainder.totalTokens += count
             }
-            if remainder.totalTokens != missing {
+            // V1 has no file checkpoints: growth in a live model must not
+            // consume the positive remainder of a different, purged model.
+            // ponytail: V1 attribution is model-level; V2 checkpoints track files.
+            let unattributed = max(0, missing - remainder.totalTokens)
+            if unattributed > 0 {
                 let key = "historical-unattributed" + AntigravityCostProvider.nonProxySourceSuffix
-                remainder = .empty
-                remainder.models[key] = CodexModelAggregate(model: key, totalTokens: missing)
-                remainder.totalTokens = missing
+                remainder.models[key] = CodexModelAggregate(model: key, totalTokens: unattributed)
+                remainder.totalTokens += unattributed
             }
+            guard remainder.totalTokens > 0 else { continue }
             remainder.usageRows = max(0, bucket.usageRows - represented.usageRows)
             remainders[day] = remainder
         }
