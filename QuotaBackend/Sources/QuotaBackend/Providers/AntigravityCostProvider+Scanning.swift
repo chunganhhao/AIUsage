@@ -28,7 +28,7 @@ extension AntigravityCostProvider {
             let logDir = (brainDirectory as NSString)
                 .appendingPathComponent(convId)
                 .appending("/.system_generated/logs")
-            
+
             for name in ["transcript.jsonl", "transcript_full.jsonl"] {
                 let path = (logDir as NSString).appendingPathComponent(name)
                 guard fm.fileExists(atPath: path) else { continue }
