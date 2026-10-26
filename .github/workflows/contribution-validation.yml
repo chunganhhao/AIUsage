@@ -1,0 +1,32 @@
+name: Contribution validation
+
+on:
+  push:
+    branches: ["fix/**", "feat/**", "safe/**"]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  full-release-regressions:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v5
+      - name: Build test helper
+        run: |
+          swift build --package-path QuotaBackend --build-system native --product QuotaServer
+          BIN="$(swift build --package-path QuotaBackend --build-system native --show-bin-path)"
+          echo "AIUSAGE_TEST_CLAUDE_HELPER=$BIN/QuotaServer" >> "$GITHUB_ENV"
+      - name: Full backend test suite
+        run: swift test --package-path QuotaBackend --build-system native
+      - name: Release regression scripts and Debug app build
+        run: |
+          bash scripts/run_claude_proxy_regression.sh
+          bash scripts/run_science_auth_proxy_regression.sh
+          bash scripts/run_cliproxy_updater_regression.sh
+          bash scripts/run_account_identity_regression.sh
+          bash scripts/run_global_proxy_cancellation_regression.sh
+          bash scripts/run_common_config_regression.sh
+          bash scripts/run_proxy_usage_archive_regression.sh

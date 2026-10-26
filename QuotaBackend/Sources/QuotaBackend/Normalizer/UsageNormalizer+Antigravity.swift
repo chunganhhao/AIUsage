@@ -17,7 +17,9 @@ extension UsageNormalizer {
             )
         }
 
-        let remainingPercent = trackedModels.map(\.remainingPercent).min() ?? pickSmallestRemaining(windows)
+        let coreModels = trackedModels.filter { !$0.label.localizedCaseInsensitiveContains("argon") }
+        let primaryModels = coreModels.isEmpty ? trackedModels : coreModels
+        let remainingPercent = primaryModels.map(\.remainingPercent).min() ?? pickSmallestRemaining(windows)
         let (status, statusLabel) = resolveStatus(remainingPercent)
         let plan = usage.accountPlan ?? "Unknown"
         let projectId = extraString(usage, "projectId")
@@ -33,7 +35,7 @@ extension UsageNormalizer {
         base.status = status
         base.statusLabel = statusLabel
         base.remainingPercent = remainingPercent
-        base.nextResetAt = trackedModels.compactMap { $0.resetAt }.compactMap(parseDate).min().map { SharedFormatters.iso8601String(from: $0) }
+        base.nextResetAt = primaryModels.compactMap { $0.resetAt }.compactMap(parseDate).min().map { SharedFormatters.iso8601String(from: $0) }
         base.nextResetLabel = formatShortDateTime(base.nextResetAt)
         base.headline = HeadlineInfo(
             eyebrow: "Plan · \(plan)",

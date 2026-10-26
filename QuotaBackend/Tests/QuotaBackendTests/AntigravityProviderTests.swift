@@ -49,6 +49,50 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(models.map(\.remainingPercent), [0, 90])
     }
 
+    func testGemini4ArgonAuxiliaryBucketDoesNotDragDownHeadlineRemainingPercent() async throws {
+        let summaryWithExhaustedArgon = """
+        {"groups":[
+          {"displayName":"Gemini Models","buckets":[
+            {"bucketId":"gemini-weekly","displayName":"Weekly Limit Remaining","window":"weekly","remainingFraction":0.9923,"resetTime":"2026-10-25T00:00:00Z"},
+            {"bucketId":"gemini-5h","displayName":"Five Hour Limit Remaining","window":"5h","remainingFraction":1.0,"resetTime":"2026-10-20T15:00:00Z"}
+          ]},
+          {"displayName":"Claude and GPT models","buckets":[
+            {"bucketId":"3p-weekly","displayName":"Weekly Limit Remaining","window":"weekly","remainingFraction":0.9531,"resetTime":"2026-10-25T00:00:00Z"},
+            {"bucketId":"3p-5h","displayName":"Five Hour Limit Remaining","window":"5h","remainingFraction":1.0,"resetTime":"2026-10-20T15:00:00Z"}
+          ]},
+          {"displayName":"Gemini 4 Argon","buckets":[
+            {"bucketId":"gemini-argon-wtu-weekly","displayName":"Gemini 4 Argon Weekly Limit","window":"weekly","remainingFraction":0.0008,"resetTime":"2026-10-19T13:17:17Z"}
+          ]}
+        ]}
+        """
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: summaryWithExhaustedArgon)
+
+        let usage = try await provider.fetchUsage(with: makeCredential())
+        let normalized = UsageNormalizer.normalize(provider: provider, usage: usage)
+
+        XCTAssertEqual(normalized.windows.count, 5)
+        XCTAssertEqual(normalized.windows.last?.label, "Gemini 4 Argon · Weekly")
+        XCTAssertEqual(normalized.windows.last?.remainingPercent ?? -1, 0.08, accuracy: 0.001)
+        // Headline remainingPercent reflects tightest core pool (Claude + GPT · Weekly = 95.31%), not Argon (0.08%)
+        XCTAssertEqual(normalized.remainingPercent ?? -1, 95.31, accuracy: 0.01)
+        XCTAssertEqual(normalized.status, "healthy")
+        XCTAssertTrue(normalized.nextResetAt?.hasPrefix("2026-10-20T15:00:00") == true)
+    }
+
+
+    func testArgonOnlySnapshotStillReportsItsActualQuota() async throws {
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: """
+        {"groups":[{"displayName":"Gemini 4 Argon","buckets":[
+          {"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0,
+           "resetTime":"2026-10-25T00:00:00Z"}]}]}
+        """)
+        let usage = try await provider.fetchUsage(with: makeCredential())
+        let normalized = UsageNormalizer.normalize(provider: provider, usage: usage)
+        XCTAssertEqual(normalized.remainingPercent, 0)
+        XCTAssertEqual(normalized.status, "critical")
+        XCTAssertEqual(normalized.windows.count, 1)
+    }
+
     func testSummaryWithoutUsableBucketsIsRejected() {
         XCTAssertNil(provider.parseQuotaSummary([:]))
         XCTAssertNil(provider.parseQuotaSummary(Self.json(#"{"groups":[]}"#)))
