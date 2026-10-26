@@ -1,4 +1,5 @@
 import SwiftUI
+import QuotaBackend
 
 // MARK: - CPA Runtime 设置
 // 主界面：常规 / 选号策略 / 网络。
@@ -11,6 +12,8 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     let onApply: () -> Void
 
     @State private var showAdvanced = false
+    @State private var poolProtectionEnabled = false
+    @State private var poolProtectionError: String?
 
     private var hasUnappliedChanges: Bool {
         draftSettings.normalized != runtime.settings.normalized
@@ -25,6 +28,7 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     header
+                    poolProtectionSection
 
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -151,6 +155,30 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 stickyApplyBar
             }
         }
+    }
+
+    private var poolProtectionSection: some View {
+        GatewayCard {
+            VStack(alignment: .leading, spacing: 8) {
+                Toggle(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"), isOn: Binding(
+                    get: { poolProtectionEnabled },
+                    set: { enabled in
+                        do {
+                            try AntigravityPoolProtectionSettings.setEnabled(enabled)
+                            poolProtectionEnabled = enabled
+                            poolProtectionError = nil
+                        } catch {
+                            poolProtectionError = L("Could not update protection. Check the CPA version, model exclusions and file permissions.", "无法更新保护设置，请检查 CPA 版本、模型排除规则和文件权限。")
+                        }
+                    }
+                ))
+                .accessibilityIdentifier("antigravity-pool-protection")
+                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
+                    .font(.caption).foregroundStyle(.secondary)
+                if let poolProtectionError { Text(poolProtectionError).font(.caption).foregroundStyle(.red) }
+            }
+        }
+        .onAppear { poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled() }
     }
 
     private var header: some View {

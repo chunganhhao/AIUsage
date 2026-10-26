@@ -56,7 +56,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         }
 
         let authContext = try resolveCredentialAuthContext(credential)
-        var usage = try await fetchForAuthContext(authContext)
+        var usage = try await fetchForAuthContext(authContext, credentialID: credential.id)
         usage.usageAccountId = authContext.authFile.email ?? authContext.url.lastPathComponent
         if usage.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
             usage.accountEmail = credential.accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -69,7 +69,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     /// Core fetch logic for a single auth context
-    private func fetchForAuthContext(_ authContext: AuthContext) async throws -> ProviderUsage {
+    private func fetchForAuthContext(_ authContext: AuthContext, credentialID: String) async throws -> ProviderUsage {
         let originalData = authContext.rawData
         var authFile = authContext.authFile
         var accessToken = authFile.accessToken
@@ -97,12 +97,26 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             subscription = await loadCodeAssist(accessToken: accessToken)
             quota = try await fetchQuota(accessToken: accessToken, projectId: subscription.projectId)
         }
-        return buildUsage(
+        var usage = buildUsage(
             authContext: authContext,
             authFile: authFile,
             subscription: subscription,
             quota: quota
         )
+        if AntigravityPoolProtectionSettings.isEnabled(homeDirectory: homeDirectory) {
+            do {
+                let runtime = AntigravityPoolProtectionSettings.runtime(homeDirectory)
+                let targets = try AntigravityPoolCircuitBreaker.targets(runtime: runtime, source: authContext.url,
+                    credentialID: credentialID, sourceData: authContext.rawData)
+                if let outcome = try AntigravityPoolCircuitBreaker.sync(targets: targets, models: quota.models, runtime: runtime) {
+                    usage.extra["circuitBreakerPartialTripped"] = AnyCodable(!outcome.blockedPools.isEmpty)
+                    usage.extra["circuitBreakerTrippedPool"] = AnyCodable(outcome.blockedPools.joined(separator: ", "))
+                }
+            } catch {
+                usage.extra["circuitBreakerError"] = AnyCodable(error.localizedDescription)
+            }
+        }
+        return usage
     }
 
     // MARK: - Auth Files
@@ -236,14 +250,17 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     private func persistRefreshedToken(at url: URL, originalData: Data, refreshed: RefreshedToken) {
-        guard var json = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return }
-        json["access_token"] = refreshed.accessToken
-        json["expired"] = iso8601String(refreshed.expiryDate)
-        json["expires_in"] = refreshed.expiresIn
-        json["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
-
-        guard let updated = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) else { return }
-        try? updated.write(to: url, options: .atomic)
+        guard let original = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return }
+        try? AntigravityCredentialFile.update(url) { latest in
+            guard latest["access_token"] as? String == original["access_token"] as? String,
+                  latest["refresh_token"] as? String == original["refresh_token"] as? String else { return nil }
+            var json = latest
+            json["access_token"] = refreshed.accessToken
+            json["expired"] = iso8601String(refreshed.expiryDate)
+            json["expires_in"] = refreshed.expiresIn
+            json["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
+            return json
+        }
     }
 
     private func formURLEncodedBody(_ params: [String: String]) -> Data? {

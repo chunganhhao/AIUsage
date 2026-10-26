@@ -63,6 +63,16 @@ extension UsageNormalizer {
             : isGrouped
                 ? "Antigravity meters quota per model group, each with a 5-hour and a weekly limit, so the dashboard lists every window and puts the tightest ones first."
                 : "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first."
+        if extraString(usage, "circuitBreakerError") != nil {
+            base.status = "watch"
+            base.statusLabel = "Pool Protection Needs Attention"
+            base.spotlight = "Pool protection could not be synchronized. Check the managed CPA version and model exclusions."
+        } else if usage.extra["circuitBreakerPartialTripped"]?.value as? Bool == true {
+            base.status = "watch"
+            base.statusLabel = "Pool Protection Active"
+            let pools = extraString(usage, "circuitBreakerTrippedPool") ?? ""
+            base.spotlight = "Protected pools: \(pools). Other pools remain available. Recovery requires weekly > 3% and five-hour > 5%."
+        }
         return base
     }
 }
