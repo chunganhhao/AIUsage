@@ -35,6 +35,19 @@
 <table>
   <tr>
     <td width="132" align="center">
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><img src="docs/images/ipwo-logo.jpg" alt="IPWO" width="96"></a><br>
+      <strong>IPWO</strong>
+    </td>
+    <td>
+      <strong>注册即领 2GB 免费动态代理流量。</strong><br>
+      住宅代理覆盖 195+ 个国家和地区，支持 HTTP(S) 与 SOCKS5，可按需选择目标地区。<br>
+      适用于 AI 开发工具跨区域访问、API 调用与网络测试。<br>
+      优惠码 <code>0201</code>：享 <strong>9 折</strong>。<br>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><strong>领取 2GB 免费流量 →</strong></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="132" align="center">
       <a href="https://api-models.com/sign-up?aff=mfLW"><img src="docs/images/api-models-logo-light.png" alt="API Models" width="88"></a><br>
       <strong>API Models</strong>
     </td>
