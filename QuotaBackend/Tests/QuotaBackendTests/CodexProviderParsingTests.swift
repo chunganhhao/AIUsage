@@ -109,6 +109,20 @@ final class CodexProviderParsingTests: XCTestCase {
         XCTAssertEqual(summary.metrics.first { $0.label == "Credits" }?.value, "1235 credits")
     }
 
+    func testResetCreditCountIsOptionalAndSeparateFromBalance() throws {
+        for count in [3, 0] {
+            let usage = parse("{\"rate_limit_reset_credits\":{\"available_count\":\(count)},\"credits\":{\"has_credits\":true,\"balance\":\"42\"}}")
+            XCTAssertEqual(usage.codexResetCreditsAvailableCount, count)
+            let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
+            XCTAssertEqual(summary.codexResetCreditsAvailableCount, count)
+            XCTAssertEqual(try JSONDecoder().decode(ProviderSummary.self, from: JSONEncoder().encode(summary)).codexResetCreditsAvailableCount, count)
+            XCTAssertEqual(usage.extra["credits"]?.value as? String, "42 credits")
+        }
+        let legacy = parse("{}")
+        XCTAssertNil(legacy.codexResetCreditsAvailableCount)
+        XCTAssertNil(try JSONDecoder().decode(ProviderUsage.self, from: JSONEncoder().encode(legacy)).codexResetCreditsAvailableCount)
+    }
+
     func testCreditsDisplay() {
         let unlimited = parse(#"{"plan_type":"enterprise","credits":{"has_credits":false,"unlimited":true}}"#)
         XCTAssertEqual(unlimited.extra["credits"]?.value as? String, "Unlimited")

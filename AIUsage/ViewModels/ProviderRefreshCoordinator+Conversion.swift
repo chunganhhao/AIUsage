@@ -82,7 +82,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: s.sourceFilePath,
-            errorCode: s.errorCode
+            errorCode: s.errorCode,
+            codexResetCreditsAvailableCount: s.codexResetCreditsAvailableCount
         )
     }
 
@@ -182,7 +183,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: provider.sourceFilePath,
-            errorCode: provider.errorCode
+            errorCode: provider.errorCode,
+            codexResetCreditsAvailableCount: provider.codexResetCreditsAvailableCount
         )
     }
 
