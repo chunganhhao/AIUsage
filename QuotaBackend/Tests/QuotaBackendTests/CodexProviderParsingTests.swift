@@ -106,7 +106,21 @@ final class CodexProviderParsingTests: XCTestCase {
         XCTAssertEqual(summary.remainingPercent, 10)
         XCTAssertEqual(summary.status, "critical")
         XCTAssertEqual(summary.workspaceLabel, "Business")
-        XCTAssertEqual(summary.metrics.first { $0.label == "Credits" }?.value, "1235 credits")
+        XCTAssertEqual(summary.metrics.first { $0.label == "Credits" }?.value, "1234.6 credits")
+    }
+
+    func testResetCreditCountIsOptionalAndSeparateFromBalance() throws {
+        for count in [3, 0] {
+            let usage = parse("{\"rate_limit_reset_credits\":{\"available_count\":\(count)},\"credits\":{\"has_credits\":true,\"balance\":\"42\"}}")
+            XCTAssertEqual(usage.codexResetCreditsAvailableCount, count)
+            let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
+            XCTAssertEqual(summary.codexResetCreditsAvailableCount, count)
+            XCTAssertEqual(try JSONDecoder().decode(ProviderSummary.self, from: JSONEncoder().encode(summary)).codexResetCreditsAvailableCount, count)
+            XCTAssertEqual(usage.extra["credits"]?.value as? String, "42 credits")
+        }
+        let legacy = parse("{}")
+        XCTAssertNil(legacy.codexResetCreditsAvailableCount)
+        XCTAssertNil(try JSONDecoder().decode(ProviderUsage.self, from: JSONEncoder().encode(legacy)).codexResetCreditsAvailableCount)
     }
 
     func testCreditsDisplay() {
@@ -116,8 +130,18 @@ final class CodexProviderParsingTests: XCTestCase {
         let hidden = parse(#"{"plan_type":"plus","credits":{"has_credits":true,"unlimited":false}}"#)
         XCTAssertEqual(hidden.extra["credits"]?.value as? String, "Available")
 
+        let unavailable = parse(#"{"credits":{"has_credits":false,"unlimited":false,"balance":null}}"#)
+        XCTAssertEqual(unavailable.extra["credits"]?.value as? String, "No available credits")
         let none = parse(#"{"plan_type":"plus","credits":{"has_credits":false,"unlimited":false,"balance":"0"}}"#)
-        XCTAssertNil(none.extra["credits"])
+        XCTAssertEqual(none.extra["credits"]?.value as? String, "0 credits")
+        for raw in [#"{"balance":42.25,"has_credits":true}"#, #"{"balance":"42.25","has_credits":true}"#] {
+            let usage = parse("{\"credits\":\(raw)}")
+            XCTAssertEqual(usage.extra["credits"]?.value as? String, "42.25 credits")
+        }
+        for raw in [#"{}"#, #"{"balance":"NaN"}"#, #"{"balance":"Infinity"}"#, #"{"balance":-1}"#] {
+            XCTAssertNil(parse("{\"credits\":\(raw)}").extra["credits"])
+        }
+        XCTAssertNotNil(parse(#"{"credits":{"balance":"1e100","has_credits":true}}"#).extra["credits"]?.value as? String)
     }
 
     /// The official schema dropped `code_review_rate_limit`, but older payloads still carry it.

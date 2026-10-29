@@ -267,6 +267,7 @@ struct ProviderData: Identifiable, Codable, Sendable {
     let sourceFilePath: String?
     /// 机器可读错误码（仅错误态非空），用于区分「未连接」与「真实抓取失败」。
     let errorCode: String?
+    let codexResetCreditsAvailableCount: Int?
 
     init(from decoder: Decoder) throws {
         let container = try decoder.container(keyedBy: CodingKeys.self)
@@ -299,9 +300,10 @@ struct ProviderData: Identifiable, Codable, Sendable {
         costSummary = try container.decodeIfPresent(CostSummary.self, forKey: .costSummary)
         sourceFilePath = try container.decodeIfPresent(String.self, forKey: .sourceFilePath)
         errorCode = try container.decodeIfPresent(String.self, forKey: .errorCode)
+        codexResetCreditsAvailableCount = try container.decodeIfPresent(Int.self, forKey: .codexResetCreditsAvailableCount)
     }
 
-    nonisolated init(id: String, providerId: String, accountId: String?, name: String, label: String, description: String, category: String, channel: String?, status: ProviderStatus, statusLabel: String, theme: ProviderTheme, sourceLabel: String, sourceType: String, fetchedAt: String?, accountLabel: String?, membershipLabel: String?, workspaceLabel: String? = nil, workspaceUserId: String? = nil, headline: Headline, metrics: [Metric], windows: [QuotaWindow], remainingPercent: Double?, nextResetAt: String?, nextResetLabel: String?, spotlight: String?, models: [ModelInfo]?, costSummary: CostSummary?, sourceFilePath: String? = nil, errorCode: String? = nil) {
+    nonisolated init(id: String, providerId: String, accountId: String?, name: String, label: String, description: String, category: String, channel: String?, status: ProviderStatus, statusLabel: String, theme: ProviderTheme, sourceLabel: String, sourceType: String, fetchedAt: String?, accountLabel: String?, membershipLabel: String?, workspaceLabel: String? = nil, workspaceUserId: String? = nil, headline: Headline, metrics: [Metric], windows: [QuotaWindow], remainingPercent: Double?, nextResetAt: String?, nextResetLabel: String?, spotlight: String?, models: [ModelInfo]?, costSummary: CostSummary?, sourceFilePath: String? = nil, errorCode: String? = nil, codexResetCreditsAvailableCount: Int? = nil) {
         self.id = id
         self.providerId = providerId
         self.accountId = accountId
@@ -331,8 +333,15 @@ struct ProviderData: Identifiable, Codable, Sendable {
         self.costSummary = costSummary
         self.sourceFilePath = sourceFilePath
         self.errorCode = errorCode
+        self.codexResetCreditsAvailableCount = codexResetCreditsAvailableCount
     }
     
+    /// 复用后端已有积分指标，同时兼容远程快照和中英文切换。
+    var codexCreditsDisplayValue: String? {
+        guard baseProviderId == "codex" else { return nil }
+        return metrics.first { $0.label == "Credits" || $0.label == "积分" }?.value.nilIfBlank
+    }
+
     var remainingPercentValue: Double {
         remainingPercent ?? 100.0
     }

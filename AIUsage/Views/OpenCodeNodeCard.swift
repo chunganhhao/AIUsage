@@ -59,6 +59,10 @@ struct OpenCodeNodeCard: View, Equatable {
     private static let anthropicBrand = Color(red: 0.85, green: 0.47, blue: 0.34)
     private static let responsesBrand = Color(red: 0.40, green: 0.52, blue: 0.92)
 
+    private var balanceTarget: APIKeyBalanceTarget? {
+        APIKeyBalanceTarget(baseURL: node.baseURL, apiKey: node.apiKey)
+    }
+
     private var brand: Color { OpenCodeManagementView.brand }
 
     /// 协议主题色（徽章用）。
@@ -107,6 +111,7 @@ struct OpenCodeNodeCard: View, Equatable {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     connectivityStatusLine
+                    NodeBalanceLine(target: balanceTarget)
                 }
 
                 Spacer()
@@ -415,6 +420,7 @@ struct OpenCodeNodeCard: View, Equatable {
 
     @ViewBuilder
     private var cardContextMenu: some View {
+        NodeBalanceMenu(target: balanceTarget)
         Button { onToggleActivation() } label: {
             Label(
                 isActive ? L("Restore OpenCode configuration", "还原 OpenCode 配置") : L("Apply to OpenCode", "接入 OpenCode"),

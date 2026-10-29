@@ -82,7 +82,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: s.sourceFilePath,
-            errorCode: s.errorCode
+            errorCode: s.errorCode,
+            codexResetCreditsAvailableCount: s.codexResetCreditsAvailableCount
         )
     }
 
@@ -182,7 +183,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: provider.sourceFilePath,
-            errorCode: provider.errorCode
+            errorCode: provider.errorCode,
+            codexResetCreditsAvailableCount: provider.codexResetCreditsAvailableCount
         )
     }
 
@@ -387,6 +389,7 @@ extension ProviderRefreshCoordinator {
             "Credits": "积分",
             "AI Credits": "AI 积分",
             "Available": "可用",
+            "No available credits": "无可用积分",
             "Monthly Credit Limit": "月度积分上限",
             "Reset": "重置",
             "Source": "来源",
@@ -515,7 +518,7 @@ extension ProviderRefreshCoordinator {
         result = replacingRegex(#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#,
                                 in: result,
                                 template: "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。")
-        result = replacingRegex(#"^(\d[\d,]*) credits$"#, in: result, template: "$1 积分")
+        result = replacingRegex(#"^(\d[\d,]*(?:\.\d+)?) credits$"#, in: result, template: "$1 积分")
         result = replacingRegex(#"^(\d[\d,]*) over$"#, in: result, template: "超出 $1")
         result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5 小时")
         result = replacingRegex(#"^(.+) · Weekly$"#, in: result, template: "$1 · 每周")

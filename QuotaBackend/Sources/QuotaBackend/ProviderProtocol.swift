@@ -143,6 +143,8 @@ public struct ProviderUsage: Codable, Sendable {
     public var secondary: RawQuotaWindow?
     public var tertiary: RawQuotaWindow?
 
+    public var codexResetCreditsAvailableCount: Int?
+
     public var extra: [String: AnyCodable]
 
     private enum CodingKeys: String, CodingKey {
@@ -150,7 +152,7 @@ public struct ProviderUsage: Codable, Sendable {
         case usageAccountId = "accountId"
         case fetchedAt, source
         case accountEmail, accountName, accountLogin, accountPlan
-        case primary, secondary, tertiary, extra
+        case primary, secondary, tertiary, extra, codexResetCreditsAvailableCount
     }
 
     public init(provider: String, label: String, accountId: String? = nil, extra: [String: AnyCodable] = [:]) {

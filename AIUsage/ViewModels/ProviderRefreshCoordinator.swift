@@ -25,6 +25,8 @@ final class ProviderRefreshCoordinator: ObservableObject {
     @Published var providerRefreshTimes: [String: Date] = [:]
     @Published var accountRefreshTimes: [String: Date] = [:]
 
+    var codexResetRefreshFence = CodexResetRefreshFence()
+
     let engine = ProviderEngine()
     private var refreshTimer: Timer?
     private var claudeCodeRefreshTimer: Timer?
@@ -234,6 +236,19 @@ final class ProviderRefreshCoordinator: ObservableObject {
         )
         completeAccountRefresh(refreshKey: refreshKey, result: result)
         errorMessage = result.userMessage
+    }
+
+    /// 消费结果回读必须发起新请求；不走会跳过 in-flight 的手动刷新入口，也不回退到整个 provider。
+    @MainActor
+    func refreshCodexAccountAfterReset(credentialId: String, identity: CodexAccountIdentity) async -> Bool {
+        guard settings.backendMode == "local", let key = identity.nativeKey,
+              let credential = AccountCredentialStore.shared.loadCredential(providerId: "codex", credentialId: credentialId),
+              CodexAccountIdentity(credential: credential).nativeKey == key else { return false }
+        codexResetRefreshFence.invalidate(key)
+        defer { codexResetRefreshFence.invalidate(key) }
+        let result = await fetchAccountByCredential(credentialId: credentialId, providerId: "codex", expectedCodexIdentity: key)
+        completeAccountRefresh(refreshKey: accountRefreshKey(providerId: "codex", credentialId: credentialId), result: result)
+        return result.shouldUpdateTimestamps
     }
 
     @MainActor

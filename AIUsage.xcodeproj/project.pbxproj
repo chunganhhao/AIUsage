@@ -231,6 +231,10 @@
 		C1SV00022FB0000500B26789 /* SettingsView+MenuBarPins.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1SV00012FB0000500B26789 /* SettingsView+MenuBarPins.swift */; };
 		D7F43642D7D9AACEEF2315DF /* ProxyStatsView+Trend.swift in Sources */ = {isa = PBXBuildFile; fileRef = E4778326415BF371DC5B6E6D /* ProxyStatsView+Trend.swift */; };
 		F1A2B3C4D5E60001 /* Sparkle in Frameworks */ = {isa = PBXBuildFile; productRef = F1A2B3C4D5E60002 /* Sparkle */; };
+		C0DECB000000000000000001 /* CodexResetRefreshFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000001 /* CodexResetRefreshFence.swift */; };
+		C0DECB000000000000000002 /* CodexResetCreditsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000002 /* CodexResetCreditsCoordinator.swift */; };
+		C0DECB000000000000000003 /* CodexResetCreditsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000003 /* CodexResetCreditsView.swift */; };
+		BABA33000000000000000001 /* NodeBalanceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BABA33000000000000000002 /* NodeBalanceView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -460,6 +464,10 @@
 		E2D13F2156D366B8A69BC697 /* ProxyStatsView+Summary.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "ProxyStatsView+Summary.swift"; sourceTree = "<group>"; };
 		E4778326415BF371DC5B6E6D /* ProxyStatsView+Trend.swift */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = sourcecode.swift; path = "ProxyStatsView+Trend.swift"; sourceTree = "<group>"; };
 		F9DC4A1479C740ED996962FC /* ProxyStatsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyStatsView.swift; sourceTree = "<group>"; };
+		C0DECA000000000000000001 /* CodexResetRefreshFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetRefreshFence.swift; sourceTree = "<group>"; };
+		C0DECA000000000000000002 /* CodexResetCreditsCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetCreditsCoordinator.swift; sourceTree = "<group>"; };
+		C0DECA000000000000000003 /* CodexResetCreditsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetCreditsView.swift; sourceTree = "<group>"; };
+		BABA33000000000000000002 /* NodeBalanceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBalanceView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -503,6 +511,8 @@
 				B1AP00202FA1000100A15674 /* APIProviderDistributor.swift */,
 				B1AP00302FA1000200A15674 /* APIProviderCPALinkStore.swift */,
 				5EFREF002F93000100A15674 /* ProviderRefreshCoordinator.swift */,
+				C0DECA000000000000000002 /* CodexResetCreditsCoordinator.swift */,
+				C0DECA000000000000000001 /* CodexResetRefreshFence.swift */,
 				5EFREF212F93000100A15674 /* ProviderRefreshCoordinator+FetchPipeline.swift */,
 				5EFREF312F93000100A15674 /* ProviderRefreshCoordinator+Conversion.swift */,
 				B1REFB002F97002000A15674 /* ProviderRefreshResult.swift */,
@@ -689,6 +699,8 @@
 				C1MB00092FB0000400B26789 /* MenuBarSupport.swift */,
 				B1C2D3E4F5A60002 /* StatusBarItemView.swift */,
 				5EFAD7492F87AC7100A15674 /* ProviderCard.swift */,
+				C0DECA000000000000000003 /* CodexResetCreditsView.swift */,
+				BABA33000000000000000002 /* NodeBalanceView.swift */,
 				5EF0C0D12F95000100A15674 /* ProviderCard+MultiWindowQuota.swift */,
 				5EF0C0D32F95000100A15674 /* ProviderCard+QuotaIndicator.swift */,
 				5EF0C0D52F95000100A15674 /* ProviderCard+ResetCountdown.swift */,
@@ -956,6 +968,8 @@
 				B1AP00512FA1000100A15674 /* APIProviderEditorView.swift in Sources */,
 				B1TLS0012F97003000A15674 /* TLSCertificateManager.swift in Sources */,
 				5EFAD7752F87AFE700A15674 /* ProviderCard.swift in Sources */,
+				C0DECB000000000000000003 /* CodexResetCreditsView.swift in Sources */,
+				BABA33000000000000000001 /* NodeBalanceView.swift in Sources */,
 				5EF0C0D22F95000100A15674 /* ProviderCard+MultiWindowQuota.swift in Sources */,
 				5EF0C0D42F95000100A15674 /* ProviderCard+QuotaIndicator.swift in Sources */,
 				5EF0C0D62F95000100A15674 /* ProviderCard+ResetCountdown.swift in Sources */,
@@ -1090,6 +1104,8 @@
 				A2B3C4F42F96001000A15674 /* SettingsView+QuotaPreview.swift in Sources */,
 				A2B3C4F62F96001000A15674 /* SettingsView+Remote.swift in Sources */,
 				5EFREF012F93000100A15674 /* ProviderRefreshCoordinator.swift in Sources */,
+				C0DECB000000000000000002 /* CodexResetCreditsCoordinator.swift in Sources */,
+				C0DECB000000000000000001 /* CodexResetRefreshFence.swift in Sources */,
 				5EFREF222F93000100A15674 /* ProviderRefreshCoordinator+FetchPipeline.swift in Sources */,
 				5EFREF322F93000100A15674 /* ProviderRefreshCoordinator+Conversion.swift in Sources */,
 				B1REFB012F97002000A15674 /* ProviderRefreshResult.swift in Sources */,
@@ -1267,7 +1283,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.15.30;
+				MARKETING_VERSION = 0.15.33;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -1299,7 +1315,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.15.30;
+				MARKETING_VERSION = 0.15.33;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

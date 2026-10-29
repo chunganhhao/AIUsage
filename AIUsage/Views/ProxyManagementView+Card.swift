@@ -104,6 +104,12 @@ struct ConfigurationCardView: View, Equatable {
         }
     }
 
+    private var balanceTarget: APIKeyBalanceTarget? {
+        APIKeyBalanceTarget(
+            baseURL: config.nodeType == .anthropicDirect ? config.anthropicBaseURL : config.upstreamBaseURL,
+            apiKey: config.nodeType == .anthropicDirect ? config.anthropicAPIKey : config.upstreamAPIKey)
+    }
+
     // MARK: - Activation Labels (node-type aware)
     // Codex 节点写 ~/.codex/config.toml，Claude/OpenAI 代理节点写 ~/.claude/settings.json，
     // 所以激活相关文案要按目标 CLI 区分，不能一律写「Claude」。
@@ -232,6 +238,7 @@ struct ConfigurationCardView: View, Equatable {
                         .foregroundStyle(.secondary)
                         .lineLimit(1)
                     connectivityStatusLine
+                    NodeBalanceLine(target: balanceTarget)
                 }
 
                 Spacer()
@@ -520,6 +527,7 @@ struct ConfigurationCardView: View, Equatable {
 
     @ViewBuilder
     private var cardContextMenu: some View {
+        NodeBalanceMenu(target: balanceTarget)
         Button { onToggleActivation() } label: {
             Label(
                 isActive ? disconnectLabel : applyLabel,

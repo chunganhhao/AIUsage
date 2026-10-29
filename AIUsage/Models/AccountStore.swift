@@ -487,7 +487,10 @@ final class AccountStore: ObservableObject {
     }
 
     @MainActor
-    func reconcileAccountRegistry(with providers: [ProviderData]) async {
+    func reconcileAccountRegistry(
+        with providers: [ProviderData],
+        isValid: @MainActor (ProviderData) -> Bool = { _ in true }
+    ) async {
         let providerOrder = providerCatalogOrder
         var baselineRegistry = accountRegistry
         var baselineRevision = accountRegistryRevision
@@ -495,13 +498,17 @@ final class AccountStore: ObservableObject {
 
         while attempts < 2 {
             attempts += 1
+            let validProviders = providers.filter(isValid)
+            guard providers.isEmpty || !validProviders.isEmpty else { return }
             let result = await AccountRegistryRefreshWorker.shared.reconcile(
                 currentRegistry: baselineRegistry,
-                providers: providers,
+                providers: validProviders,
                 providerCatalogOrder: providerOrder
             )
 
-            if accountRegistryRevision != baselineRevision || accountRegistry != baselineRegistry {
+            // worker 挂起期间可能发生账号重置；提交前复核，重算时只保留仍有效的行。
+            if !validProviders.allSatisfy(isValid)
+                || accountRegistryRevision != baselineRevision || accountRegistry != baselineRegistry {
                 baselineRegistry = accountRegistry
                 baselineRevision = accountRegistryRevision
                 continue
