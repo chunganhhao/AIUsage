@@ -258,4 +258,48 @@ final class AntigravityPoolCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), external)
     }
 
+    func testUnreadableCredentialKeepsProtectionEnabledUntilCleanupCanRetry() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("pool-unreadable-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        let root = AntigravityPoolProtectionSettings.runtime(home.path)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("auth"), withIntermediateDirectories: true)
+        try Data(#"{"enabled":true}"#.utf8).write(to: root.appendingPathComponent("pool-protection.json"))
+        let file = root.appendingPathComponent("auth/a.json")
+        let blocked = try update(credential(), [quota("3p-5h", 0)])
+        let before = try JSONSerialization.data(withJSONObject: blocked)
+        try before.write(to: file)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+
+        XCTAssertThrowsError(try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path))
+        XCTAssertTrue(AntigravityPoolProtectionSettings.isEnabled(homeDirectory: home.path))
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        XCTAssertEqual(try Data(contentsOf: file), before)
+
+        try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path)
+        XCTAssertFalse(AntigravityPoolProtectionSettings.isEnabled(homeDirectory: home.path))
+        let cleaned = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertNil(cleaned["excluded_models"])
+        XCTAssertNil(cleaned["aiusage_pool_breaker"])
+    }
+
+    func testDisablingRetriesCleanupWhenSettingAlreadySaysOff() throws {
+        let home = FileManager.default.temporaryDirectory.appendingPathComponent("pool-stranded-\(UUID())")
+        addTeardownBlock { try? FileManager.default.removeItem(at: home) }
+        let root = AntigravityPoolProtectionSettings.runtime(home.path)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("auth"), withIntermediateDirectories: true)
+        try Data(#"{"enabled":false}"#.utf8).write(to: root.appendingPathComponent("pool-protection.json"))
+        let file = root.appendingPathComponent("auth/a.json")
+        var original = credential()
+        original["excluded_models"] = ["manual-model"]
+        let blocked = try update(original, [quota("3p-5h", 0)])
+        try JSONSerialization.data(withJSONObject: blocked).write(to: file)
+
+        try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path)
+        let cleaned = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(contentsOf: file)) as? [String: Any])
+        XCTAssertEqual(cleaned["excluded_models"] as? [String], ["manual-model"])
+        XCTAssertNil(cleaned["aiusage_pool_breaker"])
+        XCTAssertFalse(AntigravityPoolProtectionSettings.isEnabled(homeDirectory: home.path))
+    }
+
 }

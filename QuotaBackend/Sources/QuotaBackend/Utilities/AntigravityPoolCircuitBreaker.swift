@@ -66,9 +66,10 @@ enum AntigravityPoolCircuitBreaker {
         let directory = runtime.appendingPathComponent("auth")
         guard FileManager.default.fileExists(atPath: directory.path) else { return }
         for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) where url.pathExtension.lowercased() == "json" {
-            guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { continue }
-            guard let data = try? Data(contentsOf: url),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+            guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { continue }
+            // 无法读取就无法确认是否残留保护规则；必须报错，不能宣称已完成关闭。
+            let data = try Data(contentsOf: url)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   json["type"] as? String == "antigravity", json[stateKey] != nil else { continue }
             try AntigravityCredentialFile.update(url) { json in
                 guard json["type"] as? String == "antigravity", let state = json[stateKey] as? [String: Any] else { return nil }

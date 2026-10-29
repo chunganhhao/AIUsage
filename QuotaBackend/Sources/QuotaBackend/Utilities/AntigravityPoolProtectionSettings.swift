@@ -18,7 +18,8 @@ public enum AntigravityPoolProtectionSettings {
         try AntigravityCredentialFile.withLock {
             let directory = runtime(homeDirectory)
             if enabled { try AntigravityPoolCircuitBreaker.requireSupportedVersion(directory) }
-            else if isEnabled(homeDirectory: homeDirectory) {
+            else {
+                // 即使设置文件丢失或旧版本已写入关闭，也尝试清理原有保护规则。
                 try AntigravityPoolCircuitBreaker.clearProtection(runtime: directory)
             }
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
