@@ -36,6 +36,20 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     public func fetchUsage(with credential: AccountCredential) async throws -> ProviderUsage {
+        let usageURL = try resolveUsageURL()
+        return try await withCredential(credential) { creds, source in
+            let response = try await requestUsage(creds: creds, url: usageURL)
+            return parseResponse(response, accountId: creds.accountId ?? normalizedLabel(credential.accountLabel),
+                                 source: source, fallbackEmail: creds.accountEmail ?? normalizedLabel(credential.accountLabel),
+                                 jwtPlanType: creds.jwtPlanType, jwtUserId: creds.jwtUserId)
+        }
+    }
+
+    /// 只包装可重试的读取；写操作必须在此闭包之外提交一次。
+    func withCredential<T>(
+        _ credential: AccountCredential,
+        read: (Credentials, SourceInfo) async throws -> T
+    ) async throws -> T {
         let creds: Credentials
         let source: SourceInfo
         let credentialPath: String?
@@ -102,18 +116,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             }
         }
 
-        let usageURL = try resolveUsageURL()
-
         do {
-            let response = try await requestUsage(creds: effectiveCreds, url: usageURL)
-            return parseResponse(
-                response,
-                accountId: effectiveCreds.accountId ?? normalizedLabel(credential.accountLabel),
-                source: source,
-                fallbackEmail: effectiveCreds.accountEmail ?? normalizedLabel(credential.accountLabel),
-                jwtPlanType: effectiveCreds.jwtPlanType,
-                jwtUserId: effectiveCreds.jwtUserId
-            )
+            return try await read(effectiveCreds, source)
         } catch let error as ProviderError where error.code == "unauthorized" {
             var credentialFailure = proactiveRefreshFailure
             var refreshedCredentials: Credentials?
@@ -137,15 +141,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
             if let refreshed = refreshedCredentials {
                 do {
-                    let response = try await requestUsage(creds: refreshed, url: usageURL)
-                    return parseResponse(
-                        response,
-                        accountId: refreshed.accountId ?? normalizedLabel(credential.accountLabel),
-                        source: source,
-                        fallbackEmail: refreshed.accountEmail ?? normalizedLabel(credential.accountLabel),
-                        jwtPlanType: refreshed.jwtPlanType,
-                        jwtUserId: refreshed.jwtUserId
-                    )
+                    return try await read(refreshed, source)
                 } catch let retryError as ProviderError where retryError.code == "unauthorized" {
                     credentialFailure = ProviderError(
                         "unauthorized_after_refresh",
@@ -155,12 +151,11 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             }
 
             do {
-                return try await recoverFromSourceAndFetch(
+                return try await recoverFromSourceAndRead(
                     staleCreds: creds,
                     credentialPath: credentialPath,
                     sourcePath: credential.metadata["sourcePath"],
-                    usageURL: usageURL,
-                    fallbackLabel: credential.accountLabel
+                    read: read
                 )
             } catch let recoveryError as ProviderError {
                 if credentialFailure == nil,
@@ -179,13 +174,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     /// belongs to the same workspace, overwrite the stale copy and retry.
     /// Workspace identity = accountId + userId. Plan is mutable display metadata
     /// and must never block recovery after an upgrade or downgrade.
-    private func recoverFromSourceAndFetch(
+    private func recoverFromSourceAndRead<T>(
         staleCreds: Credentials,
         credentialPath: String?,
         sourcePath: String?,
-        usageURL: URL,
-        fallbackLabel: String?
-    ) async throws -> ProviderUsage {
+        read: (Credentials, SourceInfo) async throws -> T
+    ) async throws -> T {
         guard let credentialPath,
               let rawSource = stringValue(sourcePath) else {
             throw ProviderError("no_source", "No sourcePath metadata available for recovery.")
@@ -239,15 +233,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             }
         }
 
-        let response = try await requestUsage(creds: effective, url: usageURL)
-        return parseResponse(
-            response,
-            accountId: effective.accountId ?? normalizedLabel(fallbackLabel),
-            source: sourceInfo(for: URL(fileURLWithPath: expandedCredential), mode: "manual"),
-            fallbackEmail: effective.accountEmail ?? normalizedLabel(fallbackLabel),
-            jwtPlanType: effective.jwtPlanType,
-            jwtUserId: effective.jwtUserId
-        )
+        return try await read(effective, sourceInfo(for: URL(fileURLWithPath: expandedCredential), mode: "manual"))
     }
 
     private func sameCodexWorkspace(_ lhs: Credentials, _ rhs: Credentials) -> Bool {
@@ -842,6 +828,13 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         if let rawAccountId { usage.extra["workspaceId"] = AnyCodable(rawAccountId) }
         if let jwtUserId { usage.extra["userId"] = AnyCodable(jwtUserId) }
 
+        if let summary = json["rate_limit_reset_credits"] as? [String: Any],
+           let number = summary["available_count"] as? NSNumber,
+           CFGetTypeID(number) != CFBooleanGetTypeID(),
+           let count = Int(number.stringValue), count >= 0 {
+            usage.codexResetCreditsAvailableCount = count
+        }
+
         usage.primary = parseWindow(rateLimit["primary_window"] as? [String: Any])
         usage.secondary = parseWindow(rateLimit["secondary_window"] as? [String: Any])
         usage.tertiary = parseWindow(codeReviewLimit["primary_window"] as? [String: Any])
@@ -900,11 +893,22 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     private func creditsDisplay(_ credits: [String: Any]?) -> String? {
         guard let credits else { return nil }
         if credits["unlimited"] as? Bool == true { return "Unlimited" }
-        guard credits["has_credits"] as? Bool == true else { return nil }
-        // 与官方 TUI 一致：余额取整显示，拿不到余额时只说明可用。
-        let balance = stringValue(credits["balance"]).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        guard let balance, balance.isFinite, balance > 0 else { return "Available" }
-        return "\(Int(balance.rounded())) credits"
+        // 显式零余额也要展示；缺失余额不能伪装成零。
+        let balance: Double?
+        if let number = credits["balance"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            balance = number.doubleValue
+        } else {
+            balance = stringValue(credits["balance"]).flatMap(Double.init)
+        }
+        if let balance, balance.isFinite, balance >= 0 {
+            let value = balance.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))
+                .grouping(.never).precision(.fractionLength(0...2)))
+            return "\(value) credits"
+        }
+        if let hasCredits = credits["has_credits"] as? Bool {
+            return hasCredits ? "Available" : "No available credits"
+        }
+        return nil
     }
 
     private static func extraWindowEntry(label: String, window: RawQuotaWindow, affectsStatus: Bool) -> AnyCodable {

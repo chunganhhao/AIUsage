@@ -50,70 +50,81 @@ struct ProviderCard: View {
     
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
-            HStack(alignment: .center, spacing: 10) {
-                providerIcon
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(alignment: .center, spacing: 10) {
+                    providerIcon
 
-                Text(headerTitle)
-                    .font(.subheadline.weight(.semibold))
-                    .lineLimit(1)
+                    Text(headerTitle)
+                        .font(.subheadline.weight(.semibold))
+                        .lineLimit(1)
 
-                if isActiveProviderAccount && activationManager.canActivateProvider(provider.providerId) {
-                    Circle()
-                        .fill(Color.green)
-                        .frame(width: 6, height: 6)
-                        .help(L("Active CLI account", "当前 CLI 账号"))
+                    if isActiveProviderAccount && activationManager.canActivateProvider(provider.providerId) {
+                        Circle()
+                            .fill(Color.green)
+                            .frame(width: 6, height: 6)
+                            .help(L("Active CLI account", "当前 CLI 账号"))
+                    }
+
+                    if isRemoteViewOnly {
+                        GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
+                    }
+
+                    if isPinnedToMenuBar {
+                        Image(systemName: "pin.fill")
+                            .font(.system(size: 8, weight: .bold))
+                            .foregroundStyle(accentColor.opacity(0.7))
+                            .rotationEffect(.degrees(45))
+                    }
+
+                    Spacer(minLength: 8)
+
+                    if let membership = provider.membershipLabel {
+                        GatewayQuietBadge(text: membership, tint: membershipBadgeTint(for: membership))
+                    }
+                    if shouldShowStatusBadge {
+                        GatewayQuietBadge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
+                    }
                 }
 
-                if isRemoteViewOnly {
-                    GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
+                if let headlineValue = compactHeadlineValue {
+                    Text(headlineValue)
+                        .font(.system(size: 26, weight: .bold, design: .rounded))
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.72)
+                    if provider.providerId != "claude-subscription", let secondary = provider.headline.secondary.nilIfBlank {
+                        Text(secondary)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .lineLimit(2)
+                    }
                 }
 
-                if isPinnedToMenuBar {
-                    Image(systemName: "pin.fill")
-                        .font(.system(size: 8, weight: .bold))
-                        .foregroundStyle(accentColor.opacity(0.7))
-                        .rotationEffect(.degrees(45))
+                if useMultiWindowLayout {
+                    MultiWindowQuotaView(
+                        windows: provider.windows,
+                        accentColor: accentColor,
+                        visibleWindowLimit: Self.multiWindowVisibleLimit(for: provider.providerId)
+                    )
+                } else if let remaining = provider.remainingPercent {
+                    QuotaIndicatorView(remainingPercent: remaining, accentColor: accentColor, resetAt: provider.nextResetAt)
                 }
 
-                Spacer(minLength: 8)
-
-                if let membership = provider.membershipLabel {
-                    GatewayQuietBadge(text: membership, tint: membershipBadgeTint(for: membership))
-                }
-                if shouldShowStatusBadge {
-                    GatewayQuietBadge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
-                }
-            }
-
-            if let headlineValue = compactHeadlineValue {
-                Text(headlineValue)
-                    .font(.system(size: 26, weight: .bold, design: .rounded))
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.72)
-                if provider.providerId != "claude-subscription", let secondary = provider.headline.secondary.nilIfBlank {
+                if provider.providerId == "claude-subscription", let secondary = provider.headline.secondary.nilIfBlank {
                     Text(secondary)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                         .lineLimit(2)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
-            }
 
-            if useMultiWindowLayout {
-                MultiWindowQuotaView(
-                    windows: provider.windows,
-                    accentColor: accentColor,
-                    visibleWindowLimit: Self.multiWindowVisibleLimit(for: provider.providerId)
-                )
-            } else if let remaining = provider.remainingPercent {
-                QuotaIndicatorView(remainingPercent: remaining, accentColor: accentColor, resetAt: provider.nextResetAt)
             }
+            .contentShape(Rectangle())
+            .onTapGesture { showingDetail = true }
 
-            if provider.providerId == "claude-subscription", let secondary = provider.headline.secondary.nilIfBlank {
-                Text(secondary)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+            if provider.providerId == "codex" {
+                CodexCreditsBalanceView(value: provider.codexCreditsDisplayValue)
+                CodexResetCreditsControl(target: resetTarget, knownCount: provider.codexResetCreditsAvailableCount,
+                                         summaryFetchedAt: provider.fetchedAt, refreshUsage: refreshResetTarget)
             }
 
             HStack(alignment: .center, spacing: 8) {
@@ -149,6 +160,8 @@ struct ProviderCard: View {
                         .fixedSize()
                 }
             }
+            .contentShape(Rectangle())
+            .onTapGesture { showingDetail = true }
         }
         .frame(minHeight: 124)
         .padding(.horizontal, 12)
@@ -165,9 +178,6 @@ struct ProviderCard: View {
         .animation(.easeInOut(duration: 0.18), value: isHovered)
         .onHover { hovering in
             isHovered = hovering
-        }
-        .onTapGesture {
-            showingDetail = true
         }
         .contextMenu {
             if canActivateProvider {
@@ -297,6 +307,20 @@ struct ProviderCard: View {
         }
     }
     
+    private var resetTarget: CodexResetCreditsCoordinator.Target {
+        let identity = CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId)
+        return .init(identity: identity,
+                     credentialID: settings.backendMode == "local" ? refreshCoordinator.credentialID(for: provider) : nil,
+                     label: [provider.accountLabel, provider.workspaceLabel, provider.accountId].compactMap { $0?.nilIfBlank }.joined(separator: " · "),
+                     isLocal: settings.backendMode == "local")
+    }
+
+    private func refreshResetTarget() async -> Bool {
+        let target = resetTarget
+        guard target.isLocal, let credentialID = target.credentialID else { return false }
+        return await refreshCoordinator.refreshCodexAccountAfterReset(credentialId: credentialID, identity: target.identity)
+    }
+
     // MARK: - Components
     
     private var providerIcon: some View {
