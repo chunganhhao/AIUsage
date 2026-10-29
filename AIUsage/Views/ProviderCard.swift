@@ -122,9 +122,7 @@ struct ProviderCard: View {
             .onTapGesture { showingDetail = true }
 
             if provider.providerId == "codex" {
-                if let credits = provider.codexCreditsDisplayValue {
-                    CodexCreditsBalanceView(value: credits)
-                }
+                CodexCreditsBalanceView(value: provider.codexCreditsDisplayValue)
                 CodexResetCreditsControl(target: resetTarget, knownCount: provider.codexResetCreditsAvailableCount,
                                          summaryFetchedAt: provider.fetchedAt, refreshUsage: refreshResetTarget)
             }

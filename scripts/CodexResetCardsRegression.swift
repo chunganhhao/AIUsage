@@ -25,6 +25,15 @@ struct CodexResetCardsRegression {
     }
 
     @MainActor static func main() async throws {
+        fixtureLanguage = "zh"
+        check(CodexCreditsText.full(nil) == "未提供", "Missing credit data is explicit")
+        check(CodexCreditsText.full("Available") == "可用 · 数额未提供", "Availability is not a numeric balance")
+        check(CodexCreditsText.full("可用") == "可用 · 数额未提供", "Legacy localized snapshots use the same wording")
+        check(CodexCreditsText.full("0 积分") == "0 积分", "Explicit zero stays zero")
+        check(CodexCreditsText.compact("42.25 积分") == "42.25", "Compact summary preserves the numeric amount")
+        fixtureLanguage = "en"
+        check(CodexCreditsText.full(nil) == "Not provided", "English missing data is explicit")
+        check(CodexCreditsText.full("Available") == "Available · amount not provided", "English unknown amount is explicit")
         let a = credential("A", user: "a"), b = credential("B", user: "b")
         AccountCredentialStore.shared.credentials = [a, b]
         let coordinator = ProviderRefreshCoordinator()

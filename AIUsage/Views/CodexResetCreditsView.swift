@@ -1,9 +1,27 @@
 import SwiftUI
 import QuotaBackend
 
+/// 所有积分入口共用文案，明确区分数值、可用标记和未返回数据。
+enum CodexCreditsText {
+    static func full(_ value: String?) -> String {
+        switch value {
+        case nil: return L("Not provided", "未提供")
+        case "Available", "可用": return L("Available · amount not provided", "可用 · 数额未提供")
+        default: return value ?? L("Not provided", "未提供")
+        }
+    }
+    static func compact(_ value: String?) -> String {
+        let text = full(value)
+        for suffix in [" credits", " 积分"] where text.hasSuffix(suffix) {
+            return String(text.dropLast(suffix.count))
+        }
+        return text
+    }
+}
+
 /// 积分余额独立于配额百分比与重置卡，不额外发送请求。
 struct CodexCreditsBalanceView: View {
-    let value: String
+    let value: String?
     @Environment(\.colorScheme) private var colorScheme
 
     var body: some View {
@@ -14,7 +32,7 @@ struct CodexCreditsBalanceView: View {
             Text(L("Credit balance", "积分余额"))
                 .font(.caption)
             Spacer(minLength: 8)
-            Text(value)
+            Text(CodexCreditsText.full(value))
                 .font(.caption.weight(.semibold))
                 .monospacedDigit()
                 .lineLimit(1)
@@ -24,7 +42,8 @@ struct CodexCreditsBalanceView: View {
         .padding(.horizontal, 8)
         .frame(height: 22)
         .accessibilityElement(children: .combine)
-        .help(L("Codex credits are separate from reset cards and included quota limits.", "Codex 积分独立于重置卡和套餐额度。"))
+        .help(L("The provider may report only availability, without a numeric balance. Missing data is not zero. Credits are separate from reset cards.",
+                "上游可能只返回可用标记，不提供具体积分数；缺失数据不等于零。积分独立于重置卡。"))
     }
 }
 
@@ -393,13 +412,7 @@ struct CodexAccountBalanceSummary: View {
         coordinator.availableCount(for: target, summaryCount: provider.codexResetCreditsAvailableCount,
                                    summaryFetchedAt: provider.fetchedAt).map(String.init) ?? "—"
     }
-    private var creditText: String {
-        guard let value = provider.codexCreditsDisplayValue else { return L("Unknown", "未知") }
-        for suffix in [" credits", " 积分"] where value.hasSuffix(suffix) {
-            return String(value.dropLast(suffix.count))
-        }
-        return value
-    }
+    private var creditText: String { CodexCreditsText.compact(provider.codexCreditsDisplayValue) }
     var body: some View {
         HStack(spacing: 10) {
             if let onViewCards {

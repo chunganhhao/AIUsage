@@ -53,7 +53,8 @@ final class APIKeyBalanceTests: XCTestCase {
 
     func testUnknownMetadataDoesNotInventCurrencyAndNegativeBalanceIsPreserved() {
         let json: [String: Any] = ["data": ["object": "token_usage", "total_available": "-15", "unlimited_quota": false]]
-        for meta: [String: Any]? in [nil, ["success": true, "data": ["quota_per_unit": 500000]], ["success": false, "data": ["quota_per_unit": 500000, "quota_display_type": "USD"]]] {
+        let metadata: [[String: Any]?] = [nil, ["success": true, "data": ["quota_per_unit": 500000]], ["success": false, "data": ["quota_per_unit": 500000, "quota_display_type": "USD"]]]
+        for meta in metadata {
             let values = APIKeyBalanceService.parseNewAPI(json, metadata: meta)
             XCTAssertEqual(values, [.init(scope: .keyLimit, remaining: -15, currency: nil)])
         }
