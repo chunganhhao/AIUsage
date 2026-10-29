@@ -104,10 +104,24 @@ final class APIKeyBalanceTests: XCTestCase {
         let cached = await service.fetch(key)
         XCTAssertEqual(first.status, .unsupported)
         XCTAssertEqual(cached, first)
-        XCTAssertEqual(StubURLProtocol.requests.count, 1)
+        XCTAssertEqual(StubURLProtocol.requests.count, 2)
         let forced = await service.fetch(key, force: true)
         XCTAssertEqual(forced.status, .unsupported)
-        XCTAssertEqual(StubURLProtocol.requests.count, 2)
+        XCTAssertEqual(StubURLProtocol.requests.count, 4)
+    }
+
+    func testLegacyBillingDoesNotInventCurrencyScopeOrHugeSentinelBalance() async {
+        let root = "https://balance.invalid/team"
+        StubURLProtocol.respond(root + "/v1/dashboard/billing/subscription", body: #"{"object":"billing_subscription","hard_limit_usd":50}"#)
+        // 日期参数动态生成，使用相同 UTC 口径。
+        let end = ISO8601DateFormatter().string(from: Date().addingTimeInterval(86400)).prefix(10)
+        StubURLProtocol.respond(root + "/v1/dashboard/billing/usage?start_date=1970-01-01&end_date=" + end,
+                                body: #"{"object":"list","total_usage":1250}"#)
+        let result = await APIKeyBalanceService().fetch(target())
+        XCTAssertEqual(result.amounts, [.init(scope: .reportedLimit, remaining: 37.5, currency: nil)])
+        XCTAssertNil(APIKeyBalanceService.legacyAmount(limit: 100000000, used: 1234))
+        XCTAssertNil(APIKeyBalanceService.legacyAmount(limit: 50, used: -1))
+        XCTAssertEqual(APIKeyBalanceService.legacyAmount(limit: 10, used: 1200)?.remaining, -2)
     }
 
     func testConcurrentProductsDeduplicateAndFailureDoesNotReplayOldBalance() async {

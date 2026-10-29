@@ -130,13 +130,15 @@ final class CodexProviderParsingTests: XCTestCase {
         let hidden = parse(#"{"plan_type":"plus","credits":{"has_credits":true,"unlimited":false}}"#)
         XCTAssertEqual(hidden.extra["credits"]?.value as? String, "Available")
 
+        let unavailable = parse(#"{"credits":{"has_credits":false,"unlimited":false,"balance":null}}"#)
+        XCTAssertEqual(unavailable.extra["credits"]?.value as? String, "No available credits")
         let none = parse(#"{"plan_type":"plus","credits":{"has_credits":false,"unlimited":false,"balance":"0"}}"#)
         XCTAssertEqual(none.extra["credits"]?.value as? String, "0 credits")
         for raw in [#"{"balance":42.25,"has_credits":true}"#, #"{"balance":"42.25","has_credits":true}"#] {
             let usage = parse("{\"credits\":\(raw)}")
             XCTAssertEqual(usage.extra["credits"]?.value as? String, "42.25 credits")
         }
-        for raw in [#"{}"#, #"{"has_credits":false}"#, #"{"balance":"NaN"}"#, #"{"balance":"Infinity"}"#, #"{"balance":-1}"#] {
+        for raw in [#"{}"#, #"{"balance":"NaN"}"#, #"{"balance":"Infinity"}"#, #"{"balance":-1}"#] {
             XCTAssertNil(parse("{\"credits\":\(raw)}").extra["credits"])
         }
         XCTAssertNotNil(parse(#"{"credits":{"balance":"1e100","has_credits":true}}"#).extra["credits"]?.value as? String)

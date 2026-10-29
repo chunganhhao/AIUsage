@@ -29,6 +29,7 @@ struct CodexResetCardsRegression {
         check(CodexCreditsText.full(nil) == "未提供", "Missing credit data is explicit")
         check(CodexCreditsText.full("Available") == "可用 · 数额未提供", "Availability is not a numeric balance")
         check(CodexCreditsText.full("可用") == "可用 · 数额未提供", "Legacy localized snapshots use the same wording")
+        check(CodexCreditsText.full("No available credits") == "无可用积分", "Explicit no-credit flag is separate from an unknown amount")
         check(CodexCreditsText.full("0 积分") == "0 积分", "Explicit zero stays zero")
         check(CodexCreditsText.compact("42.25 积分") == "42.25", "Compact summary preserves the numeric amount")
         fixtureLanguage = "en"

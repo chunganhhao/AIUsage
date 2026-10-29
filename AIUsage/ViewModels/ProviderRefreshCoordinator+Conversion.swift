@@ -386,6 +386,7 @@ extension ProviderRefreshCoordinator {
             "Credits": "积分",
             "AI Credits": "AI 积分",
             "Available": "可用",
+            "No available credits": "无可用积分",
             "Monthly Credit Limit": "月度积分上限",
             "Reset": "重置",
             "Source": "来源",

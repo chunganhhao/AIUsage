@@ -2,11 +2,13 @@ import SwiftUI
 import QuotaBackend
 
 /// 所有积分入口共用文案，明确区分数值、可用标记和未返回数据。
+@MainActor
 enum CodexCreditsText {
     static func full(_ value: String?) -> String {
         switch value {
         case nil: return L("Not provided", "未提供")
         case "Available", "可用": return L("Available · amount not provided", "可用 · 数额未提供")
+        case "No available credits", "无可用积分": return L("No available credits", "无可用积分")
         default: return value ?? L("Not provided", "未提供")
         }
     }

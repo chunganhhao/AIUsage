@@ -905,7 +905,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 .grouping(.never).precision(.fractionLength(0...2)))
             return "\(value) credits"
         }
-        return credits["has_credits"] as? Bool == true ? "Available" : nil
+        if let hasCredits = credits["has_credits"] as? Bool {
+            return hasCredits ? "Available" : "No available credits"
+        }
+        return nil
     }
 
     private static func extraWindowEntry(label: String, window: RawQuotaWindow, affectsStatus: Bool) -> AnyCodable {

@@ -35,7 +35,7 @@ public struct APIKeyBalanceTarget: Sendable {
 }
 
 public struct APIKeyBalanceAmount: Sendable, Equatable {
-    public enum Scope: String, Sendable, Equatable { case account, keyLimit }
+    public enum Scope: String, Sendable, Equatable { case account, keyLimit, reportedLimit }
     public let scope: Scope
     public let remaining: Double?
     /// nil 表示原始额度单位；不得默认套用站点的人民币或美元倍率。
@@ -101,10 +101,15 @@ public actor APIKeyBalanceService {
         }
         do {
             let (json, status) = try await get(endpoint, key: target.apiKey)
-            if [404, 405, 501].contains(status) { return .init(status: .unsupported) }
+            if [404, 405, 501].contains(status) {
+                return kind == "newapi" ? await lookupLegacy(target) : .init(status: .unsupported)
+            }
             if [401, 403].contains(status) { return .init(status: .unauthorized) }
             if status == 429 { return .init(status: .rateLimited) }
-            guard (200..<300).contains(status), let json else { return .init(status: .failed) }
+            guard (200..<300).contains(status) else { return .init(status: .failed) }
+            guard let json else {
+                return kind == "newapi" ? await lookupLegacy(target) : .init(status: .failed)
+            }
             let amounts: [APIKeyBalanceAmount]?
             switch kind {
             case "deepseek": amounts = parseDeepSeek(json)
@@ -112,7 +117,7 @@ public actor APIKeyBalanceService {
             default:
                 guard parseNewAPI(json, metadata: nil) != nil else {
                     let explicitFailure = json["error"] != nil || json["success"] as? Bool == false || json["code"] as? Bool == false
-                    return .init(status: explicitFailure ? .failed : .unsupported)
+                    return explicitFailure ? .init(status: .failed) : await lookupLegacy(target)
                 }
                 // 元信息为公开 GET，不附带 Key。读取失败时仍可展示原始额度单位。
                 let metadata = try? await get(target.rootURL.appendingPathComponent("api/status"), key: nil)
@@ -124,6 +129,35 @@ public actor APIKeyBalanceService {
             // 不回显服务端正文、底层错误或包含配置/凭据的地址。
             return .init(status: .failed)
         }
+    }
+
+    /// 旧 One API 兼容接口不声明数据是账号余额还是 Key 限额，单独标成上游报告额度。
+    /// 不把 *_usd 字段名当成站点币种保证；100000000 是上游的未设限占位值，不是资金。
+    private static func lookupLegacy(_ target: APIKeyBalanceTarget) async -> APIKeyBalanceSnapshot {
+        do {
+            let (subscription, status) = try await get(target.rootURL.appendingPathComponent("v1/dashboard/billing/subscription"), key: target.apiKey)
+            if [401, 403].contains(status) { return .init(status: .unauthorized) }
+            if status == 429 { return .init(status: .rateLimited) }
+            guard (200..<300).contains(status), let subscription,
+                  subscription["object"] as? String == "billing_subscription",
+                  let limit = number(subscription["hard_limit_usd"]), limit >= 0, limit < 100_000_000 else {
+                return .init(status: .unsupported)
+            }
+            var parts = URLComponents(url: target.rootURL.appendingPathComponent("v1/dashboard/billing/usage"), resolvingAgainstBaseURL: false)!
+            // One API 接口返回累计用量；传入覆盖完整历史的区间，兼容按日期查询的实现。
+            let end = ISO8601DateFormatter().string(from: Date().addingTimeInterval(86_400)).prefix(10)
+            parts.queryItems = [URLQueryItem(name: "start_date", value: "1970-01-01"), URLQueryItem(name: "end_date", value: String(end))]
+            let (usage, usageStatus) = try await get(parts.url!, key: target.apiKey)
+            guard (200..<300).contains(usageStatus), let usage, usage["object"] as? String == "list",
+                  usage["error"] == nil, let cents = number(usage["total_usage"]), cents >= 0,
+                  let amount = legacyAmount(limit: limit, used: cents) else { return .init(status: .failed) }
+            return .init(status: .available, amounts: [amount])
+        } catch { return .init(status: .failed) }
+    }
+
+    static func legacyAmount(limit: Double, used: Double) -> APIKeyBalanceAmount? {
+        guard limit.isFinite, used.isFinite, limit >= 0, limit < 100_000_000, used >= 0 else { return nil }
+        return .init(scope: .reportedLimit, remaining: limit - used / 100, currency: nil)
     }
 
     private static func get(_ url: URL, key: String?) async throws -> ([String: Any]?, Int) {

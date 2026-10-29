@@ -67,11 +67,17 @@ struct NodeBalanceMenu: View {
     }
 }
 
+@MainActor
 enum NodeBalancePresentation {
     static func text(_ amount: APIKeyBalanceAmount) -> String {
         if amount.uncapped { return L("Key uncapped", "Key 未设限") }
         guard let value = amount.remaining else { return "" }
-        let label = amount.scope == .account ? L("Balance ", "账号余额 ") : L("Key limit left ", "Key 限额剩余 ")
+        let label: String
+        switch amount.scope {
+        case .account: label = L("Balance ", "账号余额 ")
+        case .keyLimit: label = L("Key limit left ", "Key 限额剩余 ")
+        case .reportedLimit: label = L("Reported limit left ", "上游限额剩余 ")
+        }
         let number = value.formatted(.number.precision(.fractionLength(0...2)))
         switch amount.currency {
         case "USD": return label + "$" + number

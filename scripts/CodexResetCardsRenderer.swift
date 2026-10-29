@@ -102,6 +102,9 @@ struct CodexResetCardsRenderer {
             let balances = FixtureNodeBalances(targets: balanceTargets, scheme: scheme)
             _ = try await render(balances, scheme: scheme, width: 680,
                 to: output.appendingPathComponent("node-balance-states-\(language)-\(scheme == .dark ? "dark" : "light").png"))
+            let creditStates = FixtureCreditStates(scheme: scheme)
+            _ = try await render(creditStates, scheme: scheme, width: 680,
+                to: output.appendingPathComponent("codex-credit-states-\(language)-\(scheme == .dark ? "dark" : "light").png"))
             manifest.append(["language": language, "mainPoints": [mainSize.width, mainSize.height], "statesPoints": [stateSize.width, stateSize.height]])
         }
         precondition(!StubURLProtocol.requests.contains { $0.method != "GET" }, "Renderer permits GET fixtures only; zero POST")
@@ -276,6 +279,20 @@ private struct FixtureNodeBalances: View {
             Text(L("Unsupported and failed queries leave no balance row. Refresh and status are in the context menu.",
                    "不支持或查询失败时不保留余额行；刷新与状态位于右键菜单。"))
                 .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(24).frame(width: 680).background(AppSurface.page(scheme))
+    }
+}
+
+private struct FixtureCreditStates: View {
+    let scheme: ColorScheme
+    private let values: [String?] = ["1234.6 credits", "0 credits", "Available", "No available credits", nil, "Unlimited"]
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L("Codex credits · Explicit states", "Codex 积分 · 状态区分")).font(.headline)
+            ForEach(values.indices, id: \.self) { index in
+                CodexCreditsBalanceView(value: values[index])
+            }
         }
         .padding(24).frame(width: 680).background(AppSurface.page(scheme))
     }
