@@ -894,7 +894,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         guard let credits else { return nil }
         if credits["unlimited"] as? Bool == true { return "Unlimited" }
         // 显式零余额也要展示；缺失余额不能伪装成零。
-        let balance = stringValue(credits["balance"]).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
+        let balance: Double?
+        if let number = credits["balance"] as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            balance = number.doubleValue
+        } else {
+            balance = stringValue(credits["balance"]).flatMap(Double.init)
+        }
         if let balance, balance.isFinite, balance >= 0 {
             let value = balance.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))
                 .grouping(.never).precision(.fractionLength(0...2)))
