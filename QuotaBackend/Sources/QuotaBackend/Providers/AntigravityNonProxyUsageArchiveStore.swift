@@ -18,6 +18,11 @@ actor AntigravityNonProxyUsageArchiveStore {
         load(homeDirectory).fullHistoryImportedAt == nil
     }
 
+    func sessionCount(homeDirectory: String) -> Int {
+        // 历史会话来自持久化检查点，不能随本轮扫描窗口或日志清理而减少。
+        Self.canonicalize(load(homeDirectory).fileDays ?? [:]).count
+    }
+
     func consumeFullHistoryImportRequest(homeDirectory: String) -> Bool {
         needsFullHistoryImport(homeDirectory: homeDirectory)
     }

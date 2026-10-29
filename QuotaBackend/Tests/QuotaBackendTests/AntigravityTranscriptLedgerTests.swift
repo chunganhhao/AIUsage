@@ -122,4 +122,76 @@ final class AntigravityTranscriptLedgerTests: XCTestCase {
             XCTFail("Expected persistence failure")
         } catch { }
     }
+
+    func testFailedInitialTranscriptReadRemainsPendingAndRetriesOldFiles() async throws {
+        let root = try home()
+        let logs = root.appendingPathComponent(".gemini/antigravity/brain/old/.system_generated/logs")
+        try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+        let file = logs.appendingPathComponent("transcript.jsonl")
+        let oldDate = Date().addingTimeInterval(-10 * 86400)
+        try Data([0xff]).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: file.path)
+        let provider = AntigravityCostProvider(homeDirectory: root.path)
+
+        do {
+            _ = try await provider.fetchUsage()
+            XCTFail("Unreadable transcript must fail the import")
+        } catch { }
+        let pending = await provider.needsFullHistoryImport()
+        XCTAssertTrue(pending)
+
+        try Data((line("PLANNER_RESPONSE", tokens: 777) + "\n").utf8).write(to: file)
+        try FileManager.default.setAttributes([.modificationDate: oldDate], ofItemAtPath: file.path)
+        let retried = try await provider.fetchUsage()
+        XCTAssertEqual(retried.extra["overall.totalTokens"]?.value as? Int, 777)
+        let completed = await provider.needsFullHistoryImport()
+        XCTAssertFalse(completed)
+    }
+
+    func testUnreadableDirectoryDoesNotCompleteHistoryImport() async throws {
+        let root = try home()
+        let brain = root.appendingPathComponent(".gemini/antigravity/brain")
+        try FileManager.default.createDirectory(at: brain, withIntermediateDirectories: true)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: brain.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: brain.path) }
+        let provider = AntigravityCostProvider(homeDirectory: root.path)
+        do {
+            _ = try await provider.fetchUsage()
+            XCTFail("Unreadable directory must fail the import")
+        } catch { }
+        let pending = await provider.needsFullHistoryImport()
+        XCTAssertTrue(pending)
+    }
+
+    func testHistoricalSessionCountSurvivesIncrementalScansAndPurgedFiles() async throws {
+        let root = try home()
+        func transcript(_ conversation: String, tokens: Int, old: Bool) throws -> URL {
+            let logs = root.appendingPathComponent(".gemini/antigravity/brain/\(conversation)/.system_generated/logs")
+            try FileManager.default.createDirectory(at: logs, withIntermediateDirectories: true)
+            let file = logs.appendingPathComponent("transcript.jsonl")
+            try Data((line("PLANNER_RESPONSE", tokens: tokens) + "\n").utf8).write(to: file)
+            if old {
+                try FileManager.default.setAttributes([.modificationDate: Date().addingTimeInterval(-10 * 86400)], ofItemAtPath: file.path)
+            }
+            return file
+        }
+        let oldFile = try transcript("old", tokens: 100, old: true)
+        let recentFile = try transcript("recent", tokens: 200, old: false)
+        let fullFile = recentFile.deletingLastPathComponent().appendingPathComponent("transcript_full.jsonl")
+        try FileManager.default.copyItem(at: recentFile, to: fullFile)
+        let provider = AntigravityCostProvider(homeDirectory: root.path)
+        let initial = try await provider.fetchUsage()
+        XCTAssertEqual(initial.extra["overall.sessionCount"]?.value as? Int, 2)
+        XCTAssertEqual(initial.extra["overall.totalTokens"]?.value as? Int, 300)
+
+        let incremental = try await provider.fetchUsage()
+        XCTAssertEqual(incremental.extra["overall.sessionCount"]?.value as? Int, 2)
+        try FileManager.default.removeItem(at: oldFile)
+        let purged = try await provider.fetchUsage()
+        XCTAssertEqual(purged.extra["overall.sessionCount"]?.value as? Int, 2)
+        XCTAssertEqual(purged.extra["overall.totalTokens"]?.value as? Int, 300)
+        let reloaded = AntigravityNonProxyUsageArchiveStore()
+        let count = await reloaded.sessionCount(homeDirectory: root.path)
+        XCTAssertEqual(count, 2)
+    }
 }

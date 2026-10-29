@@ -17,21 +17,29 @@ extension AntigravityCostProvider {
         return path
     }
 
-    func collectTranscriptFiles(brainDirectory: String, scanWindowCutoff: Date?) -> [String] {
+    func collectTranscriptFiles(brainDirectory: String, scanWindowCutoff: Date?) throws -> [String] {
         let fm = FileManager.default
-        guard let conversations = try? fm.contentsOfDirectory(atPath: brainDirectory) else {
-            return []
-        }
+        let conversations = try fm.contentsOfDirectory(
+            at: URL(fileURLWithPath: brainDirectory), includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])
 
         var files: [String] = []
-        for convId in conversations {
-            let logDir = (brainDirectory as NSString)
-                .appendingPathComponent(convId)
-                .appending("/.system_generated/logs")
+        for conversation in conversations {
+            guard try conversation.resourceValues(forKeys: [.isDirectoryKey]).isDirectory == true else { continue }
+            let logDir = conversation.appendingPathComponent(".system_generated/logs").path
 
-            for name in ["transcript.jsonl", "transcript_full.jsonl"] {
+            let names: [String]
+            do {
+                names = try fm.contentsOfDirectory(atPath: logDir)
+            } catch {
+                // 尚未生成日志的会话可以跳过；权限等读取错误必须保留重试机会。
+                let failure = error as NSError
+                if failure.domain == NSCocoaErrorDomain,
+                   [NSFileReadNoSuchFileError, NSFileNoSuchFileError].contains(failure.code) { continue }
+                throw error
+            }
+
+            for name in ["transcript.jsonl", "transcript_full.jsonl"] where names.contains(name) {
                 let path = (logDir as NSString).appendingPathComponent(name)
-                guard fm.fileExists(atPath: path) else { continue }
                 if let cutoff = scanWindowCutoff,
                    let attrs = try? fm.attributesOfItem(atPath: path),
                    let mtime = attrs[.modificationDate] as? Date, mtime < cutoff { continue }
@@ -42,8 +50,8 @@ extension AntigravityCostProvider {
         return files
     }
 
-    func scanFiles(_ files: [String]) -> [String: CodexAggregateBucket] {
-        let byFile = scanFilesByPath(files)
+    func scanFiles(_ files: [String]) throws -> [String: CodexAggregateBucket] {
+        let byFile = try scanFilesByPath(files)
         var out: [String: CodexAggregateBucket] = [:]
         for fileBuckets in byFile.values {
             for (dKey, bucket) in fileBuckets {
@@ -63,12 +71,12 @@ extension AntigravityCostProvider {
         return filePath
     }
 
-    func scanFilesByPath(_ files: [String]) -> [String: [String: CodexAggregateBucket]] {
+    func scanFilesByPath(_ files: [String]) throws -> [String: [String: CodexAggregateBucket]] {
         var out: [String: [String: CodexAggregateBucket]] = [:]
 
         for filePath in files {
             let key = Self.canonicalTranscriptKey(filePath)
-            for (day, bucket) in processFile(filePath) {
+            for (day, bucket) in try processFile(filePath) {
                 if bucket.totalTokens > (out[key]?[day]?.totalTokens ?? -1) {
                     out[key, default: [:]][day] = bucket
                 }
@@ -78,10 +86,8 @@ extension AntigravityCostProvider {
         return out
     }
 
-    private func processFile(_ filePath: String) -> [String: CodexAggregateBucket] {
-        guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return [:]
-        }
+    private func processFile(_ filePath: String) throws -> [String: CodexAggregateBucket] {
+        let content = try String(contentsOfFile: filePath, encoding: .utf8)
 
         var currentModelKey = "unknown-model" + Self.nonProxySourceSuffix
         var fileOut: [String: CodexAggregateBucket] = [:]

@@ -42,9 +42,10 @@ public struct AntigravityCostProvider: ProviderFetcher {
         let scanWindowCutoff: Date? = shouldImportFullHistory ? nil : calendar().date(byAdding: .day, value: -1, to: calendar().startOfDay(for: now))
 
         let brainDir = resolveBrainDirectory()
-        let files = brainDir.flatMap { collectTranscriptFiles(brainDirectory: $0, scanWindowCutoff: scanWindowCutoff) } ?? []
+        let files = try brainDir.map { try collectTranscriptFiles(brainDirectory: $0, scanWindowCutoff: scanWindowCutoff) } ?? []
 
-        let scannedByFile = files.isEmpty ? [:] : scanFilesByPath(files)
+        // 任一读取失败均不提交本轮快照，也不把未完成的历史导入标记为成功。
+        let scannedByFile = try scanFilesByPath(files)
         var computedNonProxy: [String: CodexAggregateBucket] = [:]
         for fileBuckets in scannedByFile.values {
             for (dKey, bucket) in fileBuckets {
@@ -96,7 +97,8 @@ public struct AntigravityCostProvider: ProviderFetcher {
         extra["overall.totalTokens"] = AnyCodable(overall.totalTokens)
         extra["overall.usageRows"] = AnyCodable(overall.usageRows)
         extra["overall.rangeLabel"] = AnyCodable(overallRangeLabel)
-        extra["overall.sessionCount"] = AnyCodable(Set(files.map(Self.canonicalTranscriptKey)).count)
+        let sessionCount = await Self.nonProxyArchive.sessionCount(homeDirectory: homeDirectory)
+        extra["overall.sessionCount"] = AnyCodable(sessionCount)
 
         func encodeModelBreakdown(_ agg: CodexAggregateBucket) -> [AnyCodable] {
             let sorted = agg.models.values.sorted {
