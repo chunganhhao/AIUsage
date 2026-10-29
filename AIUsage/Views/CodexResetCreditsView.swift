@@ -1,6 +1,33 @@
 import SwiftUI
 import QuotaBackend
 
+/// 积分余额独立于配额百分比与重置卡，不额外发送请求。
+struct CodexCreditsBalanceView: View {
+    let value: String
+    @Environment(\.colorScheme) private var colorScheme
+
+    var body: some View {
+        HStack(spacing: 7) {
+            Image(systemName: "creditcard")
+                .font(.system(size: 11, weight: .medium))
+                .accessibilityHidden(true)
+            Text(L("Credit balance", "积分余额"))
+                .font(.caption)
+            Spacer(minLength: 8)
+            Text(value)
+                .font(.caption.weight(.semibold))
+                .monospacedDigit()
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .foregroundStyle(AppContent.secondary(colorScheme))
+        .padding(.horizontal, 8)
+        .frame(height: 22)
+        .accessibilityElement(children: .combine)
+        .help(L("Codex credits are separate from reset cards and included quota limits.", "Codex 积分独立于重置卡和套餐额度。"))
+    }
+}
+
 /// 将重置卡状态观察限制在 Codex 入口，避免其他订阅卡片跟随更新。
 struct CodexResetCreditsControl: View {
     let target: CodexResetCreditsCoordinator.Target

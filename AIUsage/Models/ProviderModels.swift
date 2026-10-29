@@ -336,6 +336,12 @@ struct ProviderData: Identifiable, Codable, Sendable {
         self.codexResetCreditsAvailableCount = codexResetCreditsAvailableCount
     }
     
+    /// 复用后端已有积分指标，同时兼容远程快照和中英文切换。
+    var codexCreditsDisplayValue: String? {
+        guard baseProviderId == "codex" else { return nil }
+        return metrics.first { $0.label == "Credits" || $0.label == "积分" }?.value.nilIfBlank
+    }
+
     var remainingPercentValue: Double {
         remainingPercent ?? 100.0
     }

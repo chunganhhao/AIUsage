@@ -107,7 +107,8 @@ struct CodexResetCardsRenderer {
             description: "", category: "quota", channel: "cli", status: .healthy, statusLabel: "Healthy",
             theme: .init(accent: "indigo", glow: ""), sourceLabel: "", sourceType: "fixture", fetchedAt: SharedFormatters.iso8601String(from: now),
             accountLabel: label, membershipLabel: "Plus", workspaceLabel: nil, workspaceUserId: "fixture-user-\(index)",
-            headline: .init(eyebrow: "", primary: "", secondary: "", supporting: ""), metrics: [],
+            headline: .init(eyebrow: "", primary: "", secondary: "", supporting: ""),
+            metrics: [.init(label: L("Credits", "积分"), value: [L("1234.6 credits", "1234.6 积分"), L("0 credits", "0 积分"), L("Unlimited", "无限")][index], note: nil)],
             windows: [
                 .init(label: "5-hour", remainingPercent: [28, 82, 63][index], usedPercent: nil, value: "", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4 * 3_600))),
                 .init(label: "Weekly", remainingPercent: [64, 91, 76][index], usedPercent: nil, value: "", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4 * 86_400)))

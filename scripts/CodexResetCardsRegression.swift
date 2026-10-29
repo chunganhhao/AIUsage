@@ -37,6 +37,16 @@ struct CodexResetCardsRegression {
         legacyJSON.removeValue(forKey: "codexResetCreditsAvailableCount")
         let legacy = try JSONDecoder().decode(ProviderData.self, from: JSONSerialization.data(withJSONObject: legacyJSON))
         check(legacy.codexResetCreditsAvailableCount == nil, "Old frontend JSON decodes")
+        for (label, value) in [("Credits", "42.25 credits"), ("积分", "42.25 积分"), ("Credits", "0 credits"), ("Credits", "Unlimited")] {
+            var creditJSON = oldJSON
+            creditJSON["metrics"] = [["label": label, "value": value]]
+            let provider = try JSONDecoder().decode(ProviderData.self, from: JSONSerialization.data(withJSONObject: creditJSON))
+            check(provider.codexCreditsDisplayValue == value, "Codex card preserves \(label): \(value)")
+            creditJSON["providerId"] = "claude-subscription"
+            let other = try JSONDecoder().decode(ProviderData.self, from: JSONSerialization.data(withJSONObject: creditJSON))
+            check(other.codexCreditsDisplayValue == nil, "Credits never leak into another provider's card")
+        }
+        check(legacy.codexCreditsDisplayValue == nil, "Missing credits stay unknown rather than zero")
 
         var continuation: CheckedContinuation<ProviderResult?, Never>?
         coordinator.engine.fetch = { _ in await withCheckedContinuation { continuation = $0 } }

@@ -513,7 +513,7 @@ extension ProviderRefreshCoordinator {
         result = replacingRegex(#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#,
                                 in: result,
                                 template: "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。")
-        result = replacingRegex(#"^(\d[\d,]*) credits$"#, in: result, template: "$1 积分")
+        result = replacingRegex(#"^(\d[\d,]*(?:\.\d+)?) credits$"#, in: result, template: "$1 积分")
         result = replacingRegex(#"^(\d[\d,]*) over$"#, in: result, template: "超出 $1")
         result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5 小时")
         result = replacingRegex(#"^(.+) · Weekly$"#, in: result, template: "$1 · 每周")

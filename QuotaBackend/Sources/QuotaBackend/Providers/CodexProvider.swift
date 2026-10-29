@@ -893,11 +893,14 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     private func creditsDisplay(_ credits: [String: Any]?) -> String? {
         guard let credits else { return nil }
         if credits["unlimited"] as? Bool == true { return "Unlimited" }
-        guard credits["has_credits"] as? Bool == true else { return nil }
-        // 与官方 TUI 一致：余额取整显示，拿不到余额时只说明可用。
+        // 显式零余额也要展示；缺失余额不能伪装成零。
         let balance = stringValue(credits["balance"]).flatMap { Double($0.trimmingCharacters(in: .whitespaces)) }
-        guard let balance, balance.isFinite, balance > 0 else { return "Available" }
-        return "\(Int(balance.rounded())) credits"
+        if let balance, balance.isFinite, balance >= 0 {
+            let value = balance.formatted(.number.locale(Locale(identifier: "en_US_POSIX"))
+                .grouping(.never).precision(.fractionLength(0...2)))
+            return "\(value) credits"
+        }
+        return credits["has_credits"] as? Bool == true ? "Available" : nil
     }
 
     private static func extraWindowEntry(label: String, window: RawQuotaWindow, affectsStatus: Bool) -> AnyCodable {
