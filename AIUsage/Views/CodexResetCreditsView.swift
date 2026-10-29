@@ -381,3 +381,125 @@ private struct CodexResetActionButtonStyle: ButtonStyle {
                         in: RoundedRectangle(cornerRadius: 6, style: .continuous))
     }
 }
+
+/// 菜单栏复用同一账号状态和消费流程，常规展示不读取重置卡明细。
+struct CodexMenuBarAccountControl<Content: View>: View {
+    let provider: ProviderData
+    let target: CodexResetCreditsCoordinator.Target
+    let pinned: Bool
+    let togglePin: () -> Void
+    let refreshUsage: () async -> Bool
+    @ViewBuilder let content: () -> Content
+    @ObservedObject private var coordinator = CodexResetCreditsCoordinator.shared
+    @State private var selectedCard: CodexResetCredit?
+    @State private var showingAlert = false
+    @State private var message = ""
+
+    private var state: CodexResetCreditsCoordinator.State { coordinator.state(for: target) }
+    private var busy: Bool { state.isLoading || state.isConsuming || state.isRefreshing }
+    private var countText: String {
+        coordinator.availableCount(for: target, summaryCount: provider.codexResetCreditsAvailableCount,
+                                   summaryFetchedAt: provider.fetchedAt).map(String.init) ?? "—"
+    }
+
+    private var creditText: String {
+        guard let value = provider.codexCreditsDisplayValue else { return L("Unknown", "未知") }
+        for suffix in [" credits", " 积分"] where value.hasSuffix(suffix) {
+            return String(value.dropLast(suffix.count))
+        }
+        return value
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            content()
+            HStack(spacing: 10) {
+                Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
+                Label(L("Credits ", "积分 ") + creditText, systemImage: "creditcard")
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                if busy { ProgressView().controlSize(.mini) }
+                Spacer(minLength: 0)
+            }
+            .font(.system(size: 9))
+            .foregroundStyle(.secondary)
+            .monospacedDigit()
+        }
+        .contentShape(Rectangle())
+        .contextMenu {
+            Button {
+                Task { await prepareReset() }
+            } label: {
+                Label(L("Use earliest-expiring reset card…", "使用最早到期的重置卡…"), systemImage: "ticket")
+            }
+            .disabled(busy || !coordinator.canOperate(target))
+            Button {
+                Task {
+                    await coordinator.retryRefresh(target, refresh: refreshUsage)
+                    message = state.refreshFailed || state.listFailed
+                        ? L("Some account data could not be refreshed. Try again.", "部分账号数据刷新失败，请重试。")
+                        : L("Account quota and reset cards refreshed.", "已刷新此账号的配额和重置卡。")
+                    showingAlert = true
+                }
+            } label: {
+                Label(L("Refresh this account", "刷新此账号"), systemImage: "arrow.clockwise")
+            }
+            .disabled(busy || !coordinator.canOperate(target))
+            Divider()
+            Button(action: togglePin) {
+                Label(pinned ? L("Unpin from Menu Bar", "从菜单栏取消固定") : L("Pin to Menu Bar", "固定到菜单栏"),
+                      systemImage: pinned ? "pin.slash" : "pin")
+            }
+        }
+        .alert(selectedCard == nil ? L("Reset cards", "重置卡") : L("Use this reset card?", "确认使用这张重置卡？"), isPresented: $showingAlert) {
+            if let card = selectedCard {
+                Button(L("Cancel", "取消"), role: .cancel) { selectedCard = nil }
+                Button(L("Confirm use", "确认使用")) {
+                    selectedCard = nil
+                    Task { await use(card) }
+                }
+            } else {
+                Button(L("OK", "确定"), role: .cancel) {}
+            }
+        } message: {
+            Text(message)
+        }
+    }
+
+    private func prepareReset() async {
+        guard let card = await coordinator.prepareEarliestCredit(for: target) else {
+            message = state.listFailed
+                ? L("Could not load fresh card details. No card was submitted.", "无法读取最新卡片明细，未提交使用。")
+                : L("No usable reset card is available for this account.", "此账号暂无可使用的重置卡。")
+            showingAlert = true
+            return
+        }
+        selectedCard = card
+        let expiry = card.expirationDate.map { $0.formatted(date: .abbreviated, time: .shortened) }
+            ?? L("Does not expire", "无到期限制")
+        message = [target.label, L("Expires: ", "到期：") + expiry,
+                   L("Resets this account's Codex quota windows only.", "仅重置此账号的 Codex 配额窗口。")].joined(separator: "\n")
+        showingAlert = true
+    }
+
+    private func use(_ card: CodexResetCredit) async {
+        await coordinator.confirm(card, for: target, refresh: refreshUsage)
+        if let error = state.errorCode {
+            message = error == "reset_ambiguous"
+                ? L("Result unconfirmed. Refresh this account to check quota and card details.", "结果待确认，请刷新此账号核对配额和卡片明细。")
+                : L("Could not use this card. Refresh this account and try again.", "未能使用此卡，请刷新此账号后重试。")
+        } else {
+            switch state.outcome?.code {
+            case .reset: message = L("Reset succeeded.", "重置成功。")
+            case .nothingToReset: message = L("Nothing to reset right now.", "当前无须重置。")
+            case .noCredit: message = L("No available credit for this card.", "此卡无可用重置额度。")
+            case .alreadyRedeemed: message = L("This card was already used.", "此卡已使用。")
+            case nil: message = L("No card was submitted. Refresh this account to check.", "未提交使用，请刷新此账号核对。")
+            }
+            if state.refreshFailed || state.listFailed {
+                message += L(" Some data could not be refreshed; refresh this account to verify.", " 部分数据刷新失败，请刷新此账号核对。")
+            }
+        }
+        showingAlert = true
+    }
+}

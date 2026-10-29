@@ -83,6 +83,9 @@ RUBY
     "$PROJECT_DIR/AIUsage/Views/ProviderCard+MultiWindowQuota.swift"
     "$PROJECT_DIR/AIUsage/Views/ProviderCard+QuotaIndicator.swift"
     "$PROJECT_DIR/AIUsage/Views/SmallProgressView.swift"
+    "$PROJECT_DIR/AIUsage/Views/MenuBarAccountRow.swift"
+    "$PROJECT_DIR/AIUsage/Views/MenuBarRows.swift"
+    "$PROJECT_DIR/AIUsage/Views/MenuBarSupport.swift"
   )
 fi
 swiftc -parse-as-library -swift-version 5 \

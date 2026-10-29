@@ -79,6 +79,10 @@ struct CodexResetCardsRenderer {
             let states = FixtureStates(empty: targets[1], unknown: targets[2], remote: remote,
                                        coordinator: coordinator, scheme: scheme)
             let stateSize = try await render(states, scheme: scheme, width: 1314, to: output.appendingPathComponent("reset-cards-states-\(language)-\(scheme == .dark ? "dark" : "light").png"))
+            let menu = FixtureMenuBar(providers: providers, scheme: scheme)
+                .environmentObject(appState).environmentObject(refresh).environmentObject(activation)
+            _ = try await render(menu, scheme: scheme, width: 420,
+                to: output.appendingPathComponent("menu-bar-codex-\(language)-\(scheme == .dark ? "dark" : "light").png"))
             manifest.append(["language": language, "mainPoints": [mainSize.width, mainSize.height], "statesPoints": [stateSize.width, stateSize.height]])
         }
         precondition(!StubURLProtocol.requests.contains { $0.method != "GET" }, "Renderer permits GET fixtures only; zero POST")
@@ -209,5 +213,28 @@ private extension View {
         clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).strokeBorder(AppStroke.card(scheme), lineWidth: 1))
             .shadow(color: AppShadow.floatingPanel(scheme).opacity(0.35), radius: 12, x: 0, y: 5)
+    }
+}
+
+private struct FixtureMenuBar: View {
+    let providers: [ProviderData]
+    let scheme: ColorScheme
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L("Menu bar · Codex accounts", "菜单栏 · Codex 账号")).font(.headline)
+            ForEach(providers) { provider in
+                MenuBarAccountRow(
+                    entry: .init(id: provider.id, providerId: "codex", providerTitle: "Codex", providerSubtitle: nil,
+                                 liveProvider: provider, storedAccount: nil),
+                    providerId: "codex", accentColor: .indigo,
+                    codexProxyActive: false, codexGlobalProxyManaged: false,
+                    activationMessage: .constant(nil), activationSuccess: .constant(false))
+            }
+            Text(L("Right-click an account to use its earliest-expiring reset card.", "右键账号可使用最早到期的重置卡。"))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(14)
+        .frame(width: 420)
+        .background(AppSurface.page(scheme))
     }
 }

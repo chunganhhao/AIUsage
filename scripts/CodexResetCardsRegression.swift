@@ -355,6 +355,39 @@ struct CodexResetCardsRegression {
         let requestsAfterRecovery = StubURLProtocol.requests.count
         await recovery.confirm(card, for: .init(identity: identity, credentialID: nil, label: "Remote", isLocal: false)) { true }
         check(StubURLProtocol.requests.count == requestsAfterRecovery, "Recovered state never enables remote submission")
+        // 快捷入口必须读取最新列表，按到期时间选择有效卡；仅准备，不发送 POST。
+        let shortcut = CodexResetCreditsCoordinator(operations: .init(journalURL: directory.appendingPathComponent("shortcut.json")),
+            loadCredential: { _ in credential }, isLocal: { local }, now: { listFetchedAt })
+        let soon = SharedFormatters.iso8601String(from: listFetchedAt.addingTimeInterval(86_400))
+        let later = SharedFormatters.iso8601String(from: listFetchedAt.addingTimeInterval(10 * 86_400))
+        let payload = "{\"available_count\":4,\"credits\":[" + [
+            "{\"id\":\"unlimited\",\"reset_type\":\"codex_rate_limits\",\"status\":\"available\",\"expires_at\":null}",
+            "{\"id\":\"later\",\"reset_type\":\"codex_rate_limits\",\"status\":\"available\",\"expires_at\":\"\(later)\"}",
+            "{\"id\":\"expired\",\"reset_type\":\"codex_rate_limits\",\"status\":\"available\",\"expires_at\":\"2000-01-01T00:00:00Z\"}",
+            "{\"id\":\"soon\",\"reset_type\":\"codex_rate_limits\",\"status\":\"available\",\"expires_at\":\"\(soon)\"}",
+            "{\"id\":\"unknown\",\"reset_type\":\"future_type\",\"status\":\"available\",\"expires_at\":null}"
+        ].joined(separator: ",") + "]}"
+        StubURLProtocol.respond(endpoint, body: payload)
+        let postsBeforeShortcut = StubURLProtocol.requests.filter { $0.method == "POST" }.count
+        let chosen = await shortcut.prepareEarliestCredit(for: target)
+        check(chosen?.id == "soon", "Shortcut selects earliest-expiring valid card, skipping expired and unknown types")
+        check(StubURLProtocol.requests.filter { $0.method == "POST" }.count == postsBeforeShortcut,
+              "Preparing or cancelling shortcut confirmation never posts")
+        StubURLProtocol.respond(endpoint, status: 500, body: "{}")
+        let staleChoice = await shortcut.prepareEarliestCredit(for: target)
+        check(staleChoice == nil, "Failed shortcut read never selects from cached cards")
+        StubURLProtocol.respond(endpoint, body: payload)
+        StubURLProtocol.respond(endpoint + "/consume", body: #"{"code":"reset"}"#)
+        if let chosen { await shortcut.confirm(chosen, for: target) { true } }
+        let nextChoice = await shortcut.prepareEarliestCredit(for: target)
+        check(nextChoice?.id == "later", "Shortcut skips a redeemed ID even if the service still returns its old available row")
+        StubURLProtocol.respond(endpoint, body: #"{"available_count":0,"credits":[]}"#)
+        let emptyChoice = await shortcut.prepareEarliestCredit(for: target)
+        check(emptyChoice == nil, "Empty fresh list does not submit")
+        let beforeRemoteShortcut = StubURLProtocol.requests.count
+        let remoteChoice = await shortcut.prepareEarliestCredit(for: remoteTarget)
+        check(remoteChoice == nil && StubURLProtocol.requests.count == beforeRemoteShortcut,
+              "Remote shortcut does not read local credentials or submit")
         local = false
         let before = StubURLProtocol.requests.count
         await model.load(target)

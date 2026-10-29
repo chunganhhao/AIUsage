@@ -18,6 +18,10 @@ final class AppSettings: ObservableObject {
         get { [] }
         set {}
     }
+    var menuBarPinnedCostSourceIds: Set<String> {
+        get { [] }
+        set {}
+    }
     var quotaIndicatorStyle: IndicatorStyle { .bar }
     var quotaIndicatorMetric: IndicatorMetric { .remaining }
     static let cnyPerUSD = 7.0

@@ -71,6 +71,15 @@ final class CodexResetCreditsCoordinator: ObservableObject {
         canOperate(target) && !state(for: target).redeemedCreditIDs.contains(card.id) && card.canConsume(at: now())
     }
 
+    /// 右键快捷使用只在用户点击后读取；失败时不能从旧缓存挑选卡片。
+    func prepareEarliestCredit(for target: Target) async -> CodexResetCredit? {
+        let current = state(for: target)
+        guard canOperate(target), !current.isLoading, !current.isConsuming, !current.isRefreshing else { return nil }
+        await load(target)
+        guard !state(for: target).listFailed else { return nil }
+        return state(for: target).list?.sortedCredits.first { canConsume($0, for: target) }
+    }
+
     func canOperate(_ target: Target) -> Bool {
         target.isLocal && isLocal() && target.identity.nativeKey != nil && target.credentialID != nil
     }
