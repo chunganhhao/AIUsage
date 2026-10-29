@@ -3,7 +3,8 @@ import Foundation
 // MARK: - Antigravity Provider
 // Uses Keychain-imported credentials (OAuth or IDE session),
 // refreshes OAuth token when needed, and calls Google Cloud Code
-// Assist API for per-model quotas.
+// Assist API for grouped (5-hour + weekly) quotas, falling back to
+// the legacy per-model quotas.
 
 public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAcceptingProvider {
     public let id = "antigravity"
@@ -629,10 +630,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         for (name, rawInfo) in rawModels {
             guard let info = rawInfo as? [String: Any],
                   let quotaInfo = info["quotaInfo"] as? [String: Any] else { continue }
-            let resetAt = quotaInfo["resetTime"] as? String
-            // proto3 JSON 省略零值：用尽的模型只返回 resetTime，不能因为没有 remainingFraction 就丢掉。
-            guard let remainingFraction = doubleValue(quotaInfo["remainingFraction"])
-                    ?? (resetAt == nil ? nil : 0) else { continue }
+            let resetAt = (quotaInfo["resetTime"] as? String)
+                .flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
+            // 与分组接口相同：proto3 省略零值，用尽的模型只剩 resetTime。
+            guard let remainingFraction = doubleValue(quotaInfo["remainingFraction"]) ?? (resetAt == nil ? nil : 0) else { continue }
 
             let isInternal = info["isInternal"] as? Bool ?? false
             let apiProvider = info["apiProvider"] as? String

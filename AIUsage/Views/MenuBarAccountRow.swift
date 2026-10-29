@@ -19,6 +19,7 @@ struct MenuBarAccountRow: View {
     @Binding var activationSuccess: Bool
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var activationManager: ProviderActivationManager
+    @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @ObservedObject private var settings = AppSettings.shared
     @Environment(\.colorScheme) private var colorScheme
     @State private var isHovered = false
@@ -36,7 +37,7 @@ struct MenuBarAccountRow: View {
     /// 每节点代理（codexProxyActive）仍允许账号切换——切换会自动停用该代理（既有自动交接语义）。
     private var canActivate: Bool {
         if entry.providerId == "codex", codexGlobalProxyManaged { return false }
-        return activationManager.canActivateProvider(providerId) && !isActive
+        return activationManager.canSwitch(to: entry) && !isActive
     }
     private var remainingPercent: Double? { entry.liveProvider?.remainingPercent }
     private var isCostProvider: Bool { entry.liveProvider?.category == ProviderCategory.localCost }
@@ -77,11 +78,23 @@ struct MenuBarAccountRow: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            accountHeader
-
-            if !isCostProvider && !windows.isEmpty {
-                quotaWindowBars
+        Group {
+            if providerId == "codex", let provider = entry.liveProvider {
+                CodexMenuBarAccountControl(
+                    provider: provider,
+                    target: .init(identity: CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId),
+                                  credentialID: settings.backendMode == "local" ? refreshCoordinator.credentialID(for: provider) : nil,
+                                  label: [entry.accountPrimaryLabel, provider.workspaceLabel, provider.accountId].compactMap { $0?.nilIfBlank }.joined(separator: " · "),
+                                  isLocal: settings.backendMode == "local"),
+                    pinned: isPinnedToStatusBar, togglePin: togglePin,
+                    refreshUsage: {
+                        guard let credentialID = refreshCoordinator.credentialID(for: provider) else { return false }
+                        return await refreshCoordinator.refreshCodexAccountAfterReset(credentialId: credentialID,
+                            identity: CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId))
+                    }
+                ) { accountContent }
+            } else {
+                accountContent.contextMenu { pinContextMenu }
             }
         }
         .padding(.horizontal, 10)
@@ -96,7 +109,13 @@ struct MenuBarAccountRow: View {
         )
         .onHover { isHovered = $0 }
         .onTapGesture { if canActivate { performActivation() } }
-        .contextMenu { pinContextMenu }
+    }
+
+    private var accountContent: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            accountHeader
+            if !isCostProvider && !windows.isEmpty { quotaWindowBars }
+        }
     }
 
     private var rowBackground: Color {
@@ -195,6 +214,8 @@ struct MenuBarAccountRow: View {
                 activeBadge
             } else if canActivate {
                 switchButton
+            } else if activationManager.isRemoteViewOnly(entry) {
+                GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
             }
         }
     }

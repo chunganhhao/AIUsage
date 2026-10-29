@@ -28,6 +28,7 @@ extension UsageNormalizer {
         let modelCount = extraInt(usage, "modelCount") ?? trackedModels.count
         let authFileCount = extraInt(usage, "authFileCount") ?? 1
         let selectedAuthFile = extraString(usage, "selectedAuthFile")
+        // "groups": shared 5-hour / weekly windows; "models" or old snapshots: per-model quota.
         let isGrouped = extraString(usage, "quotaSource") == "groups"
 
         base.accountLabel = preferredAccountEmail(usage)
@@ -65,7 +66,7 @@ extension UsageNormalizer {
         base.spotlight = authFileCount > 1
             ? "Antigravity auth files detected: \(formatInt(authFileCount)). This snapshot uses the most recently updated file (\(selectedAuthFile ?? "unknown"))."
             : (isGrouped
-                ? "Antigravity groups models into shared 5-hour and weekly pools, and places the tightest window first."
+                ? "Antigravity meters quota per model group, each with a 5-hour and a weekly limit, so the dashboard lists every window and puts the tightest ones first."
                 : "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first.")
 
         if let error = extraString(usage, "circuitBreakerError"), !error.isEmpty {

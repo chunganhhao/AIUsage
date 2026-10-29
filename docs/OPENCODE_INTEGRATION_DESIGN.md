@@ -364,7 +364,7 @@ template 渲染自适应明暗），替换此前的 SF Symbol 兜底。
 `~/.config/aiusage/opencode-global-config.json`，激活时合并顺序固定为
 **用户原文 ← 通用配置 ← 受管块**（受管键始终最终生效；通用片段先剥离误带的
 aiusage-* 受管键）。`OpenCodeNodeStore.commonSettings(for:)` 是激活/JSON 预览/
-启动命令三处共用的单一口径；保存通用配置或编辑活动节点都会即时重激活。
+启动命令与全局代理共用的单一口径；保存通用配置或切换合并开关都会即时重写当前接管的配置（普通节点和全局代理均覆盖，不重启代理）。写入失败会在界面提示，编辑器保留未保存状态。
 节点级策略存 `OpenCodeNode.commonConfigMode`（可选，nil=跟随全局，旧档案兼容）。
 
 分层最终预览：编辑器「JSON 预览」加合并策略分段选择器 + 行级来源标注

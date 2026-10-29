@@ -22,6 +22,7 @@ extension UsageNormalizer {
         let email = usage.accountEmail ?? "OpenAI account"
         let supportingText = wsType == "Personal" ? email : "\(wsType) · \(email)"
 
+        base.codexResetCreditsAvailableCount = usage.codexResetCreditsAvailableCount
         base.accountLabel = preferredAccountEmail(usage)
         base.membershipLabel = membershipBadge(from: plan)
         base.workspaceLabel = wsType

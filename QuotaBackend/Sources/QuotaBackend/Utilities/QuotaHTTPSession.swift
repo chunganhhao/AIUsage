@@ -31,7 +31,15 @@ enum QuotaHTTP {
         return request
     }
 
-    static func data(for request: URLRequest) async throws -> (Data, URLResponse) {
-        try await (sessionOverride ?? session).data(for: request)
+    private final class NoRedirect: NSObject, URLSessionTaskDelegate {
+        func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                        newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+            completionHandler(nil)
+        }
+    }
+    private static let noRedirect = NoRedirect()
+
+    static func data(for request: URLRequest, allowRedirects: Bool = true) async throws -> (Data, URLResponse) {
+        try await (sessionOverride ?? session).data(for: request, delegate: allowRedirects ? nil : noRedirect)
     }
 }

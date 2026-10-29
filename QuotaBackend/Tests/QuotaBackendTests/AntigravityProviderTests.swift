@@ -172,6 +172,27 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(summary.headline.secondary, "lowest remaining model")
     }
 
+    /// 旧接口同样按 proto3 省略零值：只有 resetTime 的模型是用尽（0%），不能被丢掉；两者都没有的才跳过。
+    func testLegacyModelWithoutFractionButWithResetIsExhausted() async throws {
+        StubURLProtocol.respond(Self.dailySummary, status: 403, body: "{}")
+        StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
+        StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
+        {"models":{
+          "gemini-3-pro":{"displayName":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-10-20T15:00:00Z"}},
+          "claude-sonnet":{"displayName":"Claude Sonnet","quotaInfo":{"resetTime":"2026-10-20T15:00:00Z"}},
+          "unmetered":{"displayName":"Unmetered","quotaInfo":{}},
+          "blank-reset":{"displayName":"Blank Reset","quotaInfo":{"resetTime":"   "}}
+        }}
+        """)
+
+        let usage = try await provider.fetchUsage(with: makeCredential())
+
+        XCTAssertEqual(usage.extra["modelCount"]?.value as? Int, 2)
+        XCTAssertEqual(usage.primary?.label, "Claude Sonnet")
+        XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 0, accuracy: 0.001)
+        XCTAssertEqual(usage.primary?.resetAt, "2026-10-20T15:00:00Z")
+    }
+
     /// 401 必须走令牌刷新，不能被当成「这份部署不可用」吞掉后去读旧接口。
     func testUnauthorizedSummaryIsNotSwallowedByFallback() async throws {
         StubURLProtocol.respond(Self.dailySummary, status: 401, body: "{}")

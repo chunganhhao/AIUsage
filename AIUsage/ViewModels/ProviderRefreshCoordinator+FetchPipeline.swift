@@ -7,11 +7,13 @@ extension ProviderRefreshCoordinator {
     @MainActor
     func fetchAccountByCredential(
         credentialId: String,
-        providerId: String
+        providerId: String,
+        expectedCodexIdentity: String? = nil
     ) async -> ProviderRefreshResult {
         guard settings.backendMode == "local" else {
             return .failure()
         }
+        let resetGeneration = codexResetRefreshFence.token
         guard let result = await engine.fetchForCredential(providerId: providerId, credentialId: credentialId),
               result.summary != nil else {
             return .failure()
@@ -24,7 +26,11 @@ extension ProviderRefreshCoordinator {
         guard let converted = convertedBatch.first?.provider else {
             return .failure()
         }
-        await accountStore.reconcileAccountRegistry(with: [converted])
+        let identity = codexResetIdentity(converted)
+        guard expectedCodexIdentity == nil || expectedCodexIdentity == identity else { return .failure() }
+        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
+        await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
+        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
 
         if let index = providers.firstIndex(where: { $0.id == converted.id }) {
             providers[index] = converted
@@ -126,6 +132,7 @@ extension ProviderRefreshCoordinator {
 
     @MainActor
     func fetchSingleProviderLocal(_ providerId: String) async -> ProviderRefreshResult {
+        let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         await syncUnifiedManagedAccounts(for: [providerId])
         let language = self.language
@@ -139,8 +146,8 @@ extension ProviderRefreshCoordinator {
                 convertedResults.map(\.provider),
                 preservingExistingFor: providerId
             )
-            await accountStore.reconcileAccountRegistry(with: stabilizedResults)
-            let visible = visibleProviders(from: stabilizedResults)
+            await reconcileResetProtectedAccountRegistry(stabilizedResults, since: resetGeneration)
+            let visible = visibleProviders(from: preserveCodexResetUpdates(stabilizedResults, since: resetGeneration, providerId: providerId))
             replaceProviderEntries(for: providerId, with: visible)
             return .classified(
                 totalResults: results.count,
@@ -155,8 +162,8 @@ extension ProviderRefreshCoordinator {
                 localizedProviderResults(from: [result], language: language)
             }.value
             guard let converted = convertedResults.first?.provider else { return .failure() }
-            await accountStore.reconcileAccountRegistry(with: [converted])
-            replaceProviderEntries(for: providerId, with: visibleProviders(from: [converted]))
+            await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
+            replaceProviderEntries(for: providerId, with: visibleProviders(from: preserveCodexResetUpdates([converted], since: resetGeneration, providerId: providerId)))
             return .classified(
                 totalResults: 1,
                 refreshedProviders: result.ok ? timestampableProviders(for: [converted]) : [],
@@ -168,6 +175,7 @@ extension ProviderRefreshCoordinator {
 
     @MainActor
     func fetchSingleProviderRemote(_ providerId: String) async -> ProviderRefreshResult {
+        let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         APIService.shared.updateBaseURL(settings.remoteBaseURL)
         do {
@@ -178,10 +186,10 @@ extension ProviderRefreshCoordinator {
             let localizedProviders = await Task.detached { [self] in
                 localizedProviderList(remoteItems, language: language)
             }.value
-            await accountStore.reconcileAccountRegistry(with: localizedProviders.map(\.provider))
+            await reconcileResetProtectedAccountRegistry(localizedProviders.map(\.provider), since: resetGeneration)
             replaceProviderEntries(
                 for: providerId,
-                with: visibleProviders(from: localizedProviders.map(\.provider))
+                with: visibleProviders(from: preserveCodexResetUpdates(localizedProviders.map(\.provider), since: resetGeneration, providerId: providerId))
             )
             return .classified(
                 totalResults: results.count,
@@ -203,6 +211,7 @@ extension ProviderRefreshCoordinator {
 
     @MainActor
     func fetchDashboardLocal() async -> ProviderRefreshResult {
+        let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         await syncUnifiedManagedAccounts(for: selectedProviderIDList())
 
@@ -214,8 +223,8 @@ extension ProviderRefreshCoordinator {
         }.value
         let localizedProviders = batch.providers
         let stabilizedProviders = stabilizedBulkRefreshProviders(localizedProviders.map(\.provider))
-        await accountStore.reconcileAccountRegistry(with: stabilizedProviders)
-        providers = visibleProviders(from: stabilizedProviders)
+        await reconcileResetProtectedAccountRegistry(stabilizedProviders, since: resetGeneration)
+        providers = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
         overview = batch.overview
         return .classified(
             totalResults: snapshot.providers.count,
@@ -226,6 +235,7 @@ extension ProviderRefreshCoordinator {
 
     @MainActor
     func fetchDashboardRemote(showMessageOnFailure: Bool) async -> ProviderRefreshResult {
+        let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         APIService.shared.updateBaseURL(settings.remoteBaseURL)
         do {
@@ -239,8 +249,8 @@ extension ProviderRefreshCoordinator {
             }.value
             let localizedProviders = batch.providers
             let stabilizedProviders = stabilizedBulkRefreshProviders(localizedProviders.map(\.provider))
-            await accountStore.reconcileAccountRegistry(with: stabilizedProviders)
-            providers = visibleProviders(from: stabilizedProviders)
+            await reconcileResetProtectedAccountRegistry(stabilizedProviders, since: resetGeneration)
+            providers = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
             overview = batch.overview
             return .classified(
                 totalResults: dashboard.providers.count,
@@ -254,6 +264,31 @@ extension ProviderRefreshCoordinator {
                     : nil
             )
         }
+    }
+
+    func codexResetIdentity(_ provider: ProviderData) -> String? {
+        guard provider.baseProviderId == "codex" else { return nil }
+        return CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId).nativeKey
+    }
+
+    @MainActor
+    func reconcileResetProtectedAccountRegistry(_ incoming: [ProviderData], since token: Int) async {
+        let isValid: @MainActor (ProviderData) -> Bool = { provider in
+            self.codexResetIdentity(provider).map { self.codexResetRefreshFence.accepts(token, identity: $0) } ?? true
+        }
+        let accepted = incoming.filter(isValid)
+        guard !accepted.isEmpty else { return }
+        await accountStore.reconcileAccountRegistry(with: accepted, isValid: isValid)
+    }
+
+    func preserveCodexResetUpdates(_ incoming: [ProviderData], since token: Int, providerId: String? = nil) -> [ProviderData] {
+        guard providerId == nil || providerId == "codex" else { return incoming }
+        let protected = providers.filter {
+            guard let key = codexResetIdentity($0) else { return false }
+            return !codexResetRefreshFence.accepts(token, identity: key)
+        }
+        let keys = Set(protected.compactMap(codexResetIdentity))
+        return (incoming.filter { codexResetIdentity($0).map { !keys.contains($0) } ?? true } + protected).sorted(by: providerSort)
     }
 
     func selectedProviderIDList() -> [String] {
@@ -305,7 +340,7 @@ extension ProviderRefreshCoordinator {
             return
         }
 
-        accountRefreshTimes[refreshKey] = refreshedAt
+        accountRefreshTimes[refreshKey] = max(accountRefreshTimes[refreshKey] ?? .distantPast, refreshedAt)
         for provider in result.refreshedProviders {
             markAccountRefreshed(provider, at: refreshedAt)
         }
@@ -313,7 +348,7 @@ extension ProviderRefreshCoordinator {
 
     func markAccountRefreshed(_ provider: ProviderData, at refreshedAt: Date) {
         for key in accountRefreshKeys(for: provider) {
-            accountRefreshTimes[key] = refreshedAt
+            accountRefreshTimes[key] = max(accountRefreshTimes[key] ?? .distantPast, refreshedAt)
         }
     }
 

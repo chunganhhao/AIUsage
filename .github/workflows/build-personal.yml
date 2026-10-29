@@ -44,6 +44,19 @@ jobs:
           bash scripts/run_token_saver_settings_regression.sh
           bash scripts/run_token_saver_release_regression.sh
           bash scripts/run_pool_circuit_breaker_regression.sh
+          bash scripts/run_account_identity_regression.sh
+          bash scripts/run_common_config_regression.sh
+          bash scripts/run_codex_reset_cards_regression.sh
+
+      - name: Render Codex reset cards previews
+        run: TMPDIR="$RUNNER_TEMP" bash scripts/run_codex_reset_cards_regression.sh --render "$RUNNER_TEMP/reset-cards-preview"
+
+      - name: Upload Codex reset cards previews
+        uses: actions/upload-artifact@v4
+        with:
+          name: codex-reset-cards-preview
+          path: ${{ runner.temp }}/reset-cards-preview
+          if-no-files-found: error
 
       - name: Build & Package Release Artifacts
         env:

@@ -82,7 +82,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: s.sourceFilePath,
-            errorCode: s.errorCode
+            errorCode: s.errorCode,
+            codexResetCreditsAvailableCount: s.codexResetCreditsAvailableCount
         )
     }
 
@@ -182,7 +183,8 @@ extension ProviderRefreshCoordinator {
                 )
             },
             sourceFilePath: provider.sourceFilePath,
-            errorCode: provider.errorCode
+            errorCode: provider.errorCode,
+            codexResetCreditsAvailableCount: provider.codexResetCreditsAvailableCount
         )
     }
 
@@ -371,17 +373,27 @@ extension ProviderRefreshCoordinator {
             "lowest remaining token pool": "剩余最低的 Token 池",
             "Unlimited mode": "无限模式",
             "Desktop quota cache": "桌面配额缓存",
+            "credits left this cycle": "本周期剩余积分",
+            "Warp reports credits through its API: the cycle allowance is used first, then bonus and add-on credits.": "Warp 通过官方接口报告积分：先消耗本周期额度，再用奖励积分和加购积分。",
+            "Warp API key was rejected. Create a personal key in Warp → Settings → Cloud platform → API keys.": "Warp API Key 被拒绝。请在 Warp → Settings → Cloud platform → API keys 中新建一个 Personal Key。",
+            "Warp API is rate limiting requests. Try again later.": "Warp 接口正在限流，请稍后再试。",
             "Local cost telemetry": "本地费用统计",
             "Local spend ledger": "本地费用账本",
             "Account": "账号",
             "Email": "邮箱",
             "Plan": "计划",
             "Workspace": "工作空间",
+            "Credits": "积分",
+            "AI Credits": "AI 积分",
+            "Available": "可用",
+            "No available credits": "无可用积分",
+            "Monthly Credit Limit": "月度积分上限",
             "Reset": "重置",
             "Source": "来源",
             "Project": "项目",
             "Tracked Models": "跟踪模型",
             "Quota Windows": "配额窗口",
+            "Antigravity meters quota per model group, each with a 5-hour and a weekly limit, so the dashboard lists every window and puts the tightest ones first.": "Antigravity 按模型组计量额度，每组都有 5 小时和每周两个限额，所以面板会列出每个窗口，并把最紧张的放在前面。",
             "Main Pool": "主额度",
             "Assistant Pool": "助手额度",
             "Bonus Credits": "奖励额度",
@@ -398,6 +410,12 @@ extension ProviderRefreshCoordinator {
             "Requests": "请求数",
             "Assistant Credits": "助手额度",
             "Main Plan": "主计划",
+            "Included Usage": "包含额度",
+            "This MiniMax key has no active Token Plan quota.": "这个 MiniMax Key 没有已激活的 Token Plan 额度。",
+            "Prepaid Balance": "预付余额",
+            "included usage this week": "本周包含额度",
+            "included usage this month": "本月包含额度",
+            "Cursor's unified plan shares one included-usage pool with Grok, so the card tracks that pool instead of separate model allowances; usage beyond it draws from the prepaid balance.": "Cursor 统一套餐与 Grok 共用一个包含额度池，所以卡片跟踪的是这个共享池，而不是分开的模型额度；超出部分从预付余额扣除。",
             "Named Models": "具名模型",
             "Free Quota": "免费额度",
             "Used": "已用",
@@ -500,6 +518,8 @@ extension ProviderRefreshCoordinator {
         result = replacingRegex(#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#,
                                 in: result,
                                 template: "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。")
+        result = replacingRegex(#"^(\d[\d,]*(?:\.\d+)?) credits$"#, in: result, template: "$1 积分")
+        result = replacingRegex(#"^(\d[\d,]*) over$"#, in: result, template: "超出 $1")
         result = replacingRegex(#"^Kiro reported (\d[\d,]*) usage lanes\. This card shows the three tightest ones first so attention stays on the lanes that will run out soonest\.$"#,
                                 in: result,
                                 template: "Kiro 报告了 $1 个用量通道，这张卡片会优先展示最紧张的三个，方便你先关注最先见底的通道。")

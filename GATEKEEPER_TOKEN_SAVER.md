@@ -31,3 +31,6 @@ Review the current tracked diff AND new untracked TokenSaver files against the s
 4. Final Antigravity/Gemini Gatekeeper verdict. Keep `task.md` unchecked until actually approved; its cleanup belongs to Gatekeeper under project instructions.
 
 No paid provider requests, app installation/restart, live account/routing edits or real brew update have occurred.
+
+## Superseding integration checkpoint
+User confirmed AGY fixed the obsolete updater-regression CI call and APPROVED Safe Trio. User then authorized integrating releasedv0.15.33 while retaining personal patches and continuing through feature-branch Actions. SafeTrio snapshot3cd64ab; upstreamc8cec2c. New independent integration review: artifacts/integration-v0.15.33/INTEGRATION_REVIEW.md APPROVED, noP0/P1/P2. Earlier waiting-for-publication statements are historical and superseded. Full Actions build remains pending at this checkpoint; do not claim it passed before actual results.

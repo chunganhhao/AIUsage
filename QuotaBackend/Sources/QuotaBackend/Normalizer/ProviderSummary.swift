@@ -44,6 +44,7 @@ public struct ProviderSummary: Codable, Sendable {
     public var sourceFilePath: String?
     /// 机器可读的错误码（仅错误态填写），如 `not_logged_in` / `missing_token` / `invalid_credentials`。
     /// 供 UI 区分「未连接（引导去添加凭证）」与「真实抓取失败」。成功态恒为 nil。
+    public var codexResetCreditsAvailableCount: Int? = nil
     public var errorCode: String?
 }
 

@@ -41,8 +41,7 @@ public struct CodexAccountIdentity: Equatable, Sendable {
 
         let rawIdToken = preferFlat ? (flatId ?? (hasFlatTokens ? nil : nestedId)) : (nestedId ?? (hasNestedTokens ? nil : flatId))
         let activeAccessToken = preferFlat ? (flatAccess ?? (hasFlatTokens ? nil : nestedAccess)) : (nestedAccess ?? (hasNestedTokens ? nil : flatAccess))
-        let accessIdentity = Self.tokenIdentity(activeAccessToken)
-        let idTokenIdentity = Self.tokenIdentity(rawIdToken)
+        let (accessIdentity, idTokenIdentity) = Self.tokenPairIdentities(activeAccessToken, rawIdToken)
         let internalConflict = activeAccessToken != nil && rawIdToken != nil && accessIdentity.conflicts(with: idTokenIdentity)
         if internalConflict {
             self.init(accountId: nil, userId: nil, email: nil)
@@ -70,7 +69,7 @@ public struct CodexAccountIdentity: Equatable, Sendable {
         self.init(accountId: accountId, userId: userId, email: email)
     }
 
-    static func tokenIdentity(_ token: String?) -> Self {
+    static func tokenIdentity(_ token: String?, includeSubjectFallback: Bool = true) -> Self {
         guard let claim = jwtPayload(token) else {
             return Self(accountId: nil, userId: nil, email: nil)
         }
@@ -79,9 +78,21 @@ public struct CodexAccountIdentity: Equatable, Sendable {
             values.lazy.compactMap { Self.normalized($0 as? String) }.first
         }
         let accountId = first([auth?["chatgpt_account_id"], claim["chatgpt_account_id"]])
-        let userId = first([auth?["chatgpt_user_id"], claim["chatgpt_user_id"], auth?["user_id"], claim["user_id"], claim["sub"]])
+        let userId = first([auth?["chatgpt_user_id"], claim["chatgpt_user_id"], auth?["user_id"], claim["user_id"],
+                            includeSubjectFallback ? claim["sub"] : nil])
         let email = first([claim["email"], (claim["https://api.openai.com/profile"] as? [String: Any])?["email"]])
         return Self(accountId: accountId, userId: userId, email: email)
+    }
+
+    /// Native user IDs and legacy subjects are different namespaces. Compare subjects only
+    /// when neither token has a native user ID; account and email guards still apply.
+    static func tokenPairIdentities(_ accessToken: String?, _ idToken: String?) -> (access: Self, id: Self) {
+        let access = tokenIdentity(accessToken, includeSubjectFallback: false)
+        let id = tokenIdentity(idToken, includeSubjectFallback: false)
+        if access.userId == nil && id.userId == nil {
+            return (tokenIdentity(accessToken), tokenIdentity(idToken))
+        }
+        return (access, id)
     }
 
     private static func tokenIssuedAt(_ token: String?) -> Double {

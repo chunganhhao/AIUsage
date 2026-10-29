@@ -35,13 +35,15 @@
 <table>
   <tr>
     <td width="132" align="center">
-      <strong>Sidrune AI</strong>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><img src="docs/images/ipwo-logo.jpg" alt="IPWO" width="96"></a><br>
+      <strong>IPWO</strong>
     </td>
     <td>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><img src="docs/images/sidrune-ai-banner.png" alt="Sidrune AI — 一套 API 接入主流 AI 模型，注册获赠 3 美元额度。" width="100%"></a><br>
-      一套 API，接入 GPT、Claude 及其他主流 AI 模型。<br>
-      新用户注册即获赠 3 美元 API 额度。活动代码：<code>SDRAIUSAGE</code>。<br>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><strong>注册 Sidrune AI →</strong></a>
+      <strong>注册即领 2GB 免费动态代理流量。</strong><br>
+      住宅代理覆盖 195+ 个国家和地区，支持 HTTP(S) 与 SOCKS5，可按需选择目标地区。<br>
+      适用于 AI 开发工具跨区域访问、API 调用与网络测试。<br>
+      优惠码 <code>0201</code>：享 <strong>9 折</strong>。<br>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><strong>领取 2GB 免费流量 →</strong></a>
     </td>
   </tr>
   <tr>
@@ -58,13 +60,13 @@
   </tr>
   <tr>
     <td width="132" align="center">
-      <a href="https://api-aimodels.com/register?aff=DrSm"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
       <strong>Sucloud</strong>
     </td>
     <td>
       <strong>覆盖文本、图像、视频与音乐的 400+ 模型平台。</strong><br>
       多渠道模型聚合、价格透明，覆盖 Claude 官方渠道、AWSB、CCMax、Kiro、Seedance、Kling、Veo、HappyHorse 等。<br>
-      <a href="https://api-aimodels.com/register?aff=DrSm"><strong>访问 Sucloud →</strong></a>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><strong>访问 Sucloud →</strong></a>
     </td>
   </tr>
   <tr>

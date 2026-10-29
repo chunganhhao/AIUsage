@@ -35,13 +35,15 @@
 <table>
   <tr>
     <td width="132" align="center">
-      <strong>Sidrune AI</strong>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><img src="docs/images/ipwo-logo.jpg" alt="IPWO" width="96"></a><br>
+      <strong>IPWO</strong>
     </td>
     <td>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><img src="docs/images/sidrune-ai-banner.png" alt="Sidrune AI — One API. Every leading AI model. Sign up and get $3 credit." width="100%"></a><br>
-      One API for GPT, Claude, and other leading AI models.<br>
-      Sign up and get $3 in API credit. Promo: <code>SDRAIUSAGE</code>.<br>
-      <a href="https://fluxionai.space/register?source=github&amp;campaign=github-sidrune-aiusage&amp;promo=SDRAIUSAGE"><strong>Sign up with Sidrune AI →</strong></a>
+      <strong>Sign up for 2GB of free rotating proxy traffic.</strong><br>
+      Residential proxies in 195+ countries and regions. Supports HTTP(S), SOCKS5, and location targeting.<br>
+      For cross-region access to AI development tools, API requests, and network testing.<br>
+      Use code <code>0201</code> for <strong>10% off</strong>.<br>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><strong>Claim your free 2GB →</strong></a>
     </td>
   </tr>
   <tr>
@@ -58,13 +60,13 @@
   </tr>
   <tr>
     <td width="132" align="center">
-      <a href="https://api-aimodels.com/register?aff=DrSm"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><img src="https://r2.sucloud.vip/sucloud_web_logo.png" alt="Sucloud" width="72"></a><br>
       <strong>Sucloud</strong>
     </td>
     <td>
       <strong>400+ models across text, image, video, and music.</strong><br>
       A multi-channel model hub with transparent pricing and broad coverage, including Claude official channels, AWSB, CCMax, Kiro, Seedance, Kling, Veo, HappyHorse, and more.<br>
-      <a href="https://api-aimodels.com/register?aff=DrSm"><strong>Visit Sucloud →</strong></a>
+      <a href="https://api-aimodels.com/register?channel=c_tinvzu4g"><strong>Visit Sucloud →</strong></a>
     </td>
   </tr>
   <tr>
