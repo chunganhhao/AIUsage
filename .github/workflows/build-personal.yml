@@ -58,6 +58,11 @@ jobs:
           path: ${{ runner.temp }}/reset-cards-preview
           if-no-files-found: error
 
+      - name: Free up disk space before packaging
+        run: |
+          rm -rf build/DebugDerivedData build/DerivedData QuotaBackend/.build
+          df -h
+
       - name: Build & Package Release Artifacts
         env:
           REQUIRE_STABLE_SIGNING: "0"
