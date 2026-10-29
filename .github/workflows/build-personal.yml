@@ -43,6 +43,7 @@ jobs:
         run: |
           bash scripts/run_token_saver_settings_regression.sh
           bash scripts/run_token_saver_release_regression.sh
+          bash scripts/run_dmg_packaging_regression.sh
           bash scripts/run_pool_circuit_breaker_regression.sh
           bash scripts/run_account_identity_regression.sh
           bash scripts/run_common_config_regression.sh
