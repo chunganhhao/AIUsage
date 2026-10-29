@@ -286,7 +286,7 @@ private struct FixtureNodeBalances: View {
 
 private struct FixtureCreditStates: View {
     let scheme: ColorScheme
-    private let values: [String?] = ["1234.6 credits", "0 credits", "Available", "No available credits", nil, "Unlimited"]
+    private var values: [String?] { [L("1234.6 credits", "1234.6 积分"), L("0 credits", "0 积分"), "Available", "No available credits", nil, L("Unlimited", "无限")] }
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L("Codex credits · Explicit states", "Codex 积分 · 状态区分")).font(.headline)

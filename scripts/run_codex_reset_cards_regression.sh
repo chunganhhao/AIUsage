@@ -65,8 +65,8 @@ abort 'Missing coordinator shared binding' unless coordinator.sub!('static let s
 File.write(File.join(output, 'PreviewResetCoordinator.swift'), coordinator)
 card = File.read(File.join(root, 'AIUsage/Views/ProviderCard.swift')).split(/^#Preview \{/).first
 File.write(File.join(output, 'PreviewProviderCard.swift'), card)
-subscription = File.read(File.join(root, 'AIUsage/Views/CodexProxyManagementView.swift')).split('// MARK: - Subscription Accounts Section', 2).last.split('// MARK: - Codex Global Config Section', 2).first
-File.write(File.join(output, 'PreviewCodexSubscriptionSection.swift'), "import SwiftUI\nimport Combine\n" + subscription)
+subscription = File.read(File.join(root, 'AIUsage/Views/CodexProxyManagementView.swift')).split('struct CodexSubscriptionSection', 2).last.split('// MARK: - Codex Global Config Section', 2).first
+File.write(File.join(output, 'PreviewCodexSubscriptionSection.swift'), "import SwiftUI\nimport Combine\nstruct CodexSubscriptionSection" + subscription)
 toggle = File.read(File.join(root, 'AIUsage/Views/ProxyManagementView+Card.swift')).split('// MARK: - Proxy Activation Toggle Style', 2).last.split('// MARK: - Instant Tooltip Modifier', 2).first
 File.write(File.join(output, 'PreviewProxyToggle.swift'), "import SwiftUI\n" + toggle)
 utilities = File.read(File.join(root, 'AIUsage/Views/Utilities.swift')).split('// MARK: - Refreshable Time Views', 2).last
