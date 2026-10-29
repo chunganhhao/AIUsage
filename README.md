@@ -35,6 +35,19 @@
 <table>
   <tr>
     <td width="132" align="center">
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><img src="docs/images/ipwo-logo.jpg" alt="IPWO" width="96"></a><br>
+      <strong>IPWO</strong>
+    </td>
+    <td>
+      <strong>Sign up for 2GB of free rotating proxy traffic.</strong><br>
+      Residential proxies in 195+ countries and regions. Supports HTTP(S), SOCKS5, and location targeting.<br>
+      For cross-region access to AI development tools, API requests, and network testing.<br>
+      Use code <code>0201</code> for <strong>10% off</strong>.<br>
+      <a href="https://www.ipwo.net/?ref=githubAIUsage"><strong>Claim your free 2GB →</strong></a>
+    </td>
+  </tr>
+  <tr>
+    <td width="132" align="center">
       <a href="https://api-models.com/sign-up?aff=mfLW"><img src="docs/images/api-models-logo-light.png" alt="API Models" width="88"></a><br>
       <strong>API Models</strong>
     </td>

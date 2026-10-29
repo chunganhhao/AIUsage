@@ -92,6 +92,21 @@ jobs:
         shell: bash
         run: bash scripts/run_account_identity_regression.sh
 
+      - name: Run Codex reset cards regression
+        shell: bash
+        run: bash scripts/run_codex_reset_cards_regression.sh
+
+      - name: Render Codex reset cards previews
+        shell: bash
+        run: TMPDIR="$RUNNER_TEMP" bash scripts/run_codex_reset_cards_regression.sh --render "$RUNNER_TEMP/reset-cards-preview"
+
+      - name: Upload Codex reset cards previews
+        uses: actions/upload-artifact@v6
+        with:
+          name: codex-reset-cards-preview
+          path: ${{ runner.temp }}/reset-cards-preview
+          if-no-files-found: error
+
       - name: Run global proxy cancellation regression
         shell: bash
         run: bash scripts/run_global_proxy_cancellation_regression.sh

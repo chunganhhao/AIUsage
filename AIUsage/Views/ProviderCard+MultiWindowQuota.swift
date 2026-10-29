@@ -156,7 +156,7 @@ struct MultiWindowBarRow: View {
 
                 Spacer()
 
-                Text(displayText)
+                Text(L(settings.quotaIndicatorMetric == .remaining ? "Remaining " : "Used ", settings.quotaIndicatorMetric == .remaining ? "剩余 " : "已用 ") + displayText)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(LinearGradient(colors: gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
 
@@ -259,9 +259,14 @@ struct MultiWindowRingItem: View {
                     )
                     .rotationEffect(.degrees(-90))
 
-                Text(displayText)
-                    .font(.system(size: ringSize >= 62 ? 15 : 12, weight: .bold, design: .rounded))
-                    .foregroundStyle(LinearGradient(colors: gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                VStack(spacing: 1) {
+                    Text(displayText)
+                        .font(.system(size: ringSize >= 62 ? 15 : 12, weight: .bold, design: .rounded))
+                        .foregroundStyle(LinearGradient(colors: gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
+                    Text(settings.quotaIndicatorMetric == .remaining ? L("Left", "剩余") : L("Used", "已用"))
+                        .font(.system(size: 8))
+                        .foregroundStyle(.secondary)
+                }
             }
             .frame(width: ringSize, height: ringSize)
 
@@ -347,7 +352,7 @@ struct MultiWindowSegmentsRow: View {
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
                 Spacer()
-                Text(displayText)
+                Text(L(settings.quotaIndicatorMetric == .remaining ? "Remaining " : "Used ", settings.quotaIndicatorMetric == .remaining ? "剩余 " : "已用 ") + displayText)
                     .font(.caption.weight(.bold))
                     .foregroundStyle(LinearGradient(colors: gradientColors, startPoint: .topLeading, endPoint: .bottomTrailing))
                 if let resetText = compactResetText {
