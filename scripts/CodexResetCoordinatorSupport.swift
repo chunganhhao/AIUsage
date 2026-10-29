@@ -1,8 +1,9 @@
 import Foundation
+import Combine
 import QuotaBackend
 
 // 系统存储使用 AccountIdentityRegressionSupport；注册表提交运行正式 AccountStore。
-final class AppSettings {
+final class AppSettings: ObservableObject {
     static let shared = AppSettings()
     var backendMode = "local"
     var remoteBaseURL = "fixture://offline"
@@ -44,7 +45,8 @@ final class AppSettings {
     func fetchProviderResults(_ providerId: String) async throws -> [ProviderWrapper] { await results() }
     func fetchDashboard(providerIds: [String]) async throws -> DashboardResponse { await dashboard() }
 }
-@MainActor final class ProviderRefreshCoordinator {
+@MainActor final class ProviderRefreshCoordinator: ObservableObject {
+    func credentialID(for provider: ProviderData) -> String? { nil }
     var providers: [ProviderData] = []
     var codexResetRefreshFence = CodexResetRefreshFence()
     let settings = AppSettings.shared
