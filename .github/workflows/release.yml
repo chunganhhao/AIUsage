@@ -96,6 +96,10 @@ jobs:
         shell: bash
         run: bash scripts/run_codex_reset_cards_regression.sh
 
+      - name: Run Antigravity pool protection regression
+        shell: bash
+        run: bash scripts/run_pool_circuit_breaker_regression.sh
+
       - name: Render Codex reset cards previews
         shell: bash
         run: TMPDIR="$RUNNER_TEMP" bash scripts/run_codex_reset_cards_regression.sh --render "$RUNNER_TEMP/reset-cards-preview"
