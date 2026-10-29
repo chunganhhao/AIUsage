@@ -40,7 +40,11 @@ public enum TokenSaverReleaseError: LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .http(let status): return "GitHub returned HTTP \(status). Check again later."
-        case .rateLimited(let reset): return "GitHub rate limited this check.\(reset.map { " Reset (Unix): \($0)." } ?? " Try again later.")"
+        case .rateLimited(let reset):
+            if let seconds = reset.flatMap(TimeInterval.init), seconds.isFinite {
+                return "GitHub API limit reached. Retry after \(Date(timeIntervalSince1970: seconds).formatted(date: .abbreviated, time: .standard)). This is not your AI usage quota."
+            }
+            return "GitHub API limit reached. Wait before trying again. This is not your AI usage quota."
         case .invalidMetadata: return "GitHub metadata or skill integrity validation failed."
         case .oversized: return "GitHub response exceeds the safe size limit."
         case .unsafeStorage: return "Managed storage is invalid or contains a symbolic link."

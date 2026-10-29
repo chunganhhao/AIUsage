@@ -45,10 +45,19 @@ try await runManagerChecks()
 }
 
 private actor ReleaseManagerFixture {
+    var requests = 0
+    var rateLimit: String?
+    func setRateLimit(_ value: String?) { rateLimit = value }
+    func requestCount() -> Int { requests }
     var failChecks = false
     var failDownloads = false
     func setFailures(checks: Bool = false, downloads: Bool = false) { failChecks = checks; failDownloads = downloads }
     func response(_ request: URLRequest, _ limit: Int) throws -> (Data, HTTPURLResponse) {
+        requests += 1
+        if let reset = rateLimit {
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil,
+                    headerFields: ["X-RateLimit-Reset": reset])!)
+        }
         let path = request.url!.path
         if path.contains("/contents/") && failDownloads || !path.contains("/contents/") && failChecks { throw URLError(.notConnectedToInternet) }
         let object: [String: Any]
@@ -132,5 +141,45 @@ private func runManagerChecks() async throws {
     XCTAssertEqual(rtkManager.statuses[.rtk]?.installedBinaryVersion, "1.2.3")
     XCTAssertNil(rtkManager.statuses[.rtk]?.staged)
     print("PASS manager RTK actual installed version stays separate from GitHub latest")
-    print("Release manager offline regression: 5 passed")
+    var clock = Date(timeIntervalSince1970: 1_800_000_000)
+    let cooldown = TokenSaverReleaseManager(client: client, store: store, rtk: noBrew, now: { clock }, reapplyRules: { XCTFail("cooldown must not apply") })
+    await cooldown.check(.ponytail)
+    XCTAssertEqual(cooldown.statuses[.ponytail]?.latest?.version, "v1.2.3")
+    let retained = cooldown
+    XCTAssertEqual(retained.statuses[.ponytail]?.checkedAt, clock)
+    print("PASS manager owner retains checked metadata without another request")
+
+    await fixture.setRateLimit("1800000120")
+    await cooldown.check(.caveman)
+    XCTAssertTrue(cooldown.isCoolingDown)
+    XCTAssertEqual(cooldown.retryAfter, clock.addingTimeInterval(120))
+    XCTAssertNil(cooldown.statuses[.caveman]?.latest)
+    XCTAssertFalse(cooldown.statuses[.caveman]?.error?.contains("Unix") == true)
+    print("PASS manager parses rate limit into shared local retry deadline")
+    let requests = await fixture.requestCount()
+    await cooldown.check(.rtk)
+    await cooldown.check(.ponytail)
+    await cooldown.stage(.ponytail)
+    let countAfterCooldown = await fixture.requestCount()
+    XCTAssertEqual(countAfterCooldown, requests)
+    XCTAssertEqual(cooldown.statuses[.ponytail]?.latest?.version, "v1.2.3")
+    print("PASS cooldown blocks sibling checks and downloads without network or lost sibling results")
+
+    clock.addTimeInterval(121)
+    XCTAssertFalse(cooldown.isCoolingDown)
+    let countAfterExpiry = await fixture.requestCount()
+    XCTAssertEqual(countAfterExpiry, requests)
+    await fixture.setRateLimit(nil)
+    await cooldown.check(.caveman)
+    XCTAssertEqual(cooldown.statuses[.caveman]?.latest?.version, "v1.2.3")
+    print("PASS cooldown expiry permits explicit retry, never automatic retry")
+
+    for reset in ["invalid", "nan", "inf", "1"] {
+        await fixture.setRateLimit(reset)
+        let fallback = TokenSaverReleaseManager(client: client, store: store, rtk: noBrew, now: { clock })
+        await fallback.check(.caveman)
+        XCTAssertEqual(fallback.retryAfter, clock.addingTimeInterval(60))
+    }
+    print("PASS malformed nonfinite and past resets use bounded 60-second cooldown")
+    print("Release manager offline regression: 10 passed")
 }

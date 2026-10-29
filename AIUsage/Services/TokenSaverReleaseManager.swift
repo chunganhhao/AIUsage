@@ -20,16 +20,20 @@ final class TokenSaverReleaseManager: ObservableObject {
     }
 
     @Published private(set) var statuses: [TokenSaverReleaseTool: Status] = [:]
+    // Shared by all three repositories: anonymous GitHub quota belongs to the originating IP.
+    @Published private(set) var retryAfter: Date?
+    private let now: () -> Date
     private let client: TokenSaverReleaseClient
     private let store: TokenSaverReleaseStore
     private let reapplyRules: () throws -> Void
     private let rtk: TokenSaverReleaseRTK
 
     init(client: TokenSaverReleaseClient = .init(), store: TokenSaverReleaseStore = .init(),
-         rtk: TokenSaverReleaseRTK = .init(),
+         rtk: TokenSaverReleaseRTK = .init(), now: @escaping () -> Date = Date.init,
          reapplyRules: @escaping () throws -> Void = {
              try TokenSaverSettingsStore.save(TokenSaverSettingsStore.load())
          }) {
+        self.now = now
         self.client = client
         self.store = store
         self.reapplyRules = reapplyRules
@@ -44,7 +48,7 @@ final class TokenSaverReleaseManager: ObservableObject {
     }
 
     func check(_ tool: TokenSaverReleaseTool) async {
-        guard statuses[tool]?.isBusy != true else { return }
+        guard statuses[tool]?.isBusy != true, !isCoolingDown else { return }
         statuses[tool, default: Status()].isBusy = true
         statuses[tool]?.error = nil
         statuses[tool]?.notice = nil
@@ -61,11 +65,23 @@ final class TokenSaverReleaseManager: ObservableObject {
                 do {
                     statuses[tool]?.installedBinaryVersion = try await rtk.installedVersion()
                     statuses[tool]?.binaryInspected = true
-                } catch { statuses[tool]?.error = error.localizedDescription }
+                } catch { record(error, for: tool) }
             }
             statuses[tool]?.latest = try await client.latest(for: tool)
-            statuses[tool]?.checkedAt = Date()
-        } catch { statuses[tool]?.error = error.localizedDescription }
+            statuses[tool]?.checkedAt = now()
+        } catch { record(error, for: tool) }
+    }
+
+    var isCoolingDown: Bool { retryAfter.map { $0 > now() } ?? false }
+
+    private func record(_ error: Error, for tool: TokenSaverReleaseTool) {
+        statuses[tool]?.error = error.localizedDescription
+        if let releaseError = error as? TokenSaverReleaseError,
+           case .rateLimited(let reset) = releaseError {
+            let date = reset.flatMap(TimeInterval.init).flatMap { $0.isFinite ? Date(timeIntervalSince1970: $0) : nil }
+            let deadline = date.flatMap { $0 > now() ? $0 : nil } ?? now().addingTimeInterval(60)
+            retryAfter = max(retryAfter ?? deadline, deadline)
+        }
     }
 
     func updateRTK() async {
@@ -87,7 +103,7 @@ final class TokenSaverReleaseManager: ObservableObject {
     }
 
     func stage(_ tool: TokenSaverReleaseTool) async {
-        guard statuses[tool]?.isBusy != true, let release = statuses[tool]?.latest,
+        guard !isCoolingDown, statuses[tool]?.isBusy != true, let release = statuses[tool]?.latest,
               tool.skillPath != nil else { return }
         statuses[tool]?.isBusy = true
         statuses[tool]?.error = nil
@@ -103,7 +119,7 @@ final class TokenSaverReleaseManager: ObservableObject {
                 statuses[tool]?.error = "Downloaded/staged rules, but not applied: \(error.localizedDescription)"
                 statuses[tool]?.notice = nil
             }
-        } catch { statuses[tool]?.error = error.localizedDescription }
+        } catch { record(error, for: tool) }
     }
 }
 

@@ -37,6 +37,10 @@ private func fixtureHome() -> URL {
     let home = fixtureHome()
     let client = TokenSaverReleaseClient { request, _ in
         let path = request.url!.path
+        if ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_RATE_LIMIT"] == "1" {
+            return (Data(), HTTPURLResponse(url: request.url!, statusCode: 429, httpVersion: nil,
+                    headerFields: ["X-RateLimit-Reset": String(Int(Date().addingTimeInterval(120).timeIntervalSince1970))])!)
+        }
         let body: [String: Any]
         if path.contains("/contents/") {
             let tool = path.contains("/ponytail/") ? "ponytail" : "caveman"
@@ -49,7 +53,10 @@ private func fixtureHome() -> URL {
         return (try JSONSerialization.data(withJSONObject:body), HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!)
     }
     let rtk = TokenSaverReleaseRTK(brewURL: URL(fileURLWithPath:"/opt/homebrew/bin/brew")) { _, args in
-        .init(status:0,text:args == ["list","--versions","rtk"] ? "rtk 1.0.0" : "fixture upgrade only")
+        if args == ["list", "--versions", "rtk"], ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_RTK_MISSING"] == "1" {
+            return .init(status: 1, text: "")
+        }
+        return .init(status:0,text:args == ["list","--versions","rtk"] ? "rtk 1.0.0" : "fixture upgrade only")
     }
     return TokenSaverReleaseManager(client:client,
         store:TokenSaverReleaseStore(root:home.appendingPathComponent("Library/Application Support/AIUsage/Rules")),
@@ -58,13 +65,22 @@ private func fixtureHome() -> URL {
 @main struct TokenSaverUIFixture: App {
     @StateObject var runtime = CLIProxyRuntimeController()
     @State var draft = CLIProxyGatewaySettings()
+    @StateObject private var releases = fixtureReleaseManager()
+    @State private var tab = 0
     var body: some Scene {
         WindowGroup("AIUsage Token Saver — isolated fixture") {
-            TabView {
+            TabView(selection: $tab) {
                 SubscriptionGatewaySettingsRuntimePane(runtime:runtime,draftSettings:$draft,onApply:{},tokenSaverHome:fixtureHome())
-                    .tabItem { Text("Runtime") }
-                ScrollView { TokenSaverUpdatesSection(manager:fixtureReleaseManager()).padding(20) }
-                    .tabItem { Text("Updates (offline fixtures)") }
+                    .tabItem { Text("Runtime") }.tag(0)
+                ScrollView {
+                    if tab == 1 {
+                        VStack(alignment: .leading, spacing: 20) {
+                            FixtureCPAUpdatesSection()
+                            TokenSaverUpdatesSection(manager:releases, onOpenRuntime: { tab = 0 })
+                        }.padding(20)
+                    }
+                }
+                    .tabItem { Text("Updates (offline fixtures)") }.tag(1)
             }
             .padding(20).frame(minWidth:760,minHeight:920)
             .onAppear { NSApp.activate(ignoringOtherApps:true) }

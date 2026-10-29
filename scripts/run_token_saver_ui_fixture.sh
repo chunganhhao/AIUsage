@@ -14,10 +14,46 @@ root, fixture = map(Path, sys.argv[1:])
 s = (root/'AIUsage/Views/SubscriptionGatewaySettingsView.swift').read_text()
 tail = s.split('// MARK: - Token Saver updates section', 1)[1]
 (fixture/'Updates.swift').write_text('import SwiftUI\nimport Combine\nimport QuotaBackend\n' + tail)
+# Compile the exact parent updater too: the Token Saver child alone cannot detect
+# misplaced references in the sibling CPA updater. Stubs never launch CPA.
+parent = s.split('    private var updatesSection: some View {', 1)[1].split('    @ViewBuilder\n    private var updateStatusPill', 1)[0]
+(fixture/'ParentUpdates.swift').write_text('''import SwiftUI
+import Combine
+
+@MainActor
+final class FixtureCPAUpdater: ObservableObject {
+    struct Release { var version: String }
+    struct Operation { var isBusy = false }
+    @Published var latestRelease: Release?
+    @Published var lastCheckedAt: Date?
+    let currentVersion: String? = "8.0.47"
+    let operation = Operation()
+    let isInstalled = true
+    var hasUpdate: Bool { latestRelease != nil }
+    func checkForUpdates(force: Bool) async {
+        latestRelease = Release(version: "8.0.99-fixture")
+        lastCheckedAt = Date()
+    }
+    func installOrUpdateLatest() async { }
+}
+
+struct FixtureCPAUpdatesSection: View {
+    @StateObject private var manager = FixtureCPAUpdater()
+    var body: some View { updatesSection }
+    private var updateStatusPill: some View { Text("Offline CPA fixture") }
+    private var operationLabel: String { "Working…" }
+    private var primaryUpdateActionTitle: String { "Update CPA (stub)" }
+    private func sectionHeader<Content: View>(title: String, @ViewBuilder trailing: () -> Content) -> some View {
+        HStack { Text(title).font(.title3); Spacer(); trailing().font(.caption) }
+    }
+    private func versionChip(title: String, value: String) -> some View { Text("\\(title): \\(value)") }
+    private var updatesSection: some View {
+''' + parent + '}\n')
+
 PYCODE
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$FIXTURE/objects.txt"
 swiftc -parse-as-library -swift-version 5 -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$FIXTURE/objects.txt" -lsqlite3 \
-  "$ROOT/AIUsage/Views/SubscriptionGatewaySettingsRuntimePane.swift" "$ROOT/scripts/token_saver_ui_stubs.swift" "$FIXTURE/Updates.swift" "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" -o "$FIXTURE/TokenSaverUIFixture"
+  "$ROOT/AIUsage/Views/SubscriptionGatewaySettingsRuntimePane.swift" "$ROOT/scripts/token_saver_ui_stubs.swift" "$FIXTURE/ParentUpdates.swift" "$FIXTURE/Updates.swift" "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" -o "$FIXTURE/TokenSaverUIFixture"
 mkdir -p "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS"
 cp "$FIXTURE/TokenSaverUIFixture" "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS/TokenSaverUIFixture"
 cat > "$FIXTURE/TokenSaverUIFixture.app/Contents/Info.plist" <<'PLIST'

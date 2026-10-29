@@ -97,7 +97,15 @@ final class TokenSaverReleaseTests: XCTestCase {
             do { _ = try await client(fixture).latest(for: .rtk); XCTFail("accepted error") }
             catch {
                 if status == 500 { XCTAssertTrue(error.localizedDescription.contains("500")) }
-                else { XCTAssertTrue(error.localizedDescription.contains("12345")) }
+                else {
+                    if case TokenSaverReleaseError.rateLimited(let reset) = error {
+                        XCTAssertEqual(reset, "12345")
+                        XCTAssertTrue(error.localizedDescription.contains("GitHub API"))
+                        XCTAssertFalse(error.localizedDescription.contains("Unix"))
+                    } else {
+                        XCTFail("expected rate limit")
+                    }
+                }
             }
             let requests = await fixture.captured()
             XCTAssertEqual(requests.count, 1)
