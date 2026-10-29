@@ -96,6 +96,9 @@ struct PoolCircuitBreakerRegression {
         let data = try JSONSerialization.data(withJSONObject: initial, options: [.sortedKeys])
         try data.write(to: a); try data.write(to: b)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: a.path)
+        let off = try AntigravityPoolCircuitBreaker.sync(targets: [a], models: screenshot, runtime: root)
+        try check(off == nil && Data(contentsOf: a) == data, "Default off is a byte-identical no-op")
+        try Data(#"{"enabled":true}"#.utf8).write(to: root.appendingPathComponent("pool-protection.json"))
         _ = try AntigravityPoolCircuitBreaker.sync(targets: [a], models: screenshot, runtime: root)
         try check(try Data(contentsOf: b) == data, "Other account untouched")
         let once = try Data(contentsOf: a)
@@ -135,6 +138,15 @@ struct PoolCircuitBreakerRegression {
         StubURLProtocol.respond(AntigravityProvider.loadCodeAssistURL, body: "{}")
         StubURLProtocol.respond(AntigravityProvider.quotaSummaryURLs[0], body: #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","resetTime":"2026-10-26T00:00:00Z"}]},{"displayName":"Gemini 4 Argon","buckets":[{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.0,"resetTime":"2026-10-26T00:00:00Z"}]}]}"#)
         let provider = AntigravityProvider(homeDirectory: home.path)
+        try FileManager.default.removeItem(at: runtime.appendingPathComponent("current"))
+        try FileManager.default.createSymbolicLink(atPath: runtime.appendingPathComponent("current").path, withDestinationPath: "versions/v7.2.67")
+        let offUsage = try await provider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: source.path))
+        try check(offUsage.extra["circuitBreakerError"] == nil, "Default off never warns on old CPA")
+        try check(try Data(contentsOf: destination) == data, "Default off provider leaves credential byte-identical")
+        try expectFailure { try AntigravityPoolProtectionSettings.setEnabled(true, homeDirectory: home.path) }
+        try FileManager.default.removeItem(at: runtime.appendingPathComponent("current"))
+        try FileManager.default.createSymbolicLink(atPath: runtime.appendingPathComponent("current").path, withDestinationPath: "versions/v8.0.43")
+        try AntigravityPoolProtectionSettings.setEnabled(true, homeDirectory: home.path)
         let usage = try await provider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: source.path))
         try check(usage.extra["circuitBreakerPartialTripped"]?.value as? Bool == true, "Provider propagates partial state")
         let payload = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
@@ -142,6 +154,133 @@ struct PoolCircuitBreakerRegression {
         try check(try Data(contentsOf: source) == data, "Do not alter imported credential")
         let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
         try check(summary.statusLabel == "Pools Paused: argon, claude", "Normalizer reports exact pools")
+        try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path)
+        let disabled = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
+        try check(disabled["excluded_models"] == nil && disabled["aiusage_pool_breaker"] == nil, "Disable restores original inheritance")
+        let afterOff = try Data(contentsOf: destination)
+        try check(try AntigravityPoolCircuitBreaker.sync(targets: [destination], models: screenshot, runtime: runtime) == nil, "Stale fetch cannot reapply after opt-out")
+        try check(try Data(contentsOf: destination) == afterOff, "Opt-out remains byte-identical after stale fetch")
+        // Opt-in boundary and shared-writer checks run without XCTest/Xcode.
+        let setting = runtime.appendingPathComponent("pool-protection.json")
+        try Data("{malformed".utf8).write(to: setting)
+        try check(!AntigravityPoolProtectionSettings.isEnabled(homeDirectory: home.path), "Malformed setting defaults off")
+        try check(try AntigravityPoolCircuitBreaker.sync(targets: [destination], models: screenshot, runtime: runtime) == nil, "Malformed setting cannot mutate credentials")
+        try AntigravityPoolProtectionSettings.setEnabled(true, homeDirectory: home.path)
+        try check(try FileManager.default.attributesOfItem(atPath: setting.path)[.posixPermissions] as? Int == 0o600, "Setting is owner-only")
+        var manualBaseline = initial; manualBaseline["excluded_models"] = ["manual-model"]
+        try JSONSerialization.data(withJSONObject: manualBaseline).write(to: destination)
+        _ = try AntigravityPoolCircuitBreaker.sync(targets: [destination], models: screenshot, runtime: runtime)
+        try AntigravityCredentialFile.update(destination) { current in
+            var next = current; next["disabled"] = true; next["refresh_token"] = "rotated-fixture"; return next
+        }
+        try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path)
+        let cleaned = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
+        try check(cleaned["excluded_models"] as? [String] == ["manual-model"], "Cleanup restores explicit manual exclusions")
+        try check(cleaned["disabled"] as? Bool == true && cleaned["refresh_token"] as? String == "rotated-fixture", "Cleanup preserves manual pause and fresh token")
+        try AntigravityPoolProtectionSettings.setEnabled(true, homeDirectory: home.path)
+        try JSONSerialization.data(withJSONObject: conflict).write(to: destination)
+        let conflicting = try Data(contentsOf: destination)
+        try expectFailure { try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path) }
+        try check(AntigravityPoolProtectionSettings.isEnabled(homeDirectory: home.path), "Cleanup conflict keeps setting enabled")
+        try check(try Data(contentsOf: destination) == conflicting, "Cleanup conflict preserves external exclusions")
+        let external = try JSONSerialization.data(withJSONObject: ["type": "antigravity", "refresh_token": "newer-fixture"])
+        try expectFailure {
+            try AntigravityCredentialFile.update(destination) { current in
+                try external.write(to: destination, options: .atomic)
+                var stale = current; stale["test-overlay"] = true; return stale
+            }
+        }
+        try check(try Data(contentsOf: destination) == external, "Shared writer refuses intervening external replacement")
+        // Upgrade from automatic protection: no setting, but persisted exclusions.
+        let migrationHome = root.appendingPathComponent("migration-home")
+        let migrationRuntime = AntigravityPoolProtectionSettings.runtime(migrationHome.path)
+        let migrationAuth = migrationRuntime.appendingPathComponent("auth")
+        try FileManager.default.createDirectory(at: migrationAuth, withIntermediateDirectories: true)
+        let migrationFile = migrationAuth.appendingPathComponent("antigravity-old.json")
+        let migrationSetting = migrationRuntime.appendingPathComponent("pool-protection.json")
+        var inherited = blocked
+        inherited["disabled"] = true
+        inherited["refresh_token"] = "fresh-migration-token"
+        let inheritedData = try JSONSerialization.data(withJSONObject: inherited)
+        try inheritedData.write(to: migrationFile)
+        try check(try AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: migrationHome.path), "Upgrade attention detects owned exclusions without setting")
+        try check(!AntigravityPoolProtectionSettings.isEnabled(homeDirectory: migrationHome.path), "Upgrade never auto-enables protection")
+        try check(try Data(contentsOf: migrationFile) == inheritedData && !FileManager.default.fileExists(atPath: migrationSetting.path), "Attention read performs no credential or setting writes")
+        try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: migrationHome.path)
+        let restoredMigration = try JSONSerialization.jsonObject(with: Data(contentsOf: migrationFile)) as! [String: Any]
+        try check(restoredMigration["excluded_models"] == nil && restoredMigration["aiusage_pool_breaker"] == nil, "Explicit Restore works with absent setting")
+        try check(restoredMigration["disabled"] as? Bool == true && restoredMigration["refresh_token"] as? String == "fresh-migration-token", "Upgrade Restore preserves pause and token")
+        try check(try !AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: migrationHome.path) && !FileManager.default.fileExists(atPath: migrationSetting.path), "Restore clears attention without creating opt-in")
+        try JSONSerialization.data(withJSONObject: conflict).write(to: migrationFile)
+        let migrationConflict = try Data(contentsOf: migrationFile)
+        try expectFailure { try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: migrationHome.path) }
+        try check(try Data(contentsOf: migrationFile) == migrationConflict, "Explicit Restore refuses external exclusion conflict unchanged")
+        for badBaseline: Any in ["invalid", 7, ["not": "a-list"]] {
+            var invalid = blocked
+            var state = invalid["aiusage_pool_breaker"] as! [String: Any]
+            state["original_excluded_models"] = badBaseline
+            invalid["aiusage_pool_breaker"] = state
+            let invalidData = try JSONSerialization.data(withJSONObject: invalid)
+            try invalidData.write(to: migrationFile)
+            try expectFailure { try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: migrationHome.path) }
+            try check(try Data(contentsOf: migrationFile) == invalidData, "Restore rejects invalid baseline unchanged")
+        }
+        try Data("{malformed".utf8).write(to: migrationFile)
+        try expectFailure { _ = try AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: migrationHome.path) }
+        try check(try Data(contentsOf: migrationFile) == Data("{malformed".utf8), "Malformed attention check remains read-only")
+        try FileManager.default.removeItem(at: migrationFile)
+        try check(try !AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: migrationHome.path), "Clean migration reports no residual protection")
+
+        // Real provider flow, with every HTTP response intercepted by StubURLProtocol.
+        let tokenHome = root.appendingPathComponent("token-home")
+        try FileManager.default.createDirectory(at: tokenHome, withIntermediateDirectories: true)
+        let tokenFile = tokenHome.appendingPathComponent("antigravity.json")
+        var expired = initial
+        expired["access_token"] = "token-A"
+        expired["refresh_token"] = "refresh-fixture"
+        expired["expired"] = "2020-01-01T00:00:00Z"
+        let expiredData = try JSONSerialization.data(withJSONObject: expired)
+        let envKeys = ["AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID", "AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET"]
+        let savedEnvironment = envKeys.map { ProcessInfo.processInfo.environment[$0] }
+        for key in envKeys { setenv(key, "offline-fixture", 1) }
+        defer {
+            for (key, value) in zip(envKeys, savedEnvironment) {
+                if let value { setenv(key, value, 1) } else { unsetenv(key) }
+            }
+        }
+        let healthyBody = #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99}]}]}"#
+        StubURLProtocol.respond(AntigravityProvider.quotaSummaryURLs[0]) { request in
+            let token = request.headers.first { $0.key.lowercased() == "authorization" }?.value
+            return token == "Bearer token-B" ? (401, "{}") : (200, healthyBody)
+        }
+        for externalWrite in [false, true] {
+            try expiredData.write(to: tokenFile)
+            var refreshes = 0
+            StubURLProtocol.respond(AntigravityProvider.oauthRefreshURL) { _ in
+                refreshes += 1
+                if refreshes == 2 && externalWrite {
+                    var external = expired
+                    external["access_token"] = "external-token"
+                    external["refresh_token"] = "external-refresh"
+                    external["manual-field"] = "preserved"
+                    try! JSONSerialization.data(withJSONObject: external).write(to: tokenFile, options: .atomic)
+                }
+                return (200, refreshes == 1
+                    ? #"{"access_token":"token-B","expires_in":3600}"#
+                    : #"{"access_token":"token-C","expires_in":3600}"#)
+            }
+            let tokenProvider = AntigravityProvider(homeDirectory: tokenHome.path)
+            _ = try await tokenProvider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: tokenFile.path))
+            let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenFile)) as! [String: Any]
+            try check(refreshes == 2, "Expired A refreshes B then retries unauthorized B with C")
+            if externalWrite {
+                try check(saved["access_token"] as? String == "external-token" && saved["refresh_token"] as? String == "external-refresh", "Retry persistence preserves external token replacement")
+                try check(saved["manual-field"] as? String == "preserved", "Retry persistence preserves external metadata")
+            } else {
+                try check(saved["access_token"] as? String == "token-C", "Second successful refresh commits C after its own B write")
+                try check(saved["project_id"] as? String == "fixture-project", "Two refreshes preserve unrelated credential metadata")
+            }
+        }
         print("Pool circuit breaker: \(checks) checks passed (production backend, temporary credentials only)")
     }
 }

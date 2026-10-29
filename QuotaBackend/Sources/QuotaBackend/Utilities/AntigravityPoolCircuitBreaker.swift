@@ -35,46 +35,69 @@ enum AntigravityPoolCircuitBreaker {
     }
 
     private static let stateKey = "aiusage_pool_breaker"
-    // Serializes concurrent quota polls in this process. CPA remains an independent writer;
-    // compare the original bytes immediately before atomic replacement rather than overwriting stale tokens.
-    private static let lock = NSLock()
-
-    static func sync(targets: [URL], models: [AntigravityProvider.ModelQuota], runtime: URL) throws -> Outcome? {
-        guard !targets.isEmpty else { return nil }
-        lock.lock()
-        defer { lock.unlock() }
+    static func requireSupportedVersion(_ runtime: URL) throws {
         let version = try FileManager.default.destinationOfSymbolicLink(atPath: runtime.appendingPathComponent("current").path)
         let number = URL(fileURLWithPath: version).lastPathComponent
         guard number.range(of: #"^v[0-9]+\.[0-9]+\.[0-9]+$"#, options: .regularExpression) != nil,
               String(number.dropFirst()).compare("8.0.43", options: .numeric) != .orderedAscending else {
             throw Failure.unsafe("Pool protection requires CLIProxyAPI >= 8.0.43; credentials were left unchanged.")
         }
-        let config = try String(contentsOf: runtime.appendingPathComponent("config.yaml"), encoding: .utf8)
-        let global = try globalExclusions(config)
-        var blocked = Set<String>()
-        var applied = false
-        for target in targets {
-            let original = try Data(contentsOf: target)
-            guard let json = try JSONSerialization.jsonObject(with: original) as? [String: Any] else {
-                throw Failure.unsafe("Invalid CPA credential JSON; left unchanged.")
+    }
+
+    static func clearProtection(runtime: URL) throws {
+        let directory = runtime.appendingPathComponent("auth")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) where url.pathExtension.lowercased() == "json" {
+            guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true else { continue }
+            guard let data = try? Data(contentsOf: url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  json["type"] as? String == "antigravity", json[stateKey] != nil else { continue }
+            try AntigravityCredentialFile.update(url) { json in
+                guard json["type"] as? String == "antigravity", json[stateKey] != nil else { return nil }
+                guard let state = json[stateKey] as? [String: Any],
+                      let baseline = state["original_excluded_models"],
+                      baseline is NSNull || baseline is [String],
+                      state["last_excluded_models"] is [String] else {
+                    throw Failure.unsafe("Invalid saved pool protection exclusions; credentials left unchanged.")
+                }
+                guard let last = state["last_excluded_models"], NSDictionary(dictionary: ["v": last]).isEqual(to: ["v": json["excluded_models"] ?? NSNull()]) else {
+                    throw Failure.unsafe("Exclusions changed outside pool protection; reconcile them before disabling.")
+                }
+                var updated = json
+                if baseline is NSNull { updated.removeValue(forKey: "excluded_models") } else { updated["excluded_models"] = baseline }
+                updated.removeValue(forKey: stateKey)
+                updated["circuit_breaker_partial"] = false
+                updated["circuit_breaker_pools"] = [String]()
+                updated["circuit_breaker_reason"] = "Pool protection disabled; original model exclusions restored."
+                return updated
             }
-            guard let updated = try updatedCredential(json, models: models, global: global) else { continue }
-            let data = try JSONSerialization.data(withJSONObject: updated, options: [.prettyPrinted, .sortedKeys])
-            guard try Data(contentsOf: target) == original else {
-                throw Failure.unsafe("CPA credential changed during quota polling; retry on the next poll.")
-            }
-            if !NSDictionary(dictionary: json).isEqual(to: updated) {
-                try data.write(to: target, options: .atomic)
-            }
-            applied = true
-            let state = updated[stateKey] as? [String: Any]
-            blocked.formUnion((state?["blocked_windows"] as? [String: String] ?? [:]).values)
         }
-        guard applied else { return nil }
-        let pools = blocked.sorted()
-        return Outcome(blockedPools: pools, reason: pools.isEmpty
-            ? "Quota đã hồi phục; đã gỡ chặn do cầu dao tạo."
-            : "Đã chặn riêng pool: \(pools.joined(separator: ", ")). Các pool khác không bị cầu dao tắt.")
+    }
+
+    static func sync(targets: [URL], models: [AntigravityProvider.ModelQuota], runtime: URL) throws -> Outcome? {
+        try AntigravityCredentialFile.withLock {
+            // Recheck under the same lock as disabling/cleanup: an in-flight fetch
+            // must not reapply exclusions after the user has switched protection off.
+            guard AntigravityPoolProtectionSettings.isEnabled(runtime: runtime), !targets.isEmpty else { return nil }
+            try requireSupportedVersion(runtime)
+            let config = try String(contentsOf: runtime.appendingPathComponent("config.yaml"), encoding: .utf8)
+            let global = try globalExclusions(config)
+            var blocked = Set<String>()
+            var applied = false
+            for target in targets {
+                guard let updated = try AntigravityCredentialFile.update(target, transform: { json in
+                    try updatedCredential(json, models: models, global: global)
+                }) else { continue }
+                applied = true
+                let state = updated[stateKey] as? [String: Any]
+                blocked.formUnion((state?["blocked_windows"] as? [String: String] ?? [:]).values)
+            }
+            guard applied else { return nil }
+            let pools = blocked.sorted()
+            return Outcome(blockedPools: pools, reason: pools.isEmpty
+                ? "Quota recovered; protection-owned exclusions removed."
+                : "Protected pools: \(pools.joined(separator: ", ")). Other pools remain available.")
+        }
     }
 
     /// Pure transform also used by offline tests. nil means a manually paused account.

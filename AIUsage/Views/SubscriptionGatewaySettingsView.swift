@@ -1,4 +1,6 @@
 import SwiftUI
+import Combine
+import QuotaBackend
 
 // MARK: - CPA Settings Categories
 
@@ -172,7 +174,9 @@ struct SubscriptionGatewaySettingsView: View {
                 VStack(alignment: .leading, spacing: 16) {
                     errorBanners
                     switch selectedCategory {
-                    case .updates: updatesSection
+                    case .updates:
+                        updatesSection
+                        TokenSaverUpdatesSection()
                     case .versions: versionsSection
                     case .diagnostics: diagnosticsSection
                     default: EmptyView()
@@ -436,5 +440,102 @@ struct SubscriptionGatewaySettingsView: View {
         case .installing(let version): L("Installing v\(version)…", "安装 v\(version)…")
         case .activating(let version): L("Activating v\(version)…", "切换到 v\(version)…")
         }
+    }
+}
+
+// MARK: - Token Saver updates section
+
+struct TokenSaverUpdatesSection: View {
+    @StateObject private var manager: TokenSaverReleaseManager
+    @State private var pendingInstall: TokenSaverReleaseTool?
+
+    @MainActor
+    init(manager: TokenSaverReleaseManager? = nil) {
+        _manager = StateObject(wrappedValue: manager ?? TokenSaverReleaseManager())
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text(L("Token Saver updates", "Token Saver 更新")).font(.title3.weight(.semibold))
+            Text(L("Downloaded/staged rules are not active. Downloads reapply enabled tools to managed instruction files; a new coding session reload is required. Disabled tools remain staged only. RTK Check reads its Homebrew installed version. Saving rules can change enabled tools’ managed instruction files, but never runs downloaded scripts.",
+                   "已下载/暂存的规则尚未启用；下载会将已启用的规则写入托管指令文件；需重新加载新的编程会话。未启用的工具仅暂存。RTK 检查会读取 Homebrew 已安装版本。保存规则可能修改已启用工具的托管指令文件，但不会执行下载的脚本。"))
+                .font(.caption).foregroundStyle(.secondary)
+            ForEach(TokenSaverReleaseTool.allCases) { tool in
+                toolRow(tool)
+            }
+        }
+        .alert(pendingInstall == .rtk ? L("Upgrade RTK with Homebrew?", "通过 Homebrew 更新 RTK？") : L("Save rules and reapply enabled tools?", "保存规则并重新应用已启用工具？"), isPresented: Binding(
+            get: { pendingInstall != nil }, set: { if !$0 { pendingInstall = nil } }
+        )) {
+            if let tool = pendingInstall {
+                Button(tool == .rtk ? L("Run brew upgrade rtk", "运行 brew upgrade rtk") : L("Save & Reapply", "保存并重新应用")) {
+                    pendingInstall = nil
+                    Task {
+                        if tool == .rtk { await manager.updateRTK() }
+                        else { await manager.stage(tool) }
+                    }
+                }
+            }
+            Button(L("Cancel", "取消"), role: .cancel) { pendingInstall = nil }
+        } message: {
+            if pendingInstall == .rtk {
+                Text(L("Runs only brew upgrade rtk using trusted Homebrew. RTK must already be installed. Homebrew may update RTK and required dependencies outside AIUsage storage. No brew install or downloaded shell installer is run.", "仅通过可信 Homebrew 运行 brew upgrade rtk。RTK 必须已安装。Homebrew 可能在 AIUsage 存储之外更新 RTK 及必要依赖；不会运行 brew install 或下载的 Shell 安装器。"))
+            } else {
+            Text(L("Downloads upstream SKILL.md pinned to the checked commit into AIUsage managed storage. Git blob integrity is checked, not publisher authenticity. Enabled tools are reapplied to managed instruction files. Reload a new coding session; no scripts are executed.",
+                   "从已检查的提交下载 SKILL.md 到 AIUsage 托管存储，校验 Git 内容完整性（非发布者身份认证），并将启用的工具重新写入托管指令文件。需重新加载新的编程会话；不会执行脚本。"))
+            }
+        }
+    }
+
+    private func toolRow(_ tool: TokenSaverReleaseTool) -> some View {
+        let status = manager.statuses[tool] ?? .init()
+        return GatewayCard(padding: 14) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(tool.title).font(.subheadline.weight(.semibold))
+                    Spacer()
+                    Link(L("Upstream / manual install", "上游 / 手动安装"), destination: tool.upstreamURL).font(.caption)
+                }
+                HStack(alignment: .top, spacing: 16) {
+                    versionLabel(tool.skillPath != nil ? L("Downloaded/staged rules", "已下载/暂存规则") : L("Installed version", "已安装版本"),
+                                 status.staged?.version ?? (tool.skillPath != nil ? L("Not staged", "未暂存") : (status.installedBinaryVersion ?? (status.binaryInspected ? L("Not installed in Homebrew", "Homebrew 未安装") : L("Unknown · not inspected", "未知 · 未检测")))))
+                    versionLabel(L("Latest (GitHub)", "最新（GitHub）"), status.latest?.version ?? L("Not checked", "未检查"))
+                }
+                if let staged = status.staged {
+                    Text("\(L("Staged commit", "暂存提交")): \(staged.commit.prefix(12))").font(.caption2).foregroundStyle(.secondary)
+                }
+                if let notice = status.notice {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                }
+                if let error = status.error {
+                    Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier("token-saver-\(tool.rawValue)-error")
+                }
+                if tool.skillPath == nil {
+                    Text(L("Check reads brew list --versions rtk. Update requires confirmation and an existing Homebrew RTK installation. Other external installations are unknown; use the upstream link.",
+                           "检查读取 brew list --versions rtk。更新需确认且 Homebrew 已安装 RTK。其他外部安装版本未知，请使用上游链接。"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                HStack {
+                    if status.isBusy { ProgressView().controlSize(.small) }
+                    if let checked = status.checkedAt {
+                        Text(checked.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(L("Check", "检查")) { Task { await manager.check(tool) } }
+                        .disabled(status.isBusy).accessibilityIdentifier("token-saver-\(tool.rawValue)-check")
+                    Button(tool.skillPath == nil ? L("Update RTK", "更新 RTK") : (status.staged == nil ? L("Download rules", "下载规则") : L("Update staged rules", "更新暂存规则"))) { pendingInstall = tool }
+                        .disabled(status.isBusy || status.latest == nil || (tool == .rtk ? (!status.brewAvailable || status.installedBinaryVersion == nil) : (status.isCurrent && status.error == nil)))
+                        .accessibilityIdentifier("token-saver-\(tool.rawValue)-update")
+                }
+            }
+        }
+        .accessibilityIdentifier("token-saver-\(tool.rawValue)-release")
+    }
+
+    private func versionLabel(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption).foregroundStyle(.secondary)
+            Text(value).font(.callout.monospacedDigit()).textSelection(.enabled)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
 }

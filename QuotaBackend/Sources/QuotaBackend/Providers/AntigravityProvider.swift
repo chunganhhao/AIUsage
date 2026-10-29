@@ -69,7 +69,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
 
     /// Core fetch logic for a single auth context
     private func fetchForAuthContext(_ authContext: AuthContext) async throws -> ProviderUsage {
-        let originalData = authContext.rawData
+        var expectedData = authContext.rawData
         var authFile = authContext.authFile
         var accessToken = authFile.accessToken
 
@@ -78,7 +78,9 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
                 accessToken = refreshed.accessToken
                 authFile.accessToken = refreshed.accessToken
                 authFile.expired = iso8601String(refreshed.expiryDate)
-                persistRefreshedToken(at: authContext.url, originalData: originalData, refreshed: refreshed)
+                if let persisted = persistRefreshedToken(at: authContext.url, originalData: expectedData, refreshed: refreshed) {
+                    expectedData = persisted
+                }
             }
         }
 
@@ -93,7 +95,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             accessToken = refreshed.accessToken
             authFile.accessToken = refreshed.accessToken
             authFile.expired = iso8601String(refreshed.expiryDate)
-            persistRefreshedToken(at: authContext.url, originalData: originalData, refreshed: refreshed)
+            persistRefreshedToken(at: authContext.url, originalData: expectedData, refreshed: refreshed)
             subscription = await loadCodeAssist(accessToken: accessToken)
             let retryProjectId = subscription.projectId ?? authFile.projectId
             quota = try await fetchQuota(accessToken: accessToken, projectId: retryProjectId)
@@ -251,15 +253,21 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         )
     }
 
-    private func persistRefreshedToken(at url: URL, originalData: Data, refreshed: RefreshedToken) {
-        guard var json = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return }
-        json["access_token"] = refreshed.accessToken
-        json["expired"] = iso8601String(refreshed.expiryDate)
-        json["expires_in"] = refreshed.expiresIn
-        json["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
-
-        guard let updated = try? JSONSerialization.data(withJSONObject: json, options: [.sortedKeys]) else { return }
-        try? updated.write(to: url, options: .atomic)
+    @discardableResult
+    private func persistRefreshedToken(at url: URL, originalData: Data, refreshed: RefreshedToken) -> Data? {
+        guard let original = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return nil }
+        guard let updated = try? AntigravityCredentialFile.update(url, transform: { latest in
+            guard latest["access_token"] as? String == original["access_token"] as? String,
+                  latest["refresh_token"] as? String == original["refresh_token"] as? String else { return nil }
+            var json = latest
+            json["access_token"] = refreshed.accessToken
+            json["expired"] = iso8601String(refreshed.expiryDate)
+            json["expires_in"] = refreshed.expiresIn
+            json["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
+            return json
+        }) else { return nil }
+        // Advance the expected snapshot only after our own successful write.
+        return try? JSONSerialization.data(withJSONObject: updated)
     }
 
     private func formURLEncodedBody(_ params: [String: String]) -> Data? {
@@ -540,6 +548,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         models: [ModelQuota],
         email: String?
     ) -> CircuitBreakerResult? {
+        guard AntigravityPoolProtectionSettings.isEnabled(homeDirectory: homeDirectory) else { return nil }
         let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
             providerPrefix: "antigravity", email: email, currentFileURL: fileURL,
             homeDirectory: homeDirectory

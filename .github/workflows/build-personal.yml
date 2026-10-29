@@ -9,7 +9,7 @@ on:
       - personal-build
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
@@ -29,9 +29,20 @@ jobs:
             -resolvePackageDependencies \
             -derivedDataPath build/DerivedData
 
-      - name: Test pool circuit breaker
+      - name: Build Debug app (Token Saver integration)
         run: |
-          swift test --package-path QuotaBackend --filter 'AntigravityProviderTests|AntigravityPoolCircuitBreakerTests'
+          xcodebuild -project AIUsage.xcodeproj -scheme AIUsage \
+            -configuration Debug -destination "platform=macOS" \
+            -derivedDataPath build/DebugDerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO build
+
+      - name: Run full QuotaBackend unit suite
+        run: swift test --package-path QuotaBackend
+
+      - name: Test Safe Trio and pool protection regressions
+        run: |
+          bash scripts/run_token_saver_settings_regression.sh
+          bash scripts/run_token_saver_release_regression.sh
           bash scripts/run_pool_circuit_breaker_regression.sh
 
       - name: Build & Package Release Artifacts

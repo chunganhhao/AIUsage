@@ -1,4 +1,7 @@
 import SwiftUI
+import QuotaBackend
+import Combine
+import Foundation
 
 // MARK: - CPA Runtime 设置
 // 主界面：常规 / 选号策略 / 网络。
@@ -9,8 +12,12 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     @ObservedObject var runtime: CLIProxyRuntimeController
     @Binding var draftSettings: CLIProxyGatewaySettings
     let onApply: () -> Void
+    var tokenSaverHome: URL = FileManager.default.homeDirectoryForCurrentUser
 
     @State private var showAdvanced = false
+    @State private var poolProtectionEnabled = false
+    @State private var poolProtectionError: String?
+    @State private var poolProtectionResidual = false
 
     private var hasUnappliedChanges: Bool {
         draftSettings.normalized != runtime.settings.normalized
@@ -25,6 +32,8 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     header
+                    poolProtectionSection
+                    TokenSaverRuntimeSection(home: tokenSaverHome)
 
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -153,6 +162,62 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
         }
     }
 
+    private var poolProtectionSection: some View {
+        GatewayCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
+                        .font(.subheadline.weight(.medium))
+                    Spacer(minLength: 12)
+                    Toggle("", isOn: Binding(
+                        get: { poolProtectionEnabled },
+                        set: { enabled in
+                            do {
+                                try AntigravityPoolProtectionSettings.setEnabled(enabled, homeDirectory: tokenSaverHome.path)
+                                poolProtectionEnabled = enabled
+                                poolProtectionError = nil
+                            } catch {
+                                poolProtectionError = L("Could not update protection. Check the CPA version, model exclusions and file permissions.", "无法更新保护设置，请检查 CPA 版本、模型排除规则和文件权限。")
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(SwitchToggleStyle(tint: .purple))
+                    .controlSize(.small)
+                    .tint(.purple)
+                    .accessibilityLabel(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
+                    .accessibilityIdentifier("antigravity-pool-protection")
+                }
+                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
+                    .font(.caption).foregroundStyle(.secondary)
+                if !poolProtectionEnabled, poolProtectionResidual {
+                    Text(L("Off—previous protection exclusions remain", "已关闭，但之前的保护排除规则仍然存在"))
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier("pool-protection-residual")
+                    Button(L("Restore previous exclusions", "恢复之前的排除规则")) {
+                        do {
+                            try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: tokenSaverHome.path)
+                            reloadPoolProtectionState()
+                        } catch {
+                            poolProtectionError = error.localizedDescription
+                        }
+                    }
+                    .accessibilityIdentifier("pool-protection-restore")
+                }
+                if let poolProtectionError { Text(poolProtectionError).font(.caption).foregroundStyle(.red) }
+            }
+        }
+        .onAppear { reloadPoolProtectionState() }
+    }
+
+    private func reloadPoolProtectionState() {
+        poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
+        do {
+            poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)
+            poolProtectionError = nil
+        } catch { poolProtectionError = error.localizedDescription }
+    }
+
     private var header: some View {
         HStack(spacing: 8) {
             Text(L("Runtime", "运行"))
@@ -249,8 +314,9 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             Spacer(minLength: 12)
             Toggle("", isOn: isOn)
                 .labelsHidden()
-                .toggleStyle(.switch)
+                .toggleStyle(SwitchToggleStyle(tint: .purple))
                 .controlSize(.small)
+                .tint(.purple)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -319,5 +385,108 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 }
             }
         }
+    }
+}
+
+
+/// Separate observer prevents unrelated runtime form drafts from being replaced.
+struct TokenSaverRuntimeSection: View {
+    @StateObject private var saver: TokenSaverSettingsController
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        _saver = StateObject(wrappedValue: TokenSaverSettingsController(home: home))
+    }
+
+    var body: some View {
+        GatewayCard(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                Label("Token Saver & Context Optimization", systemImage: "bolt.fill")
+                    .font(.subheadline.weight(.semibold))
+                    .padding(14)
+                Divider()
+                row("Compress tool output (RTK)", detail: "Managed coding rules for Antigravity, Claude Code, Codex and OpenCode. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", key: \.rtkEnabled, id: "token-saver-rtk")
+                Divider()
+                row("Compress LLM output (Caveman)", detail: "Coding-only concise instructions. Keeps code exact; no request or response rewriting.", key: \.cavemanEnabled, id: "token-saver-caveman")
+                Picker("Caveman mode", selection: Binding(
+                    get: { saver.settings.cavemanMode },
+                    set: { mode in update { $0.cavemanMode = mode } }
+                )) {
+                    ForEach(TokenSaverSettings.CavemanMode.allCases, id: \.self) { mode in
+                        Text(mode.rawValue.capitalized).tag(mode)
+                    }
+                }
+                .pickerStyle(.segmented)
+                .frame(maxWidth: 240)
+                .padding(.horizontal, 14).padding(.bottom, 12)
+                .disabled(!saver.settings.cavemanEnabled)
+                .accessibilityIdentifier("token-saver-caveman-mode")
+                Divider()
+                row("Lazy senior dev (Ponytail)", detail: "Coding-only YAGNI, reuse, stdlib-first and minimal verified code.", key: \.ponytailEnabled, id: "token-saver-ponytail")
+                Divider()
+                HStack {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Apply to Coding Agents only").font(.subheadline.weight(.medium))
+                        Text("Always on. Agent rules apply only to coding work; RonC scripts, lyrics and Zalo/customer-care work are excluded. CPA traffic is never modified.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer(minLength: 12)
+                    Toggle("Apply to Coding Agents only", isOn: .constant(true))
+                        .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .indigo)).controlSize(.small).tint(.indigo).disabled(true)
+                        .accessibilityIdentifier("token-saver-coding-only")
+                }.padding(14)
+                Divider()
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Rules are saved immediately. Start a new coding session to reload agent instructions. RTK must be installed separately on the agent's PATH.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let error = saver.error {
+                        Text(error).font(.caption).foregroundStyle(.red)
+                            .accessibilityIdentifier("token-saver-error")
+                    }
+                }.padding(14)
+            }
+        }
+    }
+
+    private func row(_ title: String, detail: String, key: WritableKeyPath<TokenSaverSettings, Bool>, id: String) -> some View {
+        HStack(spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.subheadline.weight(.medium))
+                Text(detail).font(.caption).foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 12)
+            Toggle(title, isOn: Binding(
+                get: { saver.settings[keyPath: key] },
+                set: { enabled in update { $0[keyPath: key] = enabled } }
+            ))
+            .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .purple)).controlSize(.small).tint(.purple)
+            .accessibilityIdentifier(id)
+        }.padding(14)
+    }
+    private func update(_ change: (inout TokenSaverSettings) -> Void) {
+        var value = saver.settings
+        change(&value)
+        saver.apply(value)
+    }
+}
+
+
+/// Agent-side instructions only. No request middleware or CPA runtime changes.
+@MainActor
+final class TokenSaverSettingsController: ObservableObject {
+    @Published private(set) var settings = TokenSaverSettings()
+    @Published private(set) var error: String?
+    private let home: URL
+
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+        self.home = home
+        do { settings = try TokenSaverSettingsStore.load(home: home) }
+        catch { self.error = error.localizedDescription }
+    }
+    func apply(_ value: TokenSaverSettings) {
+        do {
+            try TokenSaverSettingsStore.save(value, home: home)
+            settings = value
+            error = nil
+        } catch { self.error = error.localizedDescription }
     }
 }
