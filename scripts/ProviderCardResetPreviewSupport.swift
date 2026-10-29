@@ -48,6 +48,7 @@ enum DefaultsKey { static let displayCurrency = "fixture-unused-currency" }
 }
 
 @MainActor final class ProviderActivationManager: ObservableObject {
+    static let shared = ProviderActivationManager()
     enum Result { case success(String), failure(String) }
     var activationResult: Result?
     static var remoteViewOnlyLabel: String { L("View only", "只读") }
@@ -55,6 +56,7 @@ enum DefaultsKey { static let displayCurrency = "fixture-unused-currency" }
     func canSwitch(to entry: ProviderAccountEntry) -> Bool { false }
     func isRemoteViewOnly(_ entry: ProviderAccountEntry) -> Bool { entry.id == "fixture-remote" }
     func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool { false }
+    func deactivateAccount(entry: ProviderAccountEntry) { preconditionFailure("Fixture activation disabled") }
     func activateAccount(entry: ProviderAccountEntry) throws { preconditionFailure("Fixture activation disabled") }
 }
 
@@ -126,3 +128,18 @@ final class AccountCredentialStore {
 }
 @MainActor var fixtureLanguage = "en"
 @MainActor func L(_ english: String, _ chinese: String) -> String { fixtureLanguage == "zh" ? chinese : english }
+
+// 账号列表使用正式视图，运行时和持久顺序替换为内存边界。
+@MainActor final class ProxyViewModel: ObservableObject {
+    static let shared = ProxyViewModel()
+    func activatedId(isCodex: Bool) -> String? { nil }
+}
+@MainActor final class GlobalProxyManager: ObservableObject {
+    static let shared = GlobalProxyManager()
+    let isEnabled = false
+}
+@MainActor final class CodexSubscriptionOrderStore: ObservableObject {
+    static let shared = CodexSubscriptionOrderStore()
+    func ordered(_ entries: [ProviderAccountEntry]) -> [ProviderAccountEntry] { entries }
+    func reorder(_ ids: [String]) { preconditionFailure("Fixture reorder disabled") }
+}

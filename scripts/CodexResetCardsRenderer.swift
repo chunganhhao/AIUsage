@@ -83,6 +83,25 @@ struct CodexResetCardsRenderer {
                 .environmentObject(appState).environmentObject(refresh).environmentObject(activation)
             _ = try await render(menu, scheme: scheme, width: 420,
                 to: output.appendingPathComponent("menu-bar-codex-\(language)-\(scheme == .dark ? "dark" : "light").png"))
+            let subscription = CodexSubscriptionSection(entries: providers.map { ProviderAccountEntry(id: $0.id, providerId: "codex", providerTitle: "Codex", providerSubtitle: nil, liveProvider: $0, storedAccount: nil) })
+                .padding(20).frame(width: 680).background(AppSurface.page(scheme))
+                .environmentObject(appState).environmentObject(refresh)
+            _ = try await render(subscription, scheme: scheme, width: 680,
+                to: output.appendingPathComponent("codex-account-list-\(language)-\(scheme == .dark ? "dark" : "light").png"))
+            let balanceTargets = [
+                APIKeyBalanceTarget(baseURL: "https://balance.fixture/v1", apiKey: "fixture")!,
+                APIKeyBalanceTarget(baseURL: "https://openrouter.ai/api/v1", apiKey: "fixture")!,
+                APIKeyBalanceTarget(baseURL: "https://unsupported.fixture/v1", apiKey: "fixture")!,
+                APIKeyBalanceTarget(baseURL: "https://denied.fixture/v1", apiKey: "fixture")!
+            ]
+            StubURLProtocol.respond("https://balance.fixture/api/usage/token/", body: #"{"code":true,"data":{"object":"token_usage","total_available":2500000,"unlimited_quota":false,"user_quota":{"total_available":7500000}}}"#)
+            StubURLProtocol.respond("https://balance.fixture/api/status", body: #"{"success":true,"data":{"quota_per_unit":500000,"quota_display_type":"USD"}}"#)
+            StubURLProtocol.respond("https://openrouter.ai/api/v1/key", body: #"{"data":{"limit":null,"limit_remaining":null}}"#)
+            StubURLProtocol.respond("https://denied.fixture/api/usage/token/", status: 403, body: "{}")
+            for target in balanceTargets { await NodeBalanceStore.shared.refresh(target, force: true) }
+            let balances = FixtureNodeBalances(targets: balanceTargets, scheme: scheme)
+            _ = try await render(balances, scheme: scheme, width: 680,
+                to: output.appendingPathComponent("node-balance-states-\(language)-\(scheme == .dark ? "dark" : "light").png"))
             manifest.append(["language": language, "mainPoints": [mainSize.width, mainSize.height], "statesPoints": [stateSize.width, stateSize.height]])
         }
         precondition(!StubURLProtocol.requests.contains { $0.method != "GET" }, "Renderer permits GET fixtures only; zero POST")
@@ -236,5 +255,28 @@ private struct FixtureMenuBar: View {
         .padding(14)
         .frame(width: 420)
         .background(AppSurface.page(scheme))
+    }
+}
+
+private struct FixtureNodeBalances: View {
+    let targets: [APIKeyBalanceTarget]
+    let scheme: ColorScheme
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            Text(L("Node balance · Shared component", "节点额度 · 共用组件")).font(.headline)
+            ForEach(Array(targets.enumerated()), id: \.offset) { index, target in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text([L("Supported gateway", "支持查询的网关"), L("Uncapped key", "Key 未设限"),
+                          L("Unsupported provider", "不支持查询的提供商"), L("Permission denied", "无查询权限")][index])
+                        .font(.system(size: 13, weight: .semibold))
+                    Text(target.rootURL.host ?? "").font(.caption).foregroundStyle(.secondary)
+                    NodeBalanceLine(target: target)
+                }
+            }
+            Text(L("Unsupported and failed queries leave no balance row. Refresh and status are in the context menu.",
+                   "不支持或查询失败时不保留余额行；刷新与状态位于右键菜单。"))
+                .font(.caption).foregroundStyle(.secondary)
+        }
+        .padding(24).frame(width: 680).background(AppSurface.page(scheme))
     }
 }

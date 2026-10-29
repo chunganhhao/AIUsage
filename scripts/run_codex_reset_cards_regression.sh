@@ -65,6 +65,10 @@ abort 'Missing coordinator shared binding' unless coordinator.sub!('static let s
 File.write(File.join(output, 'PreviewResetCoordinator.swift'), coordinator)
 card = File.read(File.join(root, 'AIUsage/Views/ProviderCard.swift')).split(/^#Preview \{/).first
 File.write(File.join(output, 'PreviewProviderCard.swift'), card)
+subscription = File.read(File.join(root, 'AIUsage/Views/CodexProxyManagementView.swift')).split('// MARK: - Subscription Accounts Section', 2).last.split('// MARK: - Codex Global Config Section', 2).first
+File.write(File.join(output, 'PreviewCodexSubscriptionSection.swift'), "import SwiftUI\nimport Combine\n" + subscription)
+toggle = File.read(File.join(root, 'AIUsage/Views/ProxyManagementView+Card.swift')).split('// MARK: - Proxy Activation Toggle Style', 2).last.split('// MARK: - Instant Tooltip Modifier', 2).first
+File.write(File.join(output, 'PreviewProxyToggle.swift'), "import SwiftUI\n" + toggle)
 utilities = File.read(File.join(root, 'AIUsage/Views/Utilities.swift')).split('// MARK: - Refreshable Time Views', 2).last
 File.write(File.join(output, 'PreviewUtilities.swift'), "import SwiftUI\nimport Combine\nimport QuotaBackend\n" + utilities)
 # 渲染时拦截所有 HTTP(S)，意外 POST 在发送前直接失败。
@@ -86,6 +90,9 @@ RUBY
     "$PROJECT_DIR/AIUsage/Views/MenuBarAccountRow.swift"
     "$PROJECT_DIR/AIUsage/Views/MenuBarRows.swift"
     "$PROJECT_DIR/AIUsage/Views/MenuBarSupport.swift"
+    "$PROJECT_DIR/AIUsage/Views/NodeBalanceView.swift"
+    "$REGRESSION_DIR/PreviewCodexSubscriptionSection.swift"
+    "$REGRESSION_DIR/PreviewProxyToggle.swift"
   )
 fi
 swiftc -parse-as-library -swift-version 5 \

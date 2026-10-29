@@ -382,6 +382,70 @@ private struct CodexResetActionButtonStyle: ButtonStyle {
     }
 }
 
+/// 账号列表与菜单栏共用的余额摘要；明细消费后会立即反映失效计数。
+struct CodexAccountBalanceSummary: View {
+    let provider: ProviderData
+    let target: CodexResetCreditsCoordinator.Target
+    var onViewCards: (() -> Void)? = nil
+    @ObservedObject private var coordinator = CodexResetCreditsCoordinator.shared
+
+    private var countText: String {
+        coordinator.availableCount(for: target, summaryCount: provider.codexResetCreditsAvailableCount,
+                                   summaryFetchedAt: provider.fetchedAt).map(String.init) ?? "—"
+    }
+    private var creditText: String {
+        guard let value = provider.codexCreditsDisplayValue else { return L("Unknown", "未知") }
+        for suffix in [" credits", " 积分"] where value.hasSuffix(suffix) {
+            return String(value.dropLast(suffix.count))
+        }
+        return value
+    }
+    var body: some View {
+        HStack(spacing: 10) {
+            if let onViewCards {
+                Button(action: onViewCards) {
+                    Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
+                }
+                .buttonStyle(.plain)
+                .help(L("View / use reset cards", "查看 / 使用重置卡"))
+            } else {
+                Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
+            }
+            Label(L("Credits ", "积分 ") + creditText, systemImage: "creditcard")
+                .lineLimit(1).truncationMode(.middle)
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(.secondary)
+        .monospacedDigit()
+    }
+}
+
+/// Codex 代理页订阅账号的紧凑入口，复用正式卡片明细与定向刷新。
+struct CodexSubscriptionBalanceControl: View {
+    let provider: ProviderData
+    let accountLabel: String
+    @EnvironmentObject private var refreshCoordinator: ProviderRefreshCoordinator
+    @ObservedObject private var settings = AppSettings.shared
+    @State private var showingDetails = false
+
+    private var target: CodexResetCreditsCoordinator.Target {
+        .init(identity: CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId),
+              credentialID: settings.backendMode == "local" ? refreshCoordinator.credentialID(for: provider) : nil,
+              label: [accountLabel, provider.workspaceLabel, provider.accountId].compactMap { $0?.nilIfBlank }.joined(separator: " · "),
+              isLocal: settings.backendMode == "local")
+    }
+    var body: some View {
+        CodexAccountBalanceSummary(provider: provider, target: target) { showingDetails = true }
+            .popover(isPresented: $showingDetails) {
+                CodexResetCreditsView(target: target, knownCount: provider.codexResetCreditsAvailableCount,
+                                      summaryFetchedAt: provider.fetchedAt, refreshUsage: {
+                    guard let id = refreshCoordinator.credentialID(for: provider) else { return false }
+                    return await refreshCoordinator.refreshCodexAccountAfterReset(credentialId: id, identity: target.identity)
+                }, coordinator: .shared)
+            }
+    }
+}
+
 /// 菜单栏复用同一账号状态和消费流程，常规展示不读取重置卡明细。
 struct CodexMenuBarAccountControl<Content: View>: View {
     let provider: ProviderData
@@ -397,27 +461,11 @@ struct CodexMenuBarAccountControl<Content: View>: View {
 
     private var state: CodexResetCreditsCoordinator.State { coordinator.state(for: target) }
     private var busy: Bool { state.isLoading || state.isConsuming || state.isRefreshing }
-    private var countText: String {
-        coordinator.availableCount(for: target, summaryCount: provider.codexResetCreditsAvailableCount,
-                                   summaryFetchedAt: provider.fetchedAt).map(String.init) ?? "—"
-    }
-
-    private var creditText: String {
-        guard let value = provider.codexCreditsDisplayValue else { return L("Unknown", "未知") }
-        for suffix in [" credits", " 积分"] where value.hasSuffix(suffix) {
-            return String(value.dropLast(suffix.count))
-        }
-        return value
-    }
-
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             content()
             HStack(spacing: 10) {
-                Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
-                Label(L("Credits ", "积分 ") + creditText, systemImage: "creditcard")
-                    .lineLimit(1)
-                    .truncationMode(.middle)
+                CodexAccountBalanceSummary(provider: provider, target: target)
                 if busy { ProgressView().controlSize(.mini) }
                 Spacer(minLength: 0)
             }

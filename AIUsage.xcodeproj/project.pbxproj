@@ -234,6 +234,7 @@
 		C0DECB000000000000000001 /* CodexResetRefreshFence.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000001 /* CodexResetRefreshFence.swift */; };
 		C0DECB000000000000000002 /* CodexResetCreditsCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000002 /* CodexResetCreditsCoordinator.swift */; };
 		C0DECB000000000000000003 /* CodexResetCreditsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C0DECA000000000000000003 /* CodexResetCreditsView.swift */; };
+		BABA33000000000000000001 /* NodeBalanceView.swift in Sources */ = {isa = PBXBuildFile; fileRef = BABA33000000000000000002 /* NodeBalanceView.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -466,6 +467,7 @@
 		C0DECA000000000000000001 /* CodexResetRefreshFence.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetRefreshFence.swift; sourceTree = "<group>"; };
 		C0DECA000000000000000002 /* CodexResetCreditsCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetCreditsCoordinator.swift; sourceTree = "<group>"; };
 		C0DECA000000000000000003 /* CodexResetCreditsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexResetCreditsView.swift; sourceTree = "<group>"; };
+		BABA33000000000000000002 /* NodeBalanceView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NodeBalanceView.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -698,6 +700,7 @@
 				B1C2D3E4F5A60002 /* StatusBarItemView.swift */,
 				5EFAD7492F87AC7100A15674 /* ProviderCard.swift */,
 				C0DECA000000000000000003 /* CodexResetCreditsView.swift */,
+				BABA33000000000000000002 /* NodeBalanceView.swift */,
 				5EF0C0D12F95000100A15674 /* ProviderCard+MultiWindowQuota.swift */,
 				5EF0C0D32F95000100A15674 /* ProviderCard+QuotaIndicator.swift */,
 				5EF0C0D52F95000100A15674 /* ProviderCard+ResetCountdown.swift */,
@@ -966,6 +969,7 @@
 				B1TLS0012F97003000A15674 /* TLSCertificateManager.swift in Sources */,
 				5EFAD7752F87AFE700A15674 /* ProviderCard.swift in Sources */,
 				C0DECB000000000000000003 /* CodexResetCreditsView.swift in Sources */,
+				BABA33000000000000000001 /* NodeBalanceView.swift in Sources */,
 				5EF0C0D22F95000100A15674 /* ProviderCard+MultiWindowQuota.swift in Sources */,
 				5EF0C0D42F95000100A15674 /* ProviderCard+QuotaIndicator.swift in Sources */,
 				5EF0C0D62F95000100A15674 /* ProviderCard+ResetCountdown.swift in Sources */,
@@ -1279,7 +1283,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.15.32;
+				MARKETING_VERSION = 0.15.33;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -1311,7 +1315,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.15.32;
+				MARKETING_VERSION = 0.15.33;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

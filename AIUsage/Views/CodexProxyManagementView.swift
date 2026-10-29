@@ -329,6 +329,9 @@ struct CodexSubscriptionSection: View {
                 }
                 noteRow(entry)
                 usageWindowPills(entry)
+                if let provider = entry.liveProvider {
+                    CodexSubscriptionBalanceControl(provider: provider, accountLabel: entry.accountPrimaryLabel)
+                }
             }
 
             Spacer(minLength: 8)

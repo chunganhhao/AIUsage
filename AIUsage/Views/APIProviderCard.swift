@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuotaBackend
 
 // MARK: - Inheritance Banner
 // 链接节点编辑器顶部横幅：提示该节点继承自某「API 提供商」主配置，并提供「重置为继承」
@@ -87,6 +88,7 @@ struct APIProviderCard: View {
                     .foregroundStyle(AppContent.secondary(colorScheme))
                     .lineLimit(1)
                     .truncationMode(.middle)
+                NodeBalanceLine(target: balanceTarget)
                 metaRow
                 distributionLine
             }
@@ -108,6 +110,10 @@ struct APIProviderCard: View {
         .contentShape(Rectangle())
         .onTapGesture(perform: onEdit)
         .contextMenu { contextMenu }
+    }
+
+    private var balanceTarget: APIKeyBalanceTarget? {
+        APIKeyBalanceTarget(baseURL: provider.baseURL, apiKey: provider.apiKey)
     }
 
     // MARK: - Title
@@ -320,6 +326,7 @@ struct APIProviderCard: View {
 
     @ViewBuilder
     private var contextMenu: some View {
+        NodeBalanceMenu(target: balanceTarget)
         Button(action: onEdit) {
             Label(L("Edit", "编辑"), systemImage: "pencil")
         }
