@@ -2,10 +2,12 @@ import Foundation
 import Combine
 import QuotaBackend
 
+var testUseChinese = false
+func L(_ en: String, _ zh: String) -> String { testUseChinese ? zh : en }
 private func check(_ value: Bool) { precondition(value) }
 
 @main struct ControllerRegression {
-    @MainActor static func main() throws {
+    @MainActor static func main() async throws {
         let fm = FileManager.default
         let home = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? fm.removeItem(at: home) }
@@ -69,6 +71,66 @@ private func check(_ value: Bool) { precondition(value) }
         check(corrupt.error != nil && corrupt.notice == nil)
         check(!fm.fileExists(atPath: target.path))
         print("PASS corrupt settings fail closed without export")
-        print("Token Saver native controller: 7 checks passed")
+        let setupHome = home.appendingPathComponent("setup with 'quote")
+        let rtk = TokenSaverReleaseRTK(brewURL: URL(fileURLWithPath: "/opt/homebrew/bin/brew")) { _, args in
+            precondition(args == ["list", "--versions", "rtk"], "Onboarding must not install, upgrade or contact GitHub")
+            return .init(status: 0, text: "rtk 1.1.0")
+        }
+        let setup = TokenSaverSettingsController(home: setupHome, rtk: rtk)
+        setup.apply(value)
+        await setup.checkOnboarding()
+        check(!setup.isCheckingSetup && setup.setupError == nil)
+        check(setup.installationStatus.contains("Homebrew 1.1.0") && setup.installationStatus.contains("PATH is not verified"))
+        check(setup.onboarding?.rules == .current && setup.onboarding?.wrapperReady == true)
+        check(setup.historyStatus.contains("unavailable / not verified"))
+        check(setup.onboarding?.agentCommands?.contains("'\"'\"'quote/") == true)
+        check(setup.onboarding?.agentCommands?.contains("without reading") == true)
+        check(setup.onboarding?.agentCommands?.contains("not proof of automatic prompt loading") == true)
+        check(setup.onboarding?.agentCommands?.contains("rg -n") == false)
+        // Verify Chinese localization of diagnostic rows, notices and errors (F3)
+        testUseChinese = true
+        check(setup.localizedRTKStatus.contains("2. RTK：Homebrew 1.1.0；代理 PATH 未验证"))
+        check(setup.localizedRulesStatus == "3. 托管规则：当前匹配")
+        check(setup.localizedHistoryStatus == "4. 默认 RTK 历史记录：不可用 / 未验证")
+        testUseChinese = false
+        // Verify Caveman-only and Ponytail-only configurations enable diagnostic copy without RTK/wrapper (F1)
+        var cavemanOnly = TokenSaverSettings(); cavemanOnly.cavemanEnabled = true
+        setup.apply(cavemanOnly)
+        await setup.checkOnboarding()
+        check(setup.onboarding?.rules == .current && setup.onboarding?.wrapperReady == false)
+        check(setup.onboarding?.agentCommands != nil && setup.onboarding?.agentCommands?.contains("--version") == false)
+        var ponytailOnly = TokenSaverSettings(); ponytailOnly.ponytailEnabled = true
+        setup.apply(ponytailOnly)
+        await setup.checkOnboarding()
+        check(setup.onboarding?.rules == .current && setup.onboarding?.wrapperReady == false)
+        check(setup.onboarding?.agentCommands != nil && setup.onboarding?.agentCommands?.contains("--version") == false)
+        setup.selectHarness(.other)
+        check(setup.onboarding == nil)
+        await setup.checkOnboarding()
+        check(setup.onboarding?.rules == .unsupported && setup.onboarding?.agentCommands == nil)
+        setup.selectHarness(.codex)
+        setup.apply(.init())
+        check(setup.onboarding == nil)
+        await setup.checkOnboarding()
+        check(setup.onboarding?.rules == .off && setup.onboarding?.agentCommands == nil)
+        let missing = TokenSaverSettingsController(home: setupHome, rtk: .init(brewURL: URL(fileURLWithPath: "/opt/homebrew/bin/brew")) { _, _ in
+            .init(status: 1, text: "")
+        })
+        await missing.checkOnboarding()
+        check(missing.installationStatus.contains("not installed in Homebrew"))
+        testUseChinese = true
+        check(missing.localizedRTKStatus.contains("Homebrew 未安装"))
+        check(missing.localizedRulesStatus == "3. 托管规则：已关闭")
+        testUseChinese = false
+        let unavailable = TokenSaverSettingsController(home: setupHome, rtk: .init(brewURL: nil))
+        await unavailable.checkOnboarding()
+        check(unavailable.setupError != nil && unavailable.installationStatus == "not verified")
+        testUseChinese = true
+        check(unavailable.localizedRTKStatus == "2. RTK：未验证")
+        check(unavailable.localizedSetupError?.contains("未找到可信 Homebrew") == true)
+        testUseChinese = false
+        check(unavailable.onboarding?.rules == .off && !unavailable.isCheckingSetup)
+        print("PASS onboarding is read-only, scoped, invalidated and honest across installed/missing/unavailable/unsupported states")
+        print("Token Saver native controller: 8 checks passed")
     }
 }

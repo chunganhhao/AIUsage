@@ -4,7 +4,9 @@ import Combine
 import QuotaBackend
 import CryptoKit
 
-func L(_ en: String, _ zh: String) -> String { en }
+func L(_ en: String, _ zh: String) -> String {
+    ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "zh" ? zh : en
+}
 struct CLIProxyGatewaySettings: Equatable {
     var autoStart = false, allowLANAccess = false, accountModelProbeEnabled = false, enablePlugins = false
     var port = 14420, accountModelProbeIntervalSeconds = 60, maxRetryCredentials = 0, requestRetry = 3, maxRetryInterval = 30
@@ -33,6 +35,14 @@ struct GatewayQuietBadge: View {
 private func fixtureHome() -> URL {
     URL(fileURLWithPath: ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_HOME"] ?? Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("home").path)
 }
+private func fixtureRTK() -> TokenSaverReleaseRTK {
+    TokenSaverReleaseRTK(brewURL: URL(fileURLWithPath:"/opt/homebrew/bin/brew")) { _, args in
+        if args == ["list", "--versions", "rtk"], ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_RTK_MISSING"] == "1" {
+            return .init(status: 1, text: "")
+        }
+        return .init(status:0,text:args == ["list","--versions","rtk"] ? "rtk 1.0.0" : "fixture upgrade only")
+    }
+}
 @MainActor private func fixtureReleaseManager() -> TokenSaverReleaseManager {
     let home = fixtureHome()
     let client = TokenSaverReleaseClient { request, _ in
@@ -52,12 +62,7 @@ private func fixtureHome() -> URL {
         else { body = ["tag_name":"v1.2.3", "draft":false, "prerelease":false] }
         return (try JSONSerialization.data(withJSONObject:body), HTTPURLResponse(url:request.url!,statusCode:200,httpVersion:nil,headerFields:nil)!)
     }
-    let rtk = TokenSaverReleaseRTK(brewURL: URL(fileURLWithPath:"/opt/homebrew/bin/brew")) { _, args in
-        if args == ["list", "--versions", "rtk"], ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_RTK_MISSING"] == "1" {
-            return .init(status: 1, text: "")
-        }
-        return .init(status:0,text:args == ["list","--versions","rtk"] ? "rtk 1.0.0" : "fixture upgrade only")
-    }
+    let rtk = fixtureRTK()
     return TokenSaverReleaseManager(client:client,
         store:TokenSaverReleaseStore(root:home.appendingPathComponent("Library/Application Support/AIUsage/Rules")),
         rtk:rtk, reapplyRules:{ try TokenSaverSettingsStore.save(TokenSaverSettingsStore.load(home:home),home:home) })
@@ -70,7 +75,7 @@ private func fixtureHome() -> URL {
     var body: some Scene {
         WindowGroup("AIUsage Token Saver — isolated fixture") {
             TabView(selection: $tab) {
-                SubscriptionGatewaySettingsRuntimePane(runtime:runtime,draftSettings:$draft,onApply:{},tokenSaverHome:fixtureHome())
+                SubscriptionGatewaySettingsRuntimePane(runtime:runtime,draftSettings:$draft,onApply:{},tokenSaverHome:fixtureHome(),tokenSaverRTK:fixtureRTK())
                     .tabItem { Text("Runtime") }.tag(0)
                 ScrollView {
                     if tab == 1 {

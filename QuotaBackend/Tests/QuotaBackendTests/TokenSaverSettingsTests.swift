@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 @testable import QuotaBackend
 
 final class TokenSaverSettingsTests: XCTestCase {
@@ -206,6 +207,156 @@ final class TokenSaverSettingsTests: XCTestCase {
         try FileManager.default.removeItem(at: wrapper)
         XCTAssertThrowsError(try TokenSaverSettingsStore.exportHermesTestProfile(home: home))
         XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("workspace/HERMES.md").path))
+    }
+    func testHermesSearchReadMappingsMigrateOnlyOwnedTestProfile() throws {
+        let home = try temporaryHome()
+        let profile = home.appendingPathComponent(".hermes/profiles/token-saver-test")
+        try TokenSaverSettingsStore.replace(profile.appendingPathComponent("config.yaml"), data: Data("fixture".utf8))
+        var value = TokenSaverSettings(); value.rtkEnabled = true; value.cavemanEnabled = true; value.ponytailEnabled = true
+        try TokenSaverSettingsStore.save(value, home: home)
+        let base = try TokenSaverAgentRules.block(value, home: home)
+        let target = profile.appendingPathComponent("workspace/HERMES.md")
+        let owned = profile.appendingPathComponent(".aiusage-token-saver-owned.txt")
+        // Migrate an exact legacy export, without changing generic/global rules.
+        try TokenSaverSettingsStore.replace(target, data: Data((base + "\n").utf8))
+        try TokenSaverSettingsStore.replace(owned, data: Data((base + "\n").utf8))
+        try TokenSaverSettingsStore.exportHermesTestProfile(home: home)
+        let text = try String(contentsOf: target, encoding: .utf8)
+        XCTAssertTrue(text.contains("rg -n -- 'pattern' path"))
+        XCTAssertTrue(text.contains("read --level minimal --max-lines 80 path"))
+        XCTAssertTrue(text.contains("skip before editing"))
+        XCTAssertTrue(text.contains("Exact bytes, editing context or sed line ranges: keep raw cat/sed"))
+        XCTAssertTrue(text.contains("Never replace cat redirects/heredocs/file writes"))
+        XCTAssertTrue(text.contains("terminal(command=...)"))
+        XCTAssertTrue(text.contains("including Zalo Dashboard code"))
+        XCTAssertTrue(text.utf8.count < 3400)
+        XCTAssertEqual(text.components(separatedBy: TokenSaverAgentRules.begin).count, 2)
+        XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: owned))
+        for path in TokenSaverAgentRules.rulePaths(home: home) {
+            let generic = try String(contentsOf: path, encoding: .utf8)
+            XCTAssertFalse(generic.contains("Hermes terminal mappings"))
+            XCTAssertTrue(generic.contains("prefer rg -n -- 'pattern' path over grep/rg when semantics match"))
+        }
+        try TokenSaverSettingsStore.exportHermesTestProfile(home: home)
+        XCTAssertEqual(try String(contentsOf: target, encoding: .utf8), text)
+    }
+    func testHermesMappingsRequireRTKAndQuoteHomePaths() throws {
+        let home = try temporaryHome().appendingPathComponent("space and 'quote")
+        var value = TokenSaverSettings(); value.cavemanEnabled = true
+        XCTAssertEqual(try TokenSaverAgentRules.hermesBlock(value, home: home), try TokenSaverAgentRules.block(value, home: home))
+        value.rtkEnabled = true
+        let text = try TokenSaverAgentRules.hermesBlock(value, home: home)
+        XCTAssertTrue(text.contains("'\"'\"'quote/Library/Application Support/AIUsage/bin/token-saver-rtk' read"))
+        XCTAssertTrue(text.contains("--version once per session"))
+        XCTAssertTrue(text.contains("does not prove RTK ran or saved tokens"))
+        XCTAssertEqual(try TokenSaverAgentRules.hermesBlock(.init(), home: home), "")
+    }
+    func testOnboardingDistinguishesSavedMissingStaleOffAndUnsupported() throws {
+        let home = try temporaryHome()
+        var settings = TokenSaverSettings(); settings.rtkEnabled = true
+        let offSnapshot = TokenSaverOnboarding.inspect(home: home, harness: .codex)
+        XCTAssertEqual(offSnapshot.rules, .off)
+        XCTAssertEqual(offSnapshot.agentCommands, nil)
+        try TokenSaverSettingsStore.save(settings, home: home)
+        for harness in [TokenSaverOnboarding.Harness.codex, .claude, .antigravity, .openCode] {
+            let snapshot = TokenSaverOnboarding.inspect(home: home, harness: harness)
+            XCTAssertEqual(snapshot.rules, .current)
+            XCTAssertTrue(snapshot.wrapperReady)
+            XCTAssertEqual(snapshot.historyRecords, nil)
+            XCTAssertTrue(snapshot.agentCommands?.contains("without reading") == true)
+            XCTAssertTrue(snapshot.agentCommands?.contains("not proof of automatic prompt loading") == true)
+            XCTAssertTrue(snapshot.agentCommands?.contains("--version") == true)
+            XCTAssertFalse(snapshot.agentCommands?.contains("rg -n") == true)
+            XCTAssertFalse(snapshot.agentCommands?.contains("AIUsage Token Saver") == true)
+        }
+        // Caveman-only and Ponytail-only configurations must allow the rule-awareness diagnostic without requiring RTK/wrapper.
+        var cavemanOnly = TokenSaverSettings(); cavemanOnly.cavemanEnabled = true
+        var ponytailOnly = TokenSaverSettings(); ponytailOnly.ponytailEnabled = true
+        for nonRTK in [cavemanOnly, ponytailOnly] {
+            try TokenSaverSettingsStore.save(nonRTK, home: home)
+            let nonRTKSnapshot = TokenSaverOnboarding.inspect(home: home, harness: .codex)
+            XCTAssertEqual(nonRTKSnapshot.rules, .current)
+            XCTAssertFalse(nonRTKSnapshot.wrapperReady)
+            XCTAssertTrue(nonRTKSnapshot.agentCommands?.contains("without reading") == true)
+            XCTAssertFalse(nonRTKSnapshot.agentCommands?.contains("--version") == true)
+            XCTAssertFalse(nonRTKSnapshot.agentCommands?.contains("token-saver-rtk") == true)
+        }
+        try TokenSaverSettingsStore.save(settings, home: home)
+        let hermesMissing = TokenSaverOnboarding.inspect(home: home, harness: .hermes)
+        XCTAssertEqual(hermesMissing.rules, .missing)
+        XCTAssertEqual(hermesMissing.agentCommands, nil)
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .other).rules, .unsupported)
+        let codex = TokenSaverOnboarding.Harness.codex.rulesURL(home: home)!
+        let edited = Data("unrelated instructions".utf8)
+        try TokenSaverSettingsStore.replace(codex, data: edited)
+        let stale = TokenSaverOnboarding.inspect(home: home, harness: .codex)
+        XCTAssertEqual(stale.rules, .stale)
+        XCTAssertEqual(stale.agentCommands, nil)
+        XCTAssertEqual(try Data(contentsOf: codex), edited)
+        try TokenSaverSettingsStore.replace(TokenSaverSettingsStore.settingsURL(home: home), data: Data("bad json".utf8))
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).rules, .unreadable)
+    }
+    func testOnboardingHistoryIsReadOnlyAggregateAndUnknownStaysUnknown() throws {
+        let home = try temporaryHome()
+        let url = home.appendingPathComponent("Library/Application Support/rtk/history.db")
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).historyRecords, nil)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path))
+        try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TABLE commands(id INTEGER);", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).historyRecords, 0)
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "INSERT INTO commands VALUES(1),(2);", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let before = try Data(contentsOf: url)
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .hermes).historyRecords, 2)
+        XCTAssertEqual(try Data(contentsOf: url), before)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.createSymbolicLink(at: url, withDestinationURL: home.appendingPathComponent("elsewhere.db"))
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).historyRecords, nil)
+    }
+    func testOnboardingWALAndSHMSidecarsAreNeverCreatedOrModified() throws {
+        let home = try temporaryHome().appendingPathComponent("space # and ? 'quote")
+        let url = home.appendingPathComponent("Library/Application Support/rtk/history.db")
+        let directory = url.deletingLastPathComponent()
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "PRAGMA journal_mode=WAL; CREATE TABLE commands(id INTEGER); INSERT INTO commands VALUES(1),(2);", nil, nil, nil), SQLITE_OK)
+        var persist: Int32 = 1
+        XCTAssertEqual(sqlite3_file_control(db, nil, SQLITE_FCNTL_PERSIST_WAL, &persist), SQLITE_OK)
+        sqlite3_close(db)
+        let wal = URL(fileURLWithPath: url.path + "-wal"), shm = URL(fileURLWithPath: url.path + "-shm")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: wal.path))
+        if FileManager.default.fileExists(atPath: shm.path) { try FileManager.default.removeItem(at: shm) }
+        let beforeDB = try Data(contentsOf: url), beforeWAL = try Data(contentsOf: wal)
+        let beforeEntries = try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted()
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).historyRecords, nil)
+        XCTAssertEqual(try FileManager.default.contentsOfDirectory(atPath: directory.path).sorted(), beforeEntries)
+        XCTAssertEqual(try Data(contentsOf: url), beforeDB)
+        XCTAssertEqual(try Data(contentsOf: wal), beforeWAL)
+        // A closed/checkpointed WAL-mode main DB, without sidecars, is copied privately.
+        try FileManager.default.removeItem(at: wal)
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .codex).historyRecords, 2)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: wal.path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: shm.path))
+        XCTAssertEqual(try Data(contentsOf: url), beforeDB)
+    }
+    func testOnboardingRejectsChangedWrapperAndMalformedHistory() throws {
+        let home = try temporaryHome()
+        var settings = TokenSaverSettings(); settings.rtkEnabled = true
+        try TokenSaverSettingsStore.save(settings, home: home)
+        let wrapper = home.appendingPathComponent("Library/Application Support/AIUsage/bin/token-saver-rtk")
+        try TokenSaverSettingsStore.replace(wrapper, data: Data("#!/bin/sh\nexit 0".utf8))
+        let db = home.appendingPathComponent("Library/Application Support/rtk/history.db")
+        try TokenSaverSettingsStore.replace(db, data: Data("not sqlite".utf8))
+        let snapshot = TokenSaverOnboarding.inspect(home: home, harness: .codex)
+        XCTAssertFalse(snapshot.wrapperReady)
+        XCTAssertEqual(snapshot.historyRecords, nil)
+        XCTAssertEqual(snapshot.rules, .current)
+        XCTAssertEqual(snapshot.agentCommands, nil)
     }
     func testHermesExportRejectsCorruptMatchingOwnershipLedger() throws {
         let home = try temporaryHome()

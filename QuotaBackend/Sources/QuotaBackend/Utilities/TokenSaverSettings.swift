@@ -101,7 +101,7 @@ public enum TokenSaverSettingsStore {
             guard try contents(wrapper) == Data(TokenSaverAgentRules.rtkWrapper.utf8),
                   FileManager.default.isExecutableFile(atPath: wrapper.path) else { throw Failure.missingRTKWrapper }
         }
-        let block = try TokenSaverAgentRules.block(settings, home: home)
+        let block = try TokenSaverAgentRules.hermesBlock(settings, home: home)
         let after = block.isEmpty ? nil : Data((block + "\n").utf8)
         var applied: [(URL, Data?, Data?)] = []
         do {
@@ -190,9 +190,9 @@ public enum TokenSaverAgentRules {
         if s.rtkEnabled {
             if let home {
                 let wrapper = settingsPathForWrapper(home)
-                sections.append("RTK: use \(wrapper) for supported coding commands (git status/diff/log, ls, rg, pytest). Antigravity: run_command (zsh). Quote the wrapper path. Do not wrap unsupported commands; run them directly. If RTK is absent, run the original once. Preserve exit status/diagnostics; no aliases, PATH changes, interception or automatic replay.")
+                sections.append("RTK: use \(wrapper) for supported coding commands (git status/diff/log, ls, rg, pytest; prefer rg -n -- 'pattern' path over grep/rg when semantics match). Antigravity: run_command (zsh). Quote the wrapper path. Do not wrap unsupported commands; run them directly. If RTK is absent, run the original once. Preserve exit status/diagnostics; no aliases, PATH changes, interception or automatic replay.")
             } else {
-                sections.append("RTK: use rtk git status/diff/log, rtk ls, rtk rg or rtk pytest when installed and supported; otherwise run the original once. Antigravity: run_command (zsh). Keep exit status/diagnostics; no aliases, PATH changes or automatic replay.")
+                sections.append("RTK: use rtk git status/diff/log, rtk ls, rtk rg (prefer over grep when semantics match) or rtk pytest when installed and supported; otherwise run the original once. Antigravity: run_command (zsh). Keep exit status/diagnostics; no aliases, PATH changes or automatic replay.")
             }
         }
         for tool in [TokenSaverReleaseTool.caveman, .ponytail] {
@@ -220,7 +220,16 @@ public enum TokenSaverAgentRules {
         sections.append(end)
         return sections.joined(separator: "\n")
     }
-    private static func settingsPathForWrapper(_ home: URL) -> String {
+    static func hermesBlock(_ settings: TokenSaverSettings, home: URL) throws -> String {
+        let base = try block(settings, home: home)
+        guard settings.rtkEnabled else { return base }
+        let wrapper = settingsPathForWrapper(home)
+        let mappings = """
+        Hermes terminal mappings (coding, including Zalo Dashboard code): check wrapper --version once per session. Search: prefer \(wrapper) rg -n -- 'pattern' path over grep/rg with matching semantics. Read-only preview (skip before editing): \(wrapper) read --level minimal --max-lines 80 path. Exact bytes, editing context or sed line ranges: keep raw cat/sed; previews omit source. Never replace cat redirects/heredocs/file writes. Use terminal(command=...) with quoted wrapper paths. Keep bash/node/test scripts direct; no automatic retries. Rules loaded does not prove RTK ran or saved tokens.
+        """
+        return base.replacingOccurrences(of: end, with: mappings + "\n" + end)
+    }
+    static func settingsPathForWrapper(_ home: URL) -> String {
         // Shell single-quote escaping protects user home paths with spaces or quotes.
         let path = home.appendingPathComponent("Library/Application Support/AIUsage/bin/token-saver-rtk").path
         return "'" + path.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"

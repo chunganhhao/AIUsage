@@ -13,6 +13,7 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     @Binding var draftSettings: CLIProxyGatewaySettings
     let onApply: () -> Void
     var tokenSaverHome: URL = FileManager.default.homeDirectoryForCurrentUser
+    var tokenSaverRTK: TokenSaverReleaseRTK = .init()
 
     @State private var showAdvanced = false
     @State private var poolProtectionEnabled = false
@@ -33,7 +34,7 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 VStack(alignment: .leading, spacing: 14) {
                     header
                     poolProtectionSection
-                    TokenSaverRuntimeSection(home: tokenSaverHome)
+                    TokenSaverRuntimeSection(home: tokenSaverHome, rtk: tokenSaverRTK)
 
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -392,21 +393,21 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
 /// Separate observer prevents unrelated runtime form drafts from being replaced.
 struct TokenSaverRuntimeSection: View {
     @StateObject private var saver: TokenSaverSettingsController
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
-        _saver = StateObject(wrappedValue: TokenSaverSettingsController(home: home))
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser, rtk: TokenSaverReleaseRTK = .init()) {
+        _saver = StateObject(wrappedValue: TokenSaverSettingsController(home: home, rtk: rtk))
     }
 
     var body: some View {
         GatewayCard(padding: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Label("Token Saver & Context Optimization", systemImage: "bolt.fill")
+                Label(L("Token Saver & Context Optimization", "Token Saver 与上下文优化"), systemImage: "bolt.fill")
                     .font(.subheadline.weight(.semibold))
                     .padding(14)
                 Divider()
-                row("Compress tool output (RTK)", detail: "Managed coding rules for Antigravity, Claude Code, Codex and OpenCode. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", key: \.rtkEnabled, id: "token-saver-rtk")
+                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex and OpenCode. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex 和 OpenCode 的托管编程规则。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
                 Divider()
-                row("Compress LLM output (Caveman)", detail: "Coding-only concise instructions. Keeps code exact; no request or response rewriting.", key: \.cavemanEnabled, id: "token-saver-caveman")
-                Picker("Caveman mode", selection: Binding(
+                row(L("Compress LLM output (Caveman)", "压缩模型输出 (Caveman)"), detail: L("Built-in coding-only concise instructions (works immediately without downloading references). Keeps code exact; no request or response rewriting.", "内置仅限编程的精简输出指令（无需下载参考文档即可直接生效）。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
+                Picker(L("Caveman mode", "Caveman 模式"), selection: Binding(
                     get: { saver.settings.cavemanMode },
                     set: { mode in update { $0.cavemanMode = mode } }
                 )) {
@@ -417,44 +418,159 @@ struct TokenSaverRuntimeSection: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 240)
                 .padding(.horizontal, 14).padding(.bottom, 12)
-                .disabled(!saver.settings.cavemanEnabled)
+                .disabled(!saver.settings.cavemanEnabled || saver.isCheckingSetup)
                 .accessibilityIdentifier("token-saver-caveman-mode")
                 Divider()
-                row("Lazy senior dev (Ponytail)", detail: "Coding-only YAGNI, reuse, stdlib-first and minimal verified code.", key: \.ponytailEnabled, id: "token-saver-ponytail")
+                row(L("Lazy senior dev (Ponytail)", "极简资深开发 (Ponytail)"), detail: L("Built-in coding-only YAGNI, reuse, stdlib-first and minimal verified code (works immediately without downloading references).", "内置仅限编程的 YAGNI、优先复用、标准库优先及最少验证代码规则（无需下载参考文档即可直接生效）。"), key: \.ponytailEnabled, id: "token-saver-ponytail")
                 Divider()
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
-                        Text("Apply to Coding Agents only").font(.subheadline.weight(.medium))
-                        Text("Always on. Agent rules apply only to coding work; RonC scripts, lyrics and Zalo/customer-care work are excluded. CPA traffic is never modified.")
+                        Text(L("Apply to Coding Agents only", "仅应用于编程代理")).font(.subheadline.weight(.medium))
+                        Text(L("Always on. Agent rules apply only to coding work; RonC scripts, lyrics and Zalo/customer-care work are excluded. CPA traffic is never modified.", "始终开启。代理规则仅适用于编程工作；排除 RonC 脚本、歌词及 Zalo/客服内容，绝不修改 CPA 流量。"))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 12)
-                    Toggle("Apply to Coding Agents only", isOn: .constant(true))
+                    Toggle(L("Apply to Coding Agents only", "仅应用于编程代理"), isOn: .constant(true))
                         .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .indigo)).controlSize(.small).tint(.indigo).disabled(true)
                         .accessibilityIdentifier("token-saver-coding-only")
                 }.padding(14)
                 Divider()
+                onboardingChecklist.padding(14)
+                Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Compact policies are saved for Antigravity, Claude Code, Codex and OpenCode. Full downloaded skills stay separate as references. Instructions do not guarantee model compliance or token savings.")
+                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex and OpenCode when switches above change. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex 和 OpenCode 保存精简策略。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Reapply compact rules") { saver.apply(saver.settings) }
+                    Button(L("Reapply compact rules", "重新应用精简规则")) { saver.apply(saver.settings) }
+                        .disabled(saver.isCheckingSetup)
                         .accessibilityIdentifier("token-saver-reapply")
-                    Text("Hermes test integration is explicit: create token-saver-test first, then sync its workspace rules below. Sync again after changing settings; all three off removes only owned test rules. Bot/default profiles and connections are never changed.")
+                    Text(L("Hermes CLI test integration is manual and isolated: create ~/.hermes/profiles/token-saver-test first, then sync its workspace rules below. Sync again after changing settings; all three off removes only owned test rules. Your default and bot Hermes profiles are never changed.", "Hermes CLI 测试集成需手动配置且完全隔离：请先创建 ~/.hermes/profiles/token-saver-test，再使用下方按钮同步其工作区规则。更改设置后需重新同步；关闭全部三项仅移除托管测试规则，绝不修改默认或机器人 Hermes 配置。"))
                         .font(.caption).foregroundStyle(.secondary)
-                    Button("Sync Hermes test profile") { saver.syncHermesTestProfile() }
+                    Button(L("Sync Hermes test profile", "同步 Hermes 测试配置")) { saver.syncHermesTestProfile() }
+                        .disabled(saver.isCheckingSetup)
                         .accessibilityIdentifier("token-saver-hermes-sync")
-                    Text("Start a new coding session to reload instructions. RTK must be installed separately on the agent's PATH.")
+                    Text(L("Start a new coding session after enabling or syncing so your agent reloads instructions. RTK must be installed on the agent's PATH.", "启用或同步后请开启新的编程会话以重新加载指令。RTK 必须安装在代理的 PATH 中。"))
                         .font(.caption).foregroundStyle(.secondary)
                     if let notice = saver.notice {
                         Text(notice).font(.caption).foregroundStyle(.secondary)
                             .accessibilityIdentifier("token-saver-notice")
                     }
-                    if let error = saver.error {
+                    if let error = saver.localizedError {
                         Text(error).font(.caption).foregroundStyle(.red)
                             .accessibilityIdentifier("token-saver-error")
                     }
                 }.padding(14)
             }
+        }
+    }
+
+    private func harnessLabel(_ harness: TokenSaverOnboarding.Harness) -> String {
+        switch harness {
+        case .codex, .claude, .antigravity, .openCode: return harness.rawValue
+        case .hermes: return L("Hermes (CLI test profile only — manual)", "Hermes（仅 CLI 测试配置 — 需手动创建）")
+        case .other: return L("Other / unsupported", "其他 / 不受支持")
+        }
+    }
+
+    private func wrapperGuidance(_ setup: TokenSaverOnboarding.Snapshot) -> String {
+        if !saver.settings.rtkEnabled {
+            return L("RTK switch is off above (optional if using only Caveman or Ponytail). Turn on Compress tool output (RTK) only if you want command-output compression.", "上方 RTK 开关处于关闭状态（若仅使用 Caveman 或 Ponytail 则无需开启）。仅在需要压缩命令输出时开启 RTK。")
+        }
+        if setup.wrapperReady {
+            return L("Managed wrapper matches; optional diagnostic below checks terminal PATH resolution only (not proof of prompt loading).", "托管包装器匹配；下方可选诊断仅检查终端 PATH 解析（不能证明提示词已加载）。")
+        }
+        return L("Managed wrapper missing or modified. Click Reapply compact rules below to restore it.", "托管包装器缺失或已修改。请点击下方“重新应用精简规则”以恢复。")
+    }
+
+    private func rulesGuidance(_ rules: TokenSaverOnboarding.RulesState) -> String {
+        switch rules {
+        case .current:
+            return L("Rule file matches on disk. Start a new session; optional diagnostic below requests agent self-report (and RTK --version when RTK is enabled), which is not proof of automatic prompt loading.", "磁盘上的规则文件已匹配。请开始新会话；下方可选诊断仅获取代理自述（启用 RTK 时含 --version 检查），不能证明提示词已自动加载。")
+        case .off:
+            return L("Next step: turn on at least one tool switch above (RTK, Caveman or Ponytail) to write managed rules.", "下一步：请先在上方开启至少一项工具开关（RTK、Caveman 或 Ponytail）以写入托管规则。")
+        case .missing:
+            return saver.harness == .hermes
+                ? L("Next step: create ~/.hermes/profiles/token-saver-test/config.yaml in Terminal first, then click Sync Hermes test profile below.", "下一步：请先在终端创建 ~/.hermes/profiles/token-saver-test/config.yaml，再点击下方“同步 Hermes 测试配置”。")
+                : L("Next step: click Reapply compact rules below to create the managed rule file.", "下一步：请点击下方“重新应用精简规则”以创建托管规则文件。")
+        case .stale:
+            return saver.harness == .hermes
+                ? L("Next step: click Sync Hermes test profile below so the test workspace matches current switches.", "下一步：请点击下方“同步 Hermes 测试配置”以使测试工作区匹配当前开关。")
+                : L("Next step: click Reapply compact rules below to update the rule file.", "下一步：请点击下方“重新应用精简规则”以更新规则文件。")
+        case .unreadable:
+            return L("Next step: resolve external edits, symlinks or corrupted JSON before reapplying.", "下一步：请先处理外部修改、符号链接或损坏的 JSON，然后再重新应用。")
+        case .unsupported:
+            return L("No automatic rule file exists for this harness; connecting to CLIProxy alone does not load Token Saver rules.", "此代理无自动规则文件；仅连接 CLIProxy 不会加载 Token Saver 规则。")
+        }
+    }
+
+    private var onboardingChecklist: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L("Setup & verification (after enabling tools above)", "设置与验证（在上方启用工具后检查）")).font(.subheadline.weight(.semibold))
+            Picker(L("1. Coding harness", "1. 编程代理"), selection: Binding(
+                get: { saver.harness }, set: { saver.selectHarness($0) }
+            )) {
+                ForEach(TokenSaverOnboarding.Harness.allCases, id: \.self) { harness in
+                    Text(harnessLabel(harness)).tag(harness)
+                }
+            }
+            .disabled(saver.isCheckingSetup)
+            .accessibilityIdentifier("token-saver-harness")
+            if let url = saver.harness.rulesURL(home: saver.home) {
+                Text(url.path).font(.caption2.monospaced()).textSelection(.enabled)
+            } else {
+                Text(L("Unsupported: CLIProxy connection does not load rules for this harness.", "不受支持：连接 CLIProxy 不会为此代理加载规则。"))
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            Text(saver.localizedRTKStatus)
+                .font(.caption).accessibilityIdentifier("token-saver-setup-rtk")
+            if let setup = saver.onboarding {
+                Text(wrapperGuidance(setup))
+                    .font(.caption2).foregroundStyle(.secondary)
+                if saver.settings.rtkEnabled, !saver.installationStatus.hasPrefix("Homebrew ") {
+                    HStack(spacing: 8) {
+                        Text(L("Next step: install RTK with Homebrew in Terminal (`brew install rtk`), then check again.", "下一步：在终端通过 Homebrew 安装 RTK（`brew install rtk`），然后重新检查。"))
+                            .font(.caption2).foregroundStyle(.orange)
+                        Button(L("Copy: brew install rtk", "复制：brew install rtk")) {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString("brew install rtk", forType: .string)
+                        }
+                        .controlSize(.small)
+                        .accessibilityIdentifier("token-saver-copy-brew-install")
+                    }
+                }
+            }
+            Text(saver.localizedRulesStatus)
+                .font(.caption).accessibilityIdentifier("token-saver-setup-rules")
+            if let setup = saver.onboarding {
+                Text(rulesGuidance(setup.rules))
+                    .font(.caption2).foregroundStyle(setup.rules == .current ? Color.secondary : Color.orange)
+            }
+            Text(L("Agent prompt: not verified. A matching file is not proof a new session loaded it.", "代理提示词：未验证。文件匹配不代表新会话已加载。"))
+                .font(.caption).foregroundStyle(.secondary)
+                .accessibilityIdentifier("token-saver-setup-prompt")
+            Text(saver.localizedHistoryStatus)
+                .font(.caption).accessibilityIdentifier("token-saver-setup-history")
+            Text(L("Supplemental Mac-wide count only — not evidence for this harness/session or equal-quality token savings. Diagnostic uses --version when RTK is enabled so it will not inflate this counter.", "仅作全机历史补充计数——不能证明所选代理/会话已调用或节省 Token。启用 RTK 时诊断仅运行 --version，不会虚增此计数。"))
+                .font(.caption2).foregroundStyle(.secondary)
+            HStack {
+                Button(saver.isCheckingSetup ? L("Checking…", "检查中…") : L("Check setup (offline)", "离线检查设置")) {
+                    Task { await saver.checkOnboarding() }
+                }
+                .disabled(saver.isCheckingSetup)
+                .accessibilityIdentifier("token-saver-setup-check")
+                Button(L("Copy optional agent diagnostic", "复制可选代理诊断提示词")) {
+                    if let commands = saver.onboarding?.agentCommands {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(commands, forType: .string)
+                    }
+                }
+                .disabled(saver.onboarding?.agentCommands == nil || saver.isCheckingSetup)
+                .accessibilityIdentifier("token-saver-setup-copy")
+            }
+            if saver.harness == .hermes {
+                Text(L("CLI test profile only: this does NOT enable Token Saver on your default or bot Hermes profiles. Create/configure ~/.hermes/profiles/token-saver-test first, enable tools above, then click Sync Hermes test profile below.", "仅限 CLI 测试配置：此选项不会启用默认或机器人 Hermes 配置的 Token Saver。请先创建并配置 ~/.hermes/profiles/token-saver-test，在上方启用工具后点击下方“同步 Hermes 测试配置”。"))
+                    .font(.caption).foregroundStyle(.orange)
+            }
+            if let error = saver.localizedSetupError { Text(error).font(.caption).foregroundStyle(.orange) }
         }
     }
 
@@ -472,6 +588,7 @@ struct TokenSaverRuntimeSection: View {
             ))
             .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .purple)).controlSize(.small).tint(.purple)
             .accessibilityIdentifier(id)
+            .disabled(saver.isCheckingSetup)
         }.padding(14)
     }
     private func update(_ change: (inout TokenSaverSettings) -> Void) {
@@ -488,30 +605,132 @@ final class TokenSaverSettingsController: ObservableObject {
     @Published private(set) var settings = TokenSaverSettings()
     @Published private(set) var error: String?
     @Published private(set) var notice: String?
-    private let home: URL
+    @Published private(set) var harness = TokenSaverOnboarding.Harness.codex
+    @Published private(set) var onboarding: TokenSaverOnboarding.Snapshot?
+    @Published private(set) var isCheckingSetup = false
+    @Published private(set) var installationStatus = "not checked; install RTK separately"
+    @Published private(set) var setupError: String?
+    let home: URL
+    private let rtk: TokenSaverReleaseRTK
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    init(home: URL = FileManager.default.homeDirectoryForCurrentUser, rtk: TokenSaverReleaseRTK = .init()) {
         self.home = home
+        self.rtk = rtk
         do { settings = try TokenSaverSettingsStore.load(home: home) }
         catch { self.error = error.localizedDescription }
     }
     func apply(_ value: TokenSaverSettings) {
+        guard !isCheckingSetup else { return }
+        onboarding = nil
         notice = nil
         do {
             try TokenSaverSettingsStore.save(value, home: home)
             settings = value
             error = nil
-            notice = "Agent settings saved. Start a new coding session; sync Hermes test rules separately if needed."
+            notice = L("Agent settings saved. Start a new coding session; sync Hermes test rules separately if needed.", "代理设置已保存。请开始新的编程会话；如需使用 Hermes 测试配置请单独同步。")
         } catch { self.error = error.localizedDescription }
     }
     func syncHermesTestProfile() {
+        guard !isCheckingSetup else { return }
+        onboarding = nil
         notice = nil
         do {
             let target = try TokenSaverSettingsStore.exportHermesTestProfile(home: home)
             error = nil
             notice = FileManager.default.fileExists(atPath: target.path)
-                ? "Hermes test rules synchronized. Start a new coding session in token-saver-test's workspace. Sync again after settings changes; bot/default profiles were not modified."
-                : "Owned Hermes test rules removed. All tools are off; bot/default profiles were not modified."
+                ? L("Hermes test rules synchronized. Start a new coding session in token-saver-test's workspace. Sync again after settings changes; bot/default profiles were not modified.", "Hermes 测试规则已同步。请在 token-saver-test 的工作区开启新的编程会话。更改设置后请重新同步；未修改机器人或默认配置。")
+                : L("Owned Hermes test rules removed. All tools are off; bot/default profiles were not modified.", "已移除托管的 Hermes 测试规则。所有工具均已关闭；未修改机器人或默认配置。")
         } catch { self.error = error.localizedDescription }
+    }
+    func selectHarness(_ value: TokenSaverOnboarding.Harness) {
+        guard !isCheckingSetup else { return }
+        harness = value
+        onboarding = nil
+        setupError = nil
+        notice = nil
+    }
+    var localizedRTKStatus: String {
+        switch installationStatus {
+        case "not checked; install RTK separately":
+            return L("2. RTK: not checked; install RTK separately", "2. RTK：未检查；需单独安装 RTK")
+        case "checking Homebrew; agent PATH is not verified":
+            return L("2. RTK: checking Homebrew; agent PATH is not verified", "2. RTK：正在检查 Homebrew；代理 PATH 未验证")
+        case "not installed in Homebrew; other installations/PATH not verified":
+            return L("2. RTK: not installed in Homebrew; other installations/PATH not verified", "2. RTK：Homebrew 未安装；其他安装方式或 PATH 未验证")
+        case "not verified":
+            return L("2. RTK: not verified", "2. RTK：未验证")
+        default:
+            let prefix = installationStatus.components(separatedBy: ";").first ?? installationStatus
+            return L("2. RTK: \(installationStatus)", "2. RTK：\(prefix)；代理 PATH 未验证")
+        }
+    }
+    var localizedRulesStatus: String {
+        guard let rules = onboarding?.rules else { return L("3. Managed rules: not checked", "3. 托管规则：未检查") }
+        switch rules {
+        case .current: return L("3. Managed rules: current", "3. 托管规则：当前匹配")
+        case .missing: return L("3. Managed rules: missing", "3. 托管规则：缺失")
+        case .stale: return L("3. Managed rules: stale", "3. 托管规则：已过期")
+        case .off: return L("3. Managed rules: off", "3. 托管规则：已关闭")
+        case .unreadable: return L("3. Managed rules: unreadable", "3. 托管规则：无法读取")
+        case .unsupported: return L("3. Managed rules: unsupported", "3. 托管规则：不受支持")
+        }
+    }
+    var historyStatus: String {
+        guard let onboarding else { return "4. RTK execution evidence: not checked" }
+        guard let count = onboarding.historyRecords else { return "4. Default RTK history: unavailable / not verified" }
+        return count == 0 ? "4. Default RTK history: 0 records; no execution evidence"
+            : "4. Default RTK history: \(count) records (all harnesses)"
+    }
+    var localizedHistoryStatus: String {
+        guard let onboarding else { return L("4. RTK execution evidence: not checked", "4. RTK 执行证据：未检查") }
+        guard let count = onboarding.historyRecords else {
+            return L("4. Default RTK history: unavailable / not verified", "4. 默认 RTK 历史记录：不可用 / 未验证")
+        }
+        return count == 0
+            ? L("4. Default RTK history: 0 records; no execution evidence", "4. 默认 RTK 历史记录：0 条记录；无执行证据")
+            : L("4. Default RTK history: \(count) records (all harnesses)", "4. 默认 RTK 历史记录：\(count) 条记录（涵盖所有代理）")
+    }
+    var localizedError: String? { error.map(Self.localizeErrorText) }
+    var localizedSetupError: String? { setupError.map(Self.localizeErrorText) }
+    private static func localizeErrorText(_ text: String) -> String {
+        switch text {
+        case "Token Saver rule was edited externally. Preserve it and resolve the AIUsage managed block before retrying.":
+            return L(text, "Token Saver 规则已被外部编辑。请保留修改并处理 AIUsage 托管块后再重试。")
+        case "Token Saver will not replace symlinked settings or rules.":
+            return L(text, "Token Saver 不会替换符号链接的设置或规则。")
+        case "Create the dedicated Hermes token-saver-test profile first. No bot or default profile is modified.":
+            return L(text, "请先创建专用的 Hermes token-saver-test 配置。不会修改机器人或默认配置。")
+        case "Enable RTK in AIUsage first; the managed executable wrapper is required before exporting Hermes test rules.":
+            return L(text, "请先在 AIUsage 中启用 RTK；导出 Hermes 测试规则前需要托管的可执行包装器。")
+        case "Trusted Homebrew not found at /opt/homebrew/bin/brew or /usr/local/bin/brew. Install/update RTK externally.":
+            return L(text, "在 /opt/homebrew/bin/brew 或 /usr/local/bin/brew 未找到可信 Homebrew。请从外部安装/更新 RTK。")
+        case "RTK is not installed in Homebrew. AIUsage will not install it.":
+            return L(text, "Homebrew 中未安装 RTK。AIUsage 不会自动安装。")
+        case "Homebrew installed-version response was not recognized.":
+            return L(text, "无法识别 Homebrew 已安装版本响应。")
+        case "Homebrew exceeded the 180-second or 128 KiB output limit. Check its external status before retrying.":
+            return L(text, "Homebrew 超过 180 秒或 128 KiB 输出限制。请检查外部状态后重试。")
+        default:
+            return text
+        }
+    }
+    func checkOnboarding() async {
+        guard !isCheckingSetup else { return }
+        isCheckingSetup = true
+        setupError = nil
+        notice = nil
+        onboarding = nil
+        installationStatus = "checking Homebrew; agent PATH is not verified"
+        defer { isCheckingSetup = false }
+        do {
+            if let version = try await rtk.installedVersion() {
+                installationStatus = "Homebrew \(version); agent PATH is not verified"
+            } else { installationStatus = "not installed in Homebrew; other installations/PATH not verified" }
+        } catch {
+            installationStatus = "not verified"
+            setupError = error.localizedDescription
+        }
+        let home = self.home, harness = self.harness
+        onboarding = await Task.detached { TokenSaverOnboarding.inspect(home: home, harness: harness) }.value
     }
 }

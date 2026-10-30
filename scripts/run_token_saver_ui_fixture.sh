@@ -88,5 +88,5 @@ PYCODE
 fi
 printf 'Fixture path: %s\n' "$FIXTURE"
 if [[ "${1:-}" == "--run" ]]; then
-  TOKEN_SAVER_FIXTURE_HOME="$FIXTURE" "$FIXTURE/TokenSaverUIFixture"
+  TOKEN_SAVER_FIXTURE_HOME="$FIXTURE" "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS/TokenSaverUIFixture"
 fi

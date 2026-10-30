@@ -10,7 +10,34 @@ Token Saver is opt-in and applies to coding agents only. It does not rewrite pro
 | Caveman | Shorter coding explanations through instruction rules | Enable in Runtime; choose Lite, Full or Ultra. Built-in rules work without downloading |
 | Ponytail | Favor reuse, standard libraries and minimal verified code | Enable in Runtime. Built-in rules work without downloading |
 
+## What a normal user actually gets
+
+Enabling a switch means managed **instructions are saved**, not that output compression was observed. AIUsage does not intercept terminal commands or provider traffic, and cannot guarantee an agent follows an instruction or that total tokens decrease.
+
+| Agent / tool | Setup provided | Remaining requirement |
+| --- | --- | --- |
+| Antigravity, Claude Code, Codex, OpenCode | Managed coding rules at their configured instruction paths | Start a new session and confirm the agent loads and follows them |
+| RTK | Explicit wrapper and coding instructions; installation help | Install RTK externally, make it available on the agent's PATH, and actually invoke supported RTK commands |
+| Caveman / Ponytail | Built-in concise-output / minimal-code instructions; optional pinned upstream references | No executable plugin is installed; behavior still depends on the agent following the rules |
+| Hermes | Explicit **Sync Hermes test profile** export only | First create/configure the dedicated `token-saver-test` profile, then sync and start it; default and bot profiles are never discovered or changed |
+| Other harnesses | No automatic integration promised | Their instruction discovery must be integrated and verified separately; using CLIProxy alone does not load Token Saver rules |
+
+The built-in rules for Antigravity, Claude Code, Codex and OpenCode now also instruct agents to prefer wrapped `rg -n -- 'pattern' path` over `grep`/`rg` when semantics match, while keeping raw `cat`/`sed` for exact editing context, line ranges, redirects and heredocs. The Hermes test-profile exporter additionally includes read-only preview guidance (`read --level minimal --max-lines 80` only when not editing, skipping preview before edits to avoid double-read round trips) and requests one wrapper `--version` check. These are instructions, not an enforcement hook. Existing app binaries need a separately verified build/install to include this change; updating a dedicated profile from source does not upgrade the installed app.
+
+Users on a supported harness should not need custom prompt editing for the built-in setup. However, unsupported harnesses and Hermes's CLI test-profile path (`token-saver-test`) are not a universal download-and-enable onboarding flow for default/bot Hermes profiles. Distinguish **rules saved → rules loaded → RTK invoked → equal-quality token savings measured**; none implies the next automatically.
+
 ## Understand the buttons
+
+### Runtime → Token Saver & Context Optimization (source change; not in older installed builds)
+
+1. **Enable coding tools first:** Turn on **Compress tool output (RTK)**, **Compress LLM output (Caveman)**, and/or **Lazy senior dev (Ponytail)** at the top of the card. Caveman and Ponytail work immediately using built-in compact rules without downloading reference files.
+2. Select the coding harness under **Setup & verification (after enabling tools above)**. AIUsage shows its managed instruction path. **Hermes (CLI test profile only — manual)** applies only to `~/.hermes/profiles/token-saver-test`, never to default or bot Hermes profiles. **Other / unsupported** is explicitly unsupported; connecting CLIProxy does not integrate that harness.
+3. Select **Check setup (offline)**. It reads the installed Homebrew RTK version only (`brew list --versions rtk`), never GitHub, install or upgrade. This does **not** verify the agent's PATH. If RTK is not installed in Homebrew, an inline **Copy: brew install rtk** button appears right in Runtime. If the RTK switch is off, the UI explicitly states the switch is off rather than reporting a missing/corrupted wrapper.
+4. Read **Managed rules**: `current` means the expected owned block matches the file; `missing`, `stale`, `off` and `unreadable` are separate states with explicit next-step guidance. This does **not** prove a new agent session loaded it. Reapply managed rules, or explicitly sync the precreated Hermes test profile, then check again.
+5. **Default RTK history** is a supplemental Mac-wide aggregate row count from a bounded, private temporary copy of the default macOS `rtk/history.db`. SQLite never opens the original, so it cannot create its WAL/SHM files. Existing WAL/SHM/journal activity, changing source metadata, missing/custom/corrupt/unsupported/symlinked history is **unavailable / not verified**, not zero. The private copy is integrity-checked, queried as immutable and removed afterward. A count is Mac-wide historical evidence, not attribution to the selected harness/session, recent activity, successful commands or measured savings. No command argument, output or token-estimate columns are queried or displayed.
+6. **Copy optional agent diagnostic** is enabled when the managed rules are `current` (and when RTK is enabled, its managed wrapper is also ready). Caveman-only and Ponytail-only configurations do not require RTK or its wrapper to copy this prompt. The copied message is an optional **self-report / terminal diagnostic**, explicitly **not proof of automatic prompt loading**: it asks the agent to state what coding-only output or code-simplicity instructions and active mode are in its current system instructions without reading the rule file on disk, and appends `<wrapper> --version` only when RTK is enabled to check terminal PATH resolution without adding a fake record to `rtk/history.db`.
+
+Checks are explicit snapshots, not a background monitor. Changing the harness or applying/syncing settings clears the snapshot; repeat the check after external changes. The checker never repairs files, creates Hermes profiles, changes routing or makes model requests. UI uses an isolated native fixture with synthetic Homebrew/history data for testing; screenshot values are not production measurements.
 
 1. Open **CPA Gateway → Settings → Updates → Token Saver updates**.
 2. **Check versions** looks up GitHub metadata. For RTK it also reads `brew list --versions rtk`; it does not install, download rules or enable anything.

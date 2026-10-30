@@ -461,10 +461,10 @@ struct TokenSaverUpdatesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L("Token Saver updates", "Token Saver 更新")).font(.title3.weight(.semibold))
-            Label(L("1. Check → 2. Download or install → 3. Enable in Runtime", "1. 检查 → 2. 下载或安装 → 3. 在运行页启用"), systemImage: "list.number")
+            Label(L("1. Install RTK (Homebrew) → 2. Enable tools in Runtime → 3. Optional: check updates", "1. 安装 RTK (Homebrew) → 2. 在运行页启用工具 → 3. 可选：检查更新"), systemImage: "list.number")
                 .font(.subheadline.weight(.medium))
-            Text(L("Check only looks up versions; it does not install or enable anything. Downloads save pinned upstream references, not active prompt text. Compact built-in policies remain active for enabled tools. Reload a new coding session after changes; sync Hermes test rules separately. No downloaded scripts are executed.",
-                   "检查仅查询版本，不会安装或启用工具。下载仅保存固定提交的上游参考文档，不注入完整提示词。已启用的工具继续使用精简内置策略。更改后请开始新会话；Hermes 测试规则须单独同步。不会执行下载的脚本。"))
+            Text(L("Caveman and Ponytail already work immediately in Runtime using built-in compact rules — downloading here is optional and only saves pinned upstream reference docs (never injected into prompts). RTK requires installing the binary via Homebrew. Reload a new coding session after changes; sync Hermes test rules separately. No downloaded scripts are executed.",
+                   "Caveman 和 Ponytail 在运行页使用内置精简规则即可立即生效——此处下载为可选项，仅保存固定提交的上游参考文档（绝不注入提示词）。RTK 需通过 Homebrew 安装二进制文件。更改后请开始新会话；Hermes 测试规则须单独同步。不会执行下载的脚本。"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button(action: onOpenRuntime) {
                 Label(L("Open Runtime to enable tools", "打开运行页以启用工具"), systemImage: "switch.2")
