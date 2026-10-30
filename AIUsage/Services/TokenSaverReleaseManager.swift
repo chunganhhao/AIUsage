@@ -28,19 +28,24 @@ final class TokenSaverReleaseManager: ObservableObject {
     private let reapplyRules: () throws -> Void
     private let rtk: TokenSaverReleaseRTK
 
-    init(client: TokenSaverReleaseClient = .init(), store: TokenSaverReleaseStore = .init(),
+    init(client: TokenSaverReleaseClient? = nil, store: TokenSaverReleaseStore = .init(),
          rtk: TokenSaverReleaseRTK = .init(), now: @escaping () -> Date = Date.init,
          reapplyRules: @escaping () throws -> Void = {
              try TokenSaverSettingsStore.save(TokenSaverSettingsStore.load())
          }) {
+        let resolvedClient = client ?? TokenSaverReleaseClient(cacheURL: TokenSaverReleaseClient.defaultCacheURL)
         self.now = now
-        self.client = client
+        self.client = resolvedClient
         self.store = store
         self.reapplyRules = reapplyRules
         self.rtk = rtk
         for tool in TokenSaverReleaseTool.allCases {
             var status = Status()
             if tool == .rtk { status.brewAvailable = rtk.brewURL != nil }
+            if let cached = resolvedClient.cached(for: tool) {
+                status.latest = cached.release
+                status.checkedAt = cached.checkedAt
+            }
             do { status.staged = try store.staged(tool) }
             catch { status.error = error.localizedDescription }
             statuses[tool] = status
@@ -49,6 +54,8 @@ final class TokenSaverReleaseManager: ObservableObject {
 
     func check(_ tool: TokenSaverReleaseTool) async {
         guard statuses[tool]?.isBusy != true, !isCoolingDown else { return }
+        let previousLatest = statuses[tool]?.latest ?? client.cached(for: tool)?.release
+        let previousCheckedAt = statuses[tool]?.checkedAt ?? client.cached(for: tool)?.checkedAt
         statuses[tool, default: Status()].isBusy = true
         statuses[tool]?.error = nil
         statuses[tool]?.notice = nil
@@ -69,7 +76,16 @@ final class TokenSaverReleaseManager: ObservableObject {
             }
             statuses[tool]?.latest = try await client.latest(for: tool)
             statuses[tool]?.checkedAt = now()
-        } catch { record(error, for: tool) }
+        } catch {
+            if let releaseError = error as? TokenSaverReleaseError, case .rateLimited = releaseError,
+               let previousLatest {
+                statuses[tool]?.latest = previousLatest
+                statuses[tool]?.checkedAt = previousCheckedAt
+            } else {
+                client.clearCached(for: tool)
+            }
+            record(error, for: tool)
+        }
     }
 
     var isCoolingDown: Bool { retryAfter.map { $0 > now() } ?? false }

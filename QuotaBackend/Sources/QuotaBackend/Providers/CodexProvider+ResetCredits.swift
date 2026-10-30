@@ -37,6 +37,7 @@ extension CodexProvider {
         request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue(creds.accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("codex-cli", forHTTPHeaderField: "User-Agent")
         return request
     }
     func submitResetCredit(creds: Credentials, creditID: String, requestID: UUID) async throws -> CodexResetConsumeOutcome {

@@ -44,6 +44,7 @@ final class CodexResetCreditsTests: XCTestCase {
         XCTAssertEqual(request.headers["Authorization"], "Bearer fixture-access")
         XCTAssertEqual(request.headers.first { $0.key.lowercased() == "chatgpt-account-id" }?.value, "workspace-fixture")
         XCTAssertEqual(request.headers["Cache-Control"], "no-cache, no-store, max-age=0")
+        XCTAssertEqual(request.headers["User-Agent"], "codex-cli")
     }
     func testConsumeValidatesLatestCardAndPostsExplicitIDs() async throws {
         StubURLProtocol.respond(endpoint, body: list(card()))

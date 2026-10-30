@@ -5,14 +5,15 @@ import SQLite3
 public enum TokenSaverOnboarding {
     public enum Harness: String, CaseIterable, Sendable {
         case codex = "Codex", claude = "Claude Code", antigravity = "Antigravity", openCode = "OpenCode"
-        case hermes = "Hermes (test profile)", other = "Other / unsupported"
+        case hermes = "Hermes", hermesTest = "Hermes (test profile)", other = "Other / unsupported"
         public func rulesURL(home: URL) -> URL? {
             switch self {
             case .codex: TokenSaverAgentRules.rulePaths(home: home)[2]
             case .claude: TokenSaverAgentRules.rulePaths(home: home)[1]
             case .antigravity: TokenSaverAgentRules.rulePaths(home: home)[0]
             case .openCode: TokenSaverAgentRules.rulePaths(home: home)[3]
-            case .hermes: home.appendingPathComponent(".hermes/profiles/token-saver-test/workspace/HERMES.md")
+            case .hermes: TokenSaverAgentRules.hermesGlobalRuleURL(home: home)
+            case .hermesTest: home.appendingPathComponent(".hermes/profiles/token-saver-test/workspace/HERMES.md")
             case .other: nil
             }
         }
@@ -33,7 +34,7 @@ public enum TokenSaverOnboarding {
         if let url = harness.rulesURL(home: home) {
             do {
                 let settings = try TokenSaverSettingsStore.load(home: home)
-                let expected = try harness == .hermes
+                let expected = try (harness == .hermes || harness == .hermesTest)
                     ? TokenSaverAgentRules.hermesBlock(settings, home: home)
                     : TokenSaverAgentRules.block(settings, home: home)
                 let data = try TokenSaverSettingsStore.contents(url)

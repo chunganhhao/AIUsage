@@ -404,7 +404,7 @@ struct TokenSaverRuntimeSection: View {
                     .font(.subheadline.weight(.semibold))
                     .padding(14)
                 Divider()
-                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex and OpenCode. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex 和 OpenCode 的托管编程规则。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
+                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md). Custom Hermes bot profiles in ~/.hermes/profiles/* stay isolated. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）的托管编程规则。~/.hermes/profiles/* 中的自定义机器人配置保持隔离。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
                 Divider()
                 row(L("Compress LLM output (Caveman)", "压缩模型输出 (Caveman)"), detail: L("Built-in coding-only concise instructions (works immediately without downloading references). Keeps code exact; no request or response rewriting.", "内置仅限编程的精简输出指令（无需下载参考文档即可直接生效）。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
                 Picker(L("Caveman mode", "Caveman 模式"), selection: Binding(
@@ -438,12 +438,12 @@ struct TokenSaverRuntimeSection: View {
                 onboardingChecklist.padding(14)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex and OpenCode when switches above change. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex 和 OpenCode 保存精简策略。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
+                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md) when switches above change. Custom bot profiles in ~/.hermes/profiles/* (bot-huy, bot-vox, bot-script-doctor, etc.) are strictly isolated and never modified. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）保存精简策略。~/.hermes/profiles/* 中的自定义机器人配置（bot-huy、bot-vox、bot-script-doctor 等）完全隔离，绝不修改。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
                         .font(.caption).foregroundStyle(.secondary)
                     Button(L("Reapply compact rules", "重新应用精简规则")) { saver.apply(saver.settings) }
                         .disabled(saver.isCheckingSetup)
                         .accessibilityIdentifier("token-saver-reapply")
-                    Text(L("Hermes CLI test integration is manual and isolated: create ~/.hermes/profiles/token-saver-test first, then sync its workspace rules below. Sync again after changing settings; all three off removes only owned test rules. Your default and bot Hermes profiles are never changed.", "Hermes CLI 测试集成需手动配置且完全隔离：请先创建 ~/.hermes/profiles/token-saver-test，再使用下方按钮同步其工作区规则。更改设置后需重新同步；关闭全部三项仅移除托管测试规则，绝不修改默认或机器人 Hermes 配置。"))
+                    Text(L("Optional A/B benchmark sandbox: if you also use ~/.hermes/profiles/token-saver-test, sync its isolated workspace rules below. Custom bot profiles in ~/.hermes/profiles/* are never changed.", "可选 A/B 测试沙盒：若使用 ~/.hermes/profiles/token-saver-test，可通过下方按钮同步其隔离工作区规则。~/.hermes/profiles/* 中的自定义机器人配置绝不会更改。"))
                         .font(.caption).foregroundStyle(.secondary)
                     Button(L("Sync Hermes test profile", "同步 Hermes 测试配置")) { saver.syncHermesTestProfile() }
                         .disabled(saver.isCheckingSetup)
@@ -466,7 +466,8 @@ struct TokenSaverRuntimeSection: View {
     private func harnessLabel(_ harness: TokenSaverOnboarding.Harness) -> String {
         switch harness {
         case .codex, .claude, .antigravity, .openCode: return harness.rawValue
-        case .hermes: return L("Hermes (CLI test profile only — manual)", "Hermes（仅 CLI 测试配置 — 需手动创建）")
+        case .hermes: return L("Hermes (global ~/.hermes/SOUL.md)", "Hermes（全局 ~/.hermes/SOUL.md）")
+        case .hermesTest: return L("Hermes (CLI test profile only — manual)", "Hermes（仅 CLI 测试配置 — 需手动创建）")
         case .other: return L("Other / unsupported", "其他 / 不受支持")
         }
     }
@@ -488,11 +489,11 @@ struct TokenSaverRuntimeSection: View {
         case .off:
             return L("Next step: turn on at least one tool switch above (RTK, Caveman or Ponytail) to write managed rules.", "下一步：请先在上方开启至少一项工具开关（RTK、Caveman 或 Ponytail）以写入托管规则。")
         case .missing:
-            return saver.harness == .hermes
+            return saver.harness == .hermesTest
                 ? L("Next step: create ~/.hermes/profiles/token-saver-test/config.yaml in Terminal first, then click Sync Hermes test profile below.", "下一步：请先在终端创建 ~/.hermes/profiles/token-saver-test/config.yaml，再点击下方“同步 Hermes 测试配置”。")
                 : L("Next step: click Reapply compact rules below to create the managed rule file.", "下一步：请点击下方“重新应用精简规则”以创建托管规则文件。")
         case .stale:
-            return saver.harness == .hermes
+            return saver.harness == .hermesTest
                 ? L("Next step: click Sync Hermes test profile below so the test workspace matches current switches.", "下一步：请点击下方“同步 Hermes 测试配置”以使测试工作区匹配当前开关。")
                 : L("Next step: click Reapply compact rules below to update the rule file.", "下一步：请点击下方“重新应用精简规则”以更新规则文件。")
         case .unreadable:
@@ -567,6 +568,9 @@ struct TokenSaverRuntimeSection: View {
                 .accessibilityIdentifier("token-saver-setup-copy")
             }
             if saver.harness == .hermes {
+                Text(L("Global Hermes (~/.hermes/SOUL.md) is updated automatically when tools above change. Custom bot profiles in ~/.hermes/profiles/* (bot-huy, bot-vox, bot-script-doctor, etc.) are isolated and never modified.", "全局 Hermes（~/.hermes/SOUL.md）会在上方开关更改时自动更新。~/.hermes/profiles/* 中的自定义机器人配置（如 bot-huy、bot-vox、bot-script-doctor 等）完全隔离，绝不会被修改。"))
+                    .font(.caption).foregroundStyle(.secondary)
+            } else if saver.harness == .hermesTest {
                 Text(L("CLI test profile only: this does NOT enable Token Saver on your default or bot Hermes profiles. Create/configure ~/.hermes/profiles/token-saver-test first, enable tools above, then click Sync Hermes test profile below.", "仅限 CLI 测试配置：此选项不会启用默认或机器人 Hermes 配置的 Token Saver。请先创建并配置 ~/.hermes/profiles/token-saver-test，在上方启用工具后点击下方“同步 Hermes 测试配置”。"))
                     .font(.caption).foregroundStyle(.orange)
             }
@@ -627,7 +631,7 @@ final class TokenSaverSettingsController: ObservableObject {
             try TokenSaverSettingsStore.save(value, home: home)
             settings = value
             error = nil
-            notice = L("Agent settings saved. Start a new coding session; sync Hermes test rules separately if needed.", "代理设置已保存。请开始新的编程会话；如需使用 Hermes 测试配置请单独同步。")
+            notice = L("Agent settings saved (including ~/.hermes/SOUL.md; custom bot-* profiles stay isolated). Start a new coding session; sync Hermes test rules separately if needed.", "代理设置已保存（含 ~/.hermes/SOUL.md；自定义 bot-* 配置保持隔离）。请开始新的编程会话；如需使用 Hermes 测试配置请单独同步。")
         } catch { self.error = error.localizedDescription }
     }
     func syncHermesTestProfile() {

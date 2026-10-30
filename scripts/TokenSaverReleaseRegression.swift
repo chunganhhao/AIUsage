@@ -39,7 +39,8 @@ do { let test = TokenSaverReleaseTests(); try await test.testRTKUpgradeRequiresI
 do { let test = TokenSaverReleaseTests(); try await test.testRTKMissingInstallationNeverRunsUpgradeOrInstall(); try test.tearDown(); print("PASS testRTKMissingInstallationNeverRunsUpgradeOrInstall") }
 do { let test = TokenSaverReleaseTests(); try await test.testRTKRejectsUnknownBrewAndMalformedVersion(); try test.tearDown(); print("PASS testRTKRejectsUnknownBrewAndMalformedVersion") }
 do { let test = TokenSaverReleaseTests(); try await test.testRTKFailureDoesNotClaimUpgradeSuccess(); try test.tearDown(); print("PASS testRTKFailureDoesNotClaimUpgradeSuccess") }
-print("Release offline regression: 19 passed")
+do { let test = TokenSaverReleaseTests(); try await test.testConditionalETagReusesCachedReleaseOn304AndPersistsSafely(); try test.tearDown(); print("PASS testConditionalETagReusesCachedReleaseOn304AndPersistsSafely") }
+print("Release offline regression: 20 passed")
 try await runManagerChecks()
 }
 }
@@ -182,5 +183,20 @@ private func runManagerChecks() async throws {
         XCTAssertEqual(fallback.retryAfter, clock.addingTimeInterval(60))
     }
     print("PASS malformed nonfinite and past resets use bounded 60-second cooldown")
-    print("Release manager offline regression: 10 passed")
+
+    let cacheFile = root.appendingPathComponent("token-saver-release-cache.json")
+    await fixture.setRateLimit(nil)
+    let cachedClient = TokenSaverReleaseClient(cacheURL: cacheFile, freshnessTTL: 0) { try await fixture.response($0, $1) }
+    let cachedManager = TokenSaverReleaseManager(client: cachedClient, store: store, rtk: noBrew, now: { clock })
+    await cachedManager.check(.ponytail)
+    XCTAssertEqual(cachedManager.statuses[.ponytail]?.latest?.version, "v1.2.3")
+    // Recreated manager preloads Latest (GitHub) from disk cache and retains it if rate-limited
+    let reloadedManager = TokenSaverReleaseManager(client: TokenSaverReleaseClient(cacheURL: cacheFile, freshnessTTL: 0) { try await fixture.response($0, $1) }, store: store, rtk: noBrew, now: { clock })
+    XCTAssertEqual(reloadedManager.statuses[.ponytail]?.latest?.version, "v1.2.3")
+    await fixture.setRateLimit("1800000999")
+    await reloadedManager.check(.ponytail)
+    XCTAssertTrue(reloadedManager.isCoolingDown)
+    XCTAssertEqual(reloadedManager.statuses[.ponytail]?.latest?.version, "v1.2.3")
+    print("PASS disk cache preloads latest version across manager recreation and preserves it during rate limit")
+    print("Release manager offline regression: 11 passed")
 }

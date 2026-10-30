@@ -403,20 +403,77 @@ private struct CodexResetActionButtonStyle: ButtonStyle {
     }
 }
 
+/// 9router 风格的一键重置卡胶囊按钮（↻ + 可用张数），悬停提示剩余可用张数。
+struct CodexQuickResetButton: View {
+    let count: Int?
+    let enabled: Bool
+    var isBusy: Bool = false
+    let action: () -> Void
+    @Environment(\.colorScheme) private var colorScheme
+    @State private var isHovered = false
+
+    private var availableCount: Int { max(0, count ?? 0) }
+    private var hasCards: Bool { availableCount > 0 && enabled }
+    private var countLabel: String { count.map(String.init) ?? "—" }
+    private var tooltip: String {
+        if let count {
+            return L("Use one Codex reset credit. Available: \(count)", "使用 1 张 Codex 重置卡。可用：\(count)")
+        }
+        return L("Use one Codex reset credit. Available: unknown", "使用 1 张 Codex 重置卡。可用：未知")
+    }
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 3.5) {
+                Image(systemName: "arrow.counterclockwise")
+                    .font(.system(size: 8.5, weight: .semibold))
+                Text(countLabel)
+                    .font(.system(size: 9.5, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+            }
+            .foregroundStyle(hasCards ? Color.orange : AppContent.secondary(colorScheme))
+            .padding(.horizontal, 6)
+            .padding(.vertical, 2)
+            .background(
+                (hasCards ? Color.orange : Color.primary)
+                    .opacity(isHovered && enabled ? 0.18 : (hasCards ? 0.12 : 0.04)),
+                in: RoundedRectangle(cornerRadius: 5, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                    .strokeBorder(
+                        hasCards ? Color.orange.opacity(0.55) : AppStroke.subtle(colorScheme),
+                        lineWidth: 0.8
+                    )
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(!enabled || isBusy)
+        .onHover { isHovered = $0 }
+        .help(tooltip)
+        .accessibilityLabel(tooltip)
+    }
+}
+
 /// 账号列表与菜单栏共用的余额摘要；明细消费后会立即反映失效计数。
 struct CodexAccountBalanceSummary: View {
     let provider: ProviderData
     let target: CodexResetCreditsCoordinator.Target
     var onViewCards: (() -> Void)? = nil
+    var onQuickReset: (() -> Void)? = nil
     @ObservedObject private var coordinator = CodexResetCreditsCoordinator.shared
 
-    private var countText: String {
+    private var availableCount: Int? {
         coordinator.availableCount(for: target, summaryCount: provider.codexResetCreditsAvailableCount,
-                                   summaryFetchedAt: provider.fetchedAt).map(String.init) ?? "—"
+                                   summaryFetchedAt: provider.fetchedAt)
     }
+    private var countText: String { availableCount.map(String.init) ?? "—" }
     private var creditText: String { CodexCreditsText.compact(provider.codexCreditsDisplayValue) }
+    private var state: CodexResetCreditsCoordinator.State { coordinator.state(for: target) }
+    private var busy: Bool { state.isLoading || state.isConsuming || state.isRefreshing }
     var body: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 8) {
             if let onViewCards {
                 Button(action: onViewCards) {
                     Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
@@ -425,6 +482,14 @@ struct CodexAccountBalanceSummary: View {
                 .help(L("View / use reset cards", "查看 / 使用重置卡"))
             } else {
                 Label(L("Reset cards ", "重置卡 ") + countText, systemImage: "ticket")
+            }
+            if let quickAction = onQuickReset ?? onViewCards {
+                CodexQuickResetButton(
+                    count: availableCount,
+                    enabled: coordinator.canOperate(target),
+                    isBusy: busy,
+                    action: quickAction
+                )
             }
             Label(L("Credits ", "积分 ") + creditText, systemImage: "creditcard")
                 .lineLimit(1).truncationMode(.middle)
@@ -450,7 +515,7 @@ struct CodexSubscriptionBalanceControl: View {
               isLocal: settings.backendMode == "local")
     }
     var body: some View {
-        CodexAccountBalanceSummary(provider: provider, target: target) { showingDetails = true }
+        CodexAccountBalanceSummary(provider: provider, target: target, onViewCards: { showingDetails = true })
             .popover(isPresented: $showingDetails) {
                 CodexResetCreditsView(target: target, knownCount: provider.codexResetCreditsAvailableCount,
                                       summaryFetchedAt: provider.fetchedAt, refreshUsage: {
@@ -472,6 +537,7 @@ struct CodexMenuBarAccountControl<Content: View>: View {
     @ObservedObject private var coordinator = CodexResetCreditsCoordinator.shared
     @State private var selectedCard: CodexResetCredit?
     @State private var showingAlert = false
+    @State private var showingDetails = false
     @State private var message = ""
 
     private var state: CodexResetCreditsCoordinator.State { coordinator.state(for: target) }
@@ -480,13 +546,27 @@ struct CodexMenuBarAccountControl<Content: View>: View {
         VStack(alignment: .leading, spacing: 4) {
             content()
             HStack(spacing: 10) {
-                CodexAccountBalanceSummary(provider: provider, target: target)
+                CodexAccountBalanceSummary(
+                    provider: provider,
+                    target: target,
+                    onViewCards: { showingDetails = true },
+                    onQuickReset: { Task { await prepareReset() } }
+                )
                 if busy { ProgressView().controlSize(.mini) }
                 Spacer(minLength: 0)
             }
             .font(.system(size: 9))
             .foregroundStyle(.secondary)
             .monospacedDigit()
+        }
+        .popover(isPresented: $showingDetails) {
+            CodexResetCreditsView(
+                target: target,
+                knownCount: provider.codexResetCreditsAvailableCount,
+                summaryFetchedAt: provider.fetchedAt,
+                refreshUsage: refreshUsage,
+                coordinator: coordinator
+            )
         }
         .contentShape(Rectangle())
         .contextMenu {

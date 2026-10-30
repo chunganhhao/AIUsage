@@ -45,6 +45,20 @@ public enum TokenSaverSettingsStore {
         let oldBlock = ledgerData.flatMap { String(data: $0, encoding: .utf8) } ?? TokenSaverAgentRules.block(previous)
         let newBlock = try TokenSaverAgentRules.block(settings, home: home)
         var changes = try TokenSaverAgentRules.changes(from: oldBlock, to: newBlock, home: home)
+        let hermesBlockURL = settingsURL(home: home).deletingLastPathComponent().appendingPathComponent("token-saver-hermes-managed-block.txt")
+        let hermesLedgerData = try contents(hermesBlockURL)
+        guard hermesLedgerData == nil || String(data: hermesLedgerData!, encoding: .utf8) != nil else { throw Failure.changed }
+        let hermesGlobalURL = TokenSaverAgentRules.hermesGlobalRuleURL(home: home)
+        let hermesGlobalBefore = try contents(hermesGlobalURL)
+        let hermesGlobalHasMarkers = hermesGlobalBefore.flatMap { String(data: $0, encoding: .utf8) }.map {
+            $0.contains(TokenSaverAgentRules.begin) || $0.contains(TokenSaverAgentRules.end)
+        } ?? false
+        let oldHermesBlock = hermesLedgerData.flatMap { String(data: $0, encoding: .utf8) }
+            ?? (hermesGlobalHasMarkers ? ((try? TokenSaverAgentRules.hermesBlock(previous, home: home)) ?? "") : "")
+        let newHermesBlock = try TokenSaverAgentRules.hermesBlock(settings, home: home)
+        if let hermesChange = try TokenSaverAgentRules.singleChange(url: hermesGlobalURL, from: oldHermesBlock, to: newHermesBlock) {
+            changes.append(hermesChange)
+        }
         let wrapper = settingsURL(home: home).deletingLastPathComponent().appendingPathComponent("bin/token-saver-rtk")
         let wrapperBefore = try contents(wrapper)
         let wrapperAfter = settings.rtkEnabled ? Data(TokenSaverAgentRules.rtkWrapper.utf8) : nil
@@ -54,6 +68,11 @@ public enum TokenSaverSettingsStore {
         }
         let oldLedger = try contents(blockURL)
         changes.append((blockURL, oldLedger, newBlock.isEmpty ? nil : Data(newBlock.utf8)))
+        let oldHermesLedger = try contents(hermesBlockURL)
+        let newHermesLedger = newHermesBlock.isEmpty ? nil : Data(newHermesBlock.utf8)
+        if oldHermesLedger != newHermesLedger {
+            changes.append((hermesBlockURL, oldHermesLedger, newHermesLedger))
+        }
         let settingsBefore = try contents(url)
         var applied: [(URL, Data?, Data?)] = []
         do {
@@ -179,6 +198,11 @@ public enum TokenSaverAgentRules {
         [".gemini/antigravity/rules/aiusage-token-saver.md", ".claude/rules/aiusage-token-saver.md",
          ".codex/AGENTS.md", ".config/opencode/AGENTS.md"].map { home.appendingPathComponent($0) }
     }
+    /// Global Hermes coding instructions (`~/.hermes/SOUL.md`). Custom bot profiles under `~/.hermes/profiles/*`
+    /// (`bot-huy`, `bot-vox`, `bot-script-doctor`, etc.) have their own isolated `SOUL.md` and are never touched.
+    public static func hermesGlobalRuleURL(home: URL) -> URL {
+        home.appendingPathComponent(".hermes/SOUL.md")
+    }
     public static func block(_ s: TokenSaverSettings) -> String {
         // Built-in policy remains usable before downloading any upstream skill.
         (try? block(s, home: nil)) ?? ""
@@ -234,25 +258,30 @@ public enum TokenSaverAgentRules {
         let path = home.appendingPathComponent("Library/Application Support/AIUsage/bin/token-saver-rtk").path
         return "'" + path.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
-    static func changes(from oldBlock: String, to newBlock: String, home: URL) throws -> [(URL, Data?, Data?)] {
-        guard oldBlock != newBlock else { return [] }
-        return try rulePaths(home: home).map { url in
-            let before = try TokenSaverSettingsStore.contents(url)
-            guard var text = before.flatMap({ String(data: $0, encoding: .utf8) }) ?? (before == nil ? "" : nil) else {
+    static func singleChange(url: URL, from oldBlock: String, to newBlock: String) throws -> (URL, Data?, Data?)? {
+        guard oldBlock != newBlock else { return nil }
+        let before = try TokenSaverSettingsStore.contents(url)
+        guard var text = before.flatMap({ String(data: $0, encoding: .utf8) }) ?? (before == nil ? "" : nil) else {
+            throw TokenSaverSettingsStore.Failure.changed
+        }
+        if text.contains(begin) || text.contains(end) {
+            let owned = "\n" + oldBlock
+            guard !oldBlock.isEmpty, text.components(separatedBy: owned).count == 2,
+                  text.components(separatedBy: begin).count == 2,
+                  text.components(separatedBy: end).count == 2 else {
                 throw TokenSaverSettingsStore.Failure.changed
             }
-            if text.contains(begin) || text.contains(end) {
-                let owned = "\n" + oldBlock
-                guard !oldBlock.isEmpty, text.components(separatedBy: owned).count == 2,
-                      text.components(separatedBy: begin).count == 2,
-                      text.components(separatedBy: end).count == 2 else {
-                    throw TokenSaverSettingsStore.Failure.changed
-                }
-                text = text.replacingOccurrences(of: owned, with: newBlock.isEmpty ? "" : "\n" + newBlock)
-            } else if !newBlock.isEmpty {
-                text += "\n" + newBlock
-            }
-            return (url, before, text.isEmpty ? nil : Data(text.utf8))
+            text = text.replacingOccurrences(of: owned, with: newBlock.isEmpty ? "" : "\n" + newBlock)
+        } else if !newBlock.isEmpty {
+            text += "\n" + newBlock
+        }
+        let after = text.isEmpty ? nil : Data(text.utf8)
+        return before == after ? nil : (url, before, after)
+    }
+    static func changes(from oldBlock: String, to newBlock: String, home: URL) throws -> [(URL, Data?, Data?)] {
+        guard oldBlock != newBlock else { return [] }
+        return try rulePaths(home: home).compactMap { url in
+            try singleChange(url: url, from: oldBlock, to: newBlock)
         }
     }
 }

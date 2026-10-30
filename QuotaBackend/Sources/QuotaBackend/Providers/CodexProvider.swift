@@ -1133,7 +1133,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         var request = QuotaHTTP.request(url: url, timeout: timeoutSeconds)
         request.setValue("Bearer \(creds.accessToken)", forHTTPHeaderField: "Authorization")
         request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("AIUsage", forHTTPHeaderField: "User-Agent")
+        request.setValue("codex-cli", forHTTPHeaderField: "User-Agent")
         if let accountId = creds.accountId {
             request.setValue(accountId, forHTTPHeaderField: "ChatGPT-Account-Id")
         }

@@ -259,4 +259,84 @@ final class TokenSaverReleaseTests: XCTestCase {
         XCTAssertEqual(calls.count, 2)
     }
 
+    func testConditionalETagReusesCachedReleaseOn304AndPersistsSafely() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let cacheURL = dir.appendingPathComponent("token-saver-release-cache.json")
+        let relJSON = try JSONSerialization.data(withJSONObject: ["tag_name": "v9.8.7", "draft": false, "prerelease": false])
+        let comJSON = try JSONSerialization.data(withJSONObject: ["sha": commit])
+
+        actor ETagFixture {
+            var step = 0
+            var headers: [String?] = []
+            let relJSON: Data
+            let comJSON: Data
+            init(relJSON: Data, comJSON: Data) { self.relJSON = relJSON; self.comJSON = comJSON }
+            func respond(_ req: URLRequest) -> (Data, HTTPURLResponse) {
+                headers.append(req.value(forHTTPHeaderField: "If-None-Match"))
+                step += 1
+                switch step {
+                case 1:
+                    return (relJSON, HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: ["ETag": "W/\"rel-1\""])!)
+                case 2:
+                    return (comJSON, HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: ["ETag": "W/\"com-1\""])!)
+                case 3:
+                    return (Data(), HTTPURLResponse(url: req.url!, statusCode: 304, httpVersion: nil, headerFields: ["ETag": "W/\"rel-1\""])!)
+                case 4:
+                    return (relJSON, HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: ["ETag": "W/\"rel-2\""])!)
+                case 5:
+                    return (Data(), HTTPURLResponse(url: req.url!, statusCode: 304, httpVersion: nil, headerFields: ["ETag": "W/\"com-1\""])!)
+                default:
+                    return (Data(), HTTPURLResponse(url: req.url!, statusCode: 429, httpVersion: nil,
+                        headerFields: ["X-RateLimit-Remaining": "46", "X-RateLimit-Reset": "1999999999"])!)
+                }
+            }
+            func state() -> (Int, [String?]) { (step, headers) }
+        }
+
+        let etagFixture = ETagFixture(relJSON: relJSON, comJSON: comJSON)
+        let t0 = Date(timeIntervalSince1970: 1_800_000_000)
+        let client1 = TokenSaverReleaseClient(cacheURL: cacheURL, freshnessTTL: 60, now: { t0 }) { req, _ in await etagFixture.respond(req) }
+        let first = try await client1.latest(for: .rtk)
+        XCTAssertEqual(first, TokenSaverRelease(tool: .rtk, version: "v9.8.7", commit: commit, isRelease: true))
+
+        // Within 60-second freshness TTL, repeated Check clicks return cached release with 0 network requests
+        let cachedRepeat = try await client1.latest(for: .rtk)
+        XCTAssertEqual(cachedRepeat, first)
+        let afterTTLHit = await etagFixture.state()
+        XCTAssertEqual(afterTTLHit.0, 2)
+
+        // After TTL expires, new client instance sends If-None-Match and gets 304 Not Modified in 1 request (skipping /commits/v9.8.7)
+        let t1 = t0.addingTimeInterval(61)
+        let client2 = TokenSaverReleaseClient(cacheURL: cacheURL, freshnessTTL: 0, now: { t1 }) { req, _ in await etagFixture.respond(req) }
+        XCTAssertEqual(client2.cached(for: .rtk)?.release, first)
+        let second = try await client2.latest(for: .rtk)
+        XCTAssertEqual(second, first)
+        let after304 = await etagFixture.state()
+        XCTAssertEqual(after304.0, 3)
+        XCTAssertEqual(after304.1, [nil, nil, "W/\"rel-1\""])
+
+        // If /releases/latest returns 200 for the same tag, /commits/v9.8.7 sends If-None-Match: W/"com-1" and reuses SHA on 304
+        let third = try await client2.latest(for: .rtk)
+        XCTAssertEqual(third, first)
+        let afterCommit304 = await etagFixture.state()
+        XCTAssertEqual(afterCommit304.0, 5)
+        XCTAssertEqual(afterCommit304.1[4], "W/\"com-1\"")
+
+        // Burst 429 when X-RateLimit-Remaining > 0 does not lock for 1-hour X-RateLimit-Reset
+        do {
+            _ = try await client2.latest(for: .rtk)
+            XCTFail("expected rate limit error")
+        } catch TokenSaverReleaseError.rateLimited(let reset) {
+            XCTAssertNil(reset)
+        }
+
+        // Unsolicited 304 without prior ETag must fail closed
+        let unsolicited = TokenSaverReleaseClient { req, _ in
+            (Data(), HTTPURLResponse(url: req.url!, statusCode: 304, httpVersion: nil, headerFields: nil)!)
+        }
+        do { _ = try await unsolicited.latest(for: .caveman); XCTFail("accepted unsolicited 304") }
+        catch TokenSaverReleaseError.http(304) { }
+    }
+
 }
