@@ -102,6 +102,7 @@ private func runManagerChecks() async throws {
     XCTAssertEqual(applied, 1)
     XCTAssertEqual(manager.statuses[.ponytail]?.staged?.version, "v1.2.3")
     XCTAssertTrue(manager.statuses[.ponytail]?.notice?.contains("New coding session reload required") == true)
+    XCTAssertTrue(manager.statuses[.ponytail]?.notice?.contains("Full upstream text is not injected") == true)
     print("PASS manager stage/reapply and distinct staged version")
 
     enum ApplyFailure: Error { case externallyEdited }

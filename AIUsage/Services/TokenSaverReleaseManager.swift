@@ -114,7 +114,7 @@ final class TokenSaverReleaseManager: ObservableObject {
             statuses[tool]?.staged = try store.stage(release, markdown: markdown)
             do {
                 try reapplyRules()
-                statuses[tool]?.notice = "Rules saved; enabled tools reapplied. New coding session reload required. Disabled tools remain staged only."
+                statuses[tool]?.notice = "Upstream reference saved; compact built-in policies reapplied for enabled tools. Full upstream text is not injected. New coding session reload required. Disabled tools remain staged only."
             } catch {
                 statuses[tool]?.error = "Downloaded/staged rules, but not applied: \(error.localizedDescription)"
                 statuses[tool]?.notice = nil

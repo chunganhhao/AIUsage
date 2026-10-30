@@ -463,8 +463,8 @@ struct TokenSaverUpdatesSection: View {
             Text(L("Token Saver updates", "Token Saver 更新")).font(.title3.weight(.semibold))
             Label(L("1. Check → 2. Download or install → 3. Enable in Runtime", "1. 检查 → 2. 下载或安装 → 3. 在运行页启用"), systemImage: "list.number")
                 .font(.subheadline.weight(.medium))
-            Text(L("Check only looks up versions; it does not install or enable anything. Downloads save rules and reapply tools already enabled in Runtime. Start a new coding session after enabling or updating rules. No downloaded scripts are executed.",
-                   "检查仅查询版本，不会安装或启用工具。下载会保存规则并重新应用已在运行页启用的工具。启用或更新规则后，请开始新的编程会话。不会执行下载的脚本。"))
+            Text(L("Check only looks up versions; it does not install or enable anything. Downloads save pinned upstream references, not active prompt text. Compact built-in policies remain active for enabled tools. Reload a new coding session after changes; sync Hermes test rules separately. No downloaded scripts are executed.",
+                   "检查仅查询版本，不会安装或启用工具。下载仅保存固定提交的上游参考文档，不注入完整提示词。已启用的工具继续使用精简内置策略。更改后请开始新会话；Hermes 测试规则须单独同步。不会执行下载的脚本。"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button(action: onOpenRuntime) {
                 Label(L("Open Runtime to enable tools", "打开运行页以启用工具"), systemImage: "switch.2")
@@ -492,7 +492,7 @@ struct TokenSaverUpdatesSection: View {
             }
         }
         .sheet(isPresented: $showRTKSetup) { rtkSetup }
-        .alert(pendingInstall == .rtk ? L("Upgrade RTK with Homebrew?", "通过 Homebrew 更新 RTK？") : L("Save rules and reapply enabled tools?", "保存规则并重新应用已启用工具？"), isPresented: Binding(
+        .alert(pendingInstall == .rtk ? L("Upgrade RTK with Homebrew?", "通过 Homebrew 更新 RTK？") : L("Save upstream reference?", "保存上游参考文档？"), isPresented: Binding(
             get: { pendingInstall != nil }, set: { if !$0 { pendingInstall = nil } }
         )) {
             if let tool = pendingInstall {
@@ -509,8 +509,8 @@ struct TokenSaverUpdatesSection: View {
             if pendingInstall == .rtk {
                 Text(L("Runs only brew upgrade rtk using trusted Homebrew. RTK must already be installed. Homebrew may update RTK and required dependencies outside AIUsage storage. No brew install or downloaded shell installer is run.", "仅通过可信 Homebrew 运行 brew upgrade rtk。RTK 必须已安装。Homebrew 可能在 AIUsage 存储之外更新 RTK 及必要依赖；不会运行 brew install 或下载的 Shell 安装器。"))
             } else {
-            Text(L("Downloads upstream SKILL.md pinned to the checked commit into AIUsage managed storage. Git blob integrity is checked, not publisher authenticity. Enabled tools are reapplied to managed instruction files. Reload a new coding session; no scripts are executed.",
-                   "从已检查的提交下载 SKILL.md 到 AIUsage 托管存储，校验 Git 内容完整性（非发布者身份认证），并将启用的工具重新写入托管指令文件。需重新加载新的编程会话；不会执行脚本。"))
+            Text(L("Downloads pinned upstream SKILL.md as reference only. Git blob integrity is checked, not publisher authenticity. Enabled tools keep compact built-in policies with commit provenance; full upstream prose is not injected. Reload a new coding session; no scripts are executed.",
+                   "下载固定提交的 SKILL.md 仅供参考。校验 Git 内容完整性，非发布者身份认证。已启用工具保留精简内置策略及提交来源，不注入完整上游文本。需开始新会话；不会执行脚本。"))
             }
         }
     }
@@ -527,7 +527,7 @@ struct TokenSaverUpdatesSection: View {
                 Text(toolSummary(tool)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
                 HStack(alignment: .top, spacing: 16) {
-                    versionLabel(tool.skillPath != nil ? L("Saved rules · not an activation status", "已保存规则 · 非启用状态") : L("Installed version", "已安装版本"),
+                    versionLabel(tool.skillPath != nil ? L("Saved reference · not active policy", "已保存参考文档 · 非生效策略") : L("Installed version", "已安装版本"),
                                  status.staged?.version ?? (tool.skillPath != nil ? L("Built-in rules only", "仅内置规则") : (status.installedBinaryVersion ?? (status.binaryInspected ? L("Not installed in Homebrew", "Homebrew 未安装") : L("Unknown · not inspected", "未知 · 未检测")))))
                     versionLabel(L("Latest (GitHub)", "最新（GitHub）"), status.latest?.version ?? L("Not checked", "未检查"))
                 }
@@ -556,7 +556,7 @@ struct TokenSaverUpdatesSection: View {
                     }
                     Button(status.isBusy ? L("Working…", "处理中…") : L("Check versions", "检查版本")) { Task { await manager.check(tool) } }
                         .disabled(status.isBusy || coolingDown).help(L("Look up GitHub versions; RTK also reads its Homebrew version. Nothing is installed.", "查询 GitHub 版本；RTK 同时读取 Homebrew 版本。不会安装任何内容。")).accessibilityIdentifier("token-saver-\(tool.rawValue)-check")
-                    Button(tool.skillPath == nil ? L("Update RTK", "更新 RTK") : (status.staged == nil ? L("Download rules", "下载规则") : L("Update staged rules", "更新暂存规则"))) { pendingInstall = tool }
+                    Button(tool.skillPath == nil ? L("Update RTK", "更新 RTK") : (status.staged == nil ? L("Download reference", "下载参考文档") : L("Update reference", "更新参考文档"))) { pendingInstall = tool }
                         .disabled(status.isBusy || (tool != .rtk && coolingDown) || status.latest == nil || (tool == .rtk ? (!status.brewAvailable || status.installedBinaryVersion == nil) : (status.isCurrent && status.error == nil)))
                         .accessibilityIdentifier("token-saver-\(tool.rawValue)-update")
                 }
@@ -580,8 +580,8 @@ struct TokenSaverUpdatesSection: View {
         if coolingDown { return L("GitHub checks and rule downloads are paused until the local time shown above.", "GitHub 检查和规则下载已暂停至上方显示的本地时间。") }
         if status.latest == nil { return L("Start with Check versions to unlock downloads. This does not enable the tool.", "先检查版本以解锁下载。此操作不会启用工具。") }
         if tool == .rtk { return L("Update RTK runs brew upgrade rtk after confirmation. Homebrew may lag behind GitHub. Then enable RTK in Runtime and start a new coding session.", "确认后通过 brew upgrade rtk 更新。Homebrew 版本可能落后于 GitHub。之后在运行页启用 RTK 并开始新的编程会话。") }
-        if status.isCurrent && status.error == nil { return L("Latest checked rules already saved. Enable this tool in Runtime, then start a new coding session. No further download needed.", "已保存最新检查的规则。在运行页启用工具并开始新的编程会话，无需再次下载。") }
-        return L("Download rules asks for confirmation. Disabled tools stay saved only; enable them in Runtime, then start a new coding session. Built-in rules also work without a download.", "下载规则需要确认。未启用的工具仅保存规则；请在运行页启用并开始新的编程会话。内置规则无需下载也可使用。")
+        if status.isCurrent && status.error == nil { return L("Latest checked reference saved. Compact built-in policy is separate; enable it in Runtime and start a new coding session. No further download needed.", "已保存最新检查的参考文档。精简内置策略单独生效；请在运行页启用并开始新会话，无需再次下载。") }
+        return L("Download reference asks for confirmation; it does not inject full upstream text. Compact built-in policies work without downloads. Enable tools in Runtime and start a new coding session.", "下载参考文档需要确认，不会注入完整上游文本。精简内置策略无需下载即可使用。请在运行页启用工具并开始新会话。")
     }
 
     private var rtkSetup: some View {

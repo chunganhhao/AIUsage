@@ -435,8 +435,20 @@ struct TokenSaverRuntimeSection: View {
                 }.padding(14)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text("Rules are saved immediately. Start a new coding session to reload agent instructions. RTK must be installed separately on the agent's PATH.")
+                    Text("Compact policies are saved for Antigravity, Claude Code, Codex and OpenCode. Full downloaded skills stay separate as references. Instructions do not guarantee model compliance or token savings.")
                         .font(.caption).foregroundStyle(.secondary)
+                    Button("Reapply compact rules") { saver.apply(saver.settings) }
+                        .accessibilityIdentifier("token-saver-reapply")
+                    Text("Hermes test integration is explicit: create token-saver-test first, then sync its workspace rules below. Sync again after changing settings; all three off removes only owned test rules. Bot/default profiles and connections are never changed.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    Button("Sync Hermes test profile") { saver.syncHermesTestProfile() }
+                        .accessibilityIdentifier("token-saver-hermes-sync")
+                    Text("Start a new coding session to reload instructions. RTK must be installed separately on the agent's PATH.")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let notice = saver.notice {
+                        Text(notice).font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("token-saver-notice")
+                    }
                     if let error = saver.error {
                         Text(error).font(.caption).foregroundStyle(.red)
                             .accessibilityIdentifier("token-saver-error")
@@ -475,6 +487,7 @@ struct TokenSaverRuntimeSection: View {
 final class TokenSaverSettingsController: ObservableObject {
     @Published private(set) var settings = TokenSaverSettings()
     @Published private(set) var error: String?
+    @Published private(set) var notice: String?
     private let home: URL
 
     init(home: URL = FileManager.default.homeDirectoryForCurrentUser) {
@@ -483,10 +496,22 @@ final class TokenSaverSettingsController: ObservableObject {
         catch { self.error = error.localizedDescription }
     }
     func apply(_ value: TokenSaverSettings) {
+        notice = nil
         do {
             try TokenSaverSettingsStore.save(value, home: home)
             settings = value
             error = nil
+            notice = "Agent settings saved. Start a new coding session; sync Hermes test rules separately if needed."
+        } catch { self.error = error.localizedDescription }
+    }
+    func syncHermesTestProfile() {
+        notice = nil
+        do {
+            let target = try TokenSaverSettingsStore.exportHermesTestProfile(home: home)
+            error = nil
+            notice = FileManager.default.fileExists(atPath: target.path)
+                ? "Hermes test rules synchronized. Start a new coding session in token-saver-test's workspace. Sync again after settings changes; bot/default profiles were not modified."
+                : "Owned Hermes test rules removed. All tools are off; bot/default profiles were not modified."
         } catch { self.error = error.localizedDescription }
     }
 }

@@ -74,6 +74,50 @@ public enum TokenSaverSettingsStore {
             throw error
         }
     }
+    /// Explicit test-only export. Never discovers or edits a bot/global Hermes profile.
+    @discardableResult
+    public static func exportHermesTestProfile(home: URL) throws -> URL {
+        lock.lock(); defer { lock.unlock() }
+        let profile = home.appendingPathComponent(".hermes/profiles/token-saver-test")
+        let config = profile.appendingPathComponent("config.yaml")
+        guard try contents(config) != nil else { throw Failure.missingHermesProfile }
+        let target = profile.appendingPathComponent("workspace/HERMES.md")
+        let state = profile.appendingPathComponent(".aiusage-token-saver-owned.txt")
+        let before = try contents(target), owned = try contents(state)
+        let source = try contents(settingsURL(home: home).deletingLastPathComponent().appendingPathComponent("token-saver-managed-block.txt"))
+        // Adopt only the exact prior manual export; never replace unrelated project instructions.
+        if let before {
+            guard let expected = owned ?? source,
+                  let text = String(data: expected, encoding: .utf8),
+                  text.hasPrefix(TokenSaverAgentRules.begin + "\n"),
+                  text.trimmingCharacters(in: .newlines).hasSuffix(TokenSaverAgentRules.end),
+                  text.components(separatedBy: TokenSaverAgentRules.begin).count == 2,
+                  text.components(separatedBy: TokenSaverAgentRules.end).count == 2,
+                  before == expected || before == expected + Data("\n".utf8) else { throw Failure.changed }
+        } else if owned != nil { throw Failure.changed }
+        let settings = try load(home: home)
+        if settings.rtkEnabled {
+            let wrapper = settingsURL(home: home).deletingLastPathComponent().appendingPathComponent("bin/token-saver-rtk")
+            guard try contents(wrapper) == Data(TokenSaverAgentRules.rtkWrapper.utf8),
+                  FileManager.default.isExecutableFile(atPath: wrapper.path) else { throw Failure.missingRTKWrapper }
+        }
+        let block = try TokenSaverAgentRules.block(settings, home: home)
+        let after = block.isEmpty ? nil : Data((block + "\n").utf8)
+        var applied: [(URL, Data?, Data?)] = []
+        do {
+            for (url, old, new) in [(target, before, after), (state, owned, after)] {
+                guard try contents(url) == old else { throw Failure.changed }
+                try replace(url, data: new)
+                applied.append((url, old, new))
+            }
+        } catch {
+            for (url, old, new) in applied.reversed() {
+                if (try? contents(url)) == new { try? replace(url, data: old) }
+            }
+            throw error
+        }
+        return target
+    }
     static func contents(_ url: URL) throws -> Data? {
         try rejectSymlinks(url)
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
@@ -105,11 +149,13 @@ public enum TokenSaverSettingsStore {
         } else if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) }
     }
     enum Failure: LocalizedError {
-        case changed, symlink
+        case changed, symlink, missingHermesProfile, missingRTKWrapper
         var errorDescription: String? {
             switch self {
             case .changed: "Token Saver rule was edited externally. Preserve it and resolve the AIUsage managed block before retrying."
             case .symlink: "Token Saver will not replace symlinked settings or rules."
+            case .missingHermesProfile: "Create the dedicated Hermes token-saver-test profile first. No bot or default profile is modified."
+            case .missingRTKWrapper: "Enable RTK in AIUsage first; the managed executable wrapper is required before exporting Hermes test rules."
             }
         }
     }
@@ -140,14 +186,14 @@ public enum TokenSaverAgentRules {
     static func block(_ s: TokenSaverSettings, home: URL?) throws -> String {
         guard s.rtkEnabled || s.cavemanEnabled || s.ponytailEnabled else { return "" }
         var sections = [begin, "# Token Saver — coding work only",
-            "Apply ALL instructions below ONLY while implementing, testing, reviewing or debugging source code.",
-            "Bypass these rules for RonC scripts, lyrics, creative writing, Zalo/customer-care responses and all non-coding work. Never alter those tasks' tone or output."]
+            "Apply only to implementing, testing, debugging or reviewing code. Exclude RonC scripts/lyrics, creative writing, Zalo/customer-care and all other non-coding work; preserve their tone."]
         if s.rtkEnabled {
             if let home {
                 let wrapper = settingsPathForWrapper(home)
-                sections.append("Antigravity run_command (zsh), Claude Code, Codex and OpenCode: use the explicit managed zsh wrapper `\(wrapper)` followed by a supported command, e.g. git status. Quote its path because it contains spaces. It uses RTK when available, otherwise runs the original command exactly once. It does not install binaries or modify PATH.")
+                sections.append("RTK: use \(wrapper) for supported coding commands (git status/diff/log, ls, rg, pytest). Antigravity: run_command (zsh). Quote the wrapper path. Do not wrap unsupported commands; run them directly. If RTK is absent, run the original once. Preserve exit status/diagnostics; no aliases, PATH changes, interception or automatic replay.")
+            } else {
+                sections.append("RTK: use rtk git status/diff/log, rtk ls, rtk rg or rtk pytest when installed and supported; otherwise run the original once. Antigravity: run_command (zsh). Keep exit status/diagnostics; no aliases, PATH changes or automatic replay.")
             }
-            sections.append("For coding shell commands, when `command -v rtk` succeeds, prefer `rtk git status`, `rtk git diff`, `rtk git log`, `rtk ls`, `rtk grep` and `rtk pytest` where supported by `rtk --help`. Antigravity: use run_command (zsh). Claude Code, Codex and OpenCode: use the same explicit RTK commands. Do not change aliases/PATH, wrap unsupported commands, hide failures or truncate diagnostic evidence. If RTK is absent, use the original command and report it.")
         }
         for tool in [TokenSaverReleaseTool.caveman, .ponytail] {
             let enabled = tool == .caveman ? s.cavemanEnabled : s.ponytailEnabled
@@ -155,7 +201,8 @@ public enum TokenSaverAgentRules {
             if let home, let staged = try TokenSaverReleaseStore(root: home.appendingPathComponent("Library/Application Support/AIUsage/Rules")).staged(tool),
                let text = String(data: staged.markdown, encoding: .utf8) {
                 guard !text.contains(begin), !text.contains(end) else { throw TokenSaverSettingsStore.Failure.changed }
-                sections.append("## \(tool.title) upstream rules (coding scope above overrides general applicability)\n" + text)
+                // Full upstream skills add thousands of prompt tokens; keep verified provenance, not their prose.
+                sections.append("\(tool.title) reference commit: \(staged.commit). Upstream text is stored separately, not injected.")
             }
             if tool == .caveman {
                 let mode: String
@@ -164,12 +211,12 @@ public enum TokenSaverAgentRules {
                 case .full: mode = "Terse direct prose. Omit filler and repetition; keep required context and actionable facts."
                 case .ultra: mode = "Minimum prose: compact bullets or fragments. Never sacrifice correctness, necessary caveats or instructions."
                 }
-                sections.append("Caveman active mode: \(s.cavemanMode.rawValue). \(mode) Preserve code, paths, commands, error messages, security warnings and user-requested detail exactly. This mode overrides any default in the upstream rule.")
+                sections.append("Caveman active mode: \(s.cavemanMode.rawValue). \(mode) Keep the user's language and exact code, commands, paths, errors, security warnings and requested detail.")
             } else {
-                sections.append("Ponytail: question unnecessary work (YAGNI), reuse project helpers, then stdlib/native features and existing dependencies. Prefer minimal correct code and deletion over speculative abstractions. Trace root cause and verify changes; never remove validation, security, accessibility or required behavior.")
+                sections.append("Ponytail: YAGNI; reuse project helpers, then stdlib/native features and existing dependencies. Trace callers/root cause; make the smallest correct change and run a check. No speculative abstractions or dependencies. Keep validation, security, accessibility and required behavior.")
             }
         }
-        sections.append("Scope reminder: ALL preceding Token Saver policies are coding-only. RonC, Zalo, creative and non-coding tasks are excluded. No request/response or signed history rewriting.")
+        sections.append("Report actual tool/test results; do not invent token savings. No request/response or signed history rewriting. Scope reminder: all policies above are coding-only.")
         sections.append(end)
         return sections.joined(separator: "\n")
     }
