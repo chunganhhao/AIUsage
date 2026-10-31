@@ -1,4 +1,5 @@
 import SwiftUI
+import Combine
 import QuotaBackend
 
 /// 所有积分入口共用文案，明确区分数值、可用标记和未返回数据。
