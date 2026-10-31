@@ -22,8 +22,8 @@ private func check(_ value: Bool) { precondition(value) }
         value.rtkEnabled = true; value.cavemanEnabled = true; value.ponytailEnabled = true
         controller.apply(value)
         check(controller.settings == value && controller.error == nil)
-        check(controller.notice?.contains("sync Hermes test rules separately") == true)
-        print("PASS controller applies compact settings and reports separate Hermes sync")
+        check(controller.notice?.contains("Start a new coding session") == true)
+        print("PASS controller applies compact settings and reports session reload notice")
 
         controller.syncHermesTestProfile()
         check(controller.error?.contains("Create the dedicated Hermes") == true && controller.notice == nil)
@@ -104,10 +104,10 @@ private func check(_ value: Bool) { precondition(value) }
         await setup.checkOnboarding()
         check(setup.onboarding?.rules == .current && setup.onboarding?.wrapperReady == false)
         check(setup.onboarding?.agentCommands != nil && setup.onboarding?.agentCommands?.contains("--version") == false)
-        setup.selectHarness(.other)
+        setup.selectHarness(.hermes)
         check(setup.onboarding == nil)
         await setup.checkOnboarding()
-        check(setup.onboarding?.rules == .unsupported && setup.onboarding?.agentCommands == nil)
+        check(setup.onboarding?.rules == .current && setup.onboarding?.agentCommands != nil)
         setup.selectHarness(.codex)
         setup.apply(.init())
         check(setup.onboarding == nil)

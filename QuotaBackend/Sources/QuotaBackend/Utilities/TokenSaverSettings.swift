@@ -198,8 +198,8 @@ public enum TokenSaverAgentRules {
         [".gemini/antigravity/rules/aiusage-token-saver.md", ".claude/rules/aiusage-token-saver.md",
          ".codex/AGENTS.md", ".config/opencode/AGENTS.md"].map { home.appendingPathComponent($0) }
     }
-    /// Global Hermes coding instructions (`~/.hermes/SOUL.md`). Custom bot profiles under `~/.hermes/profiles/*`
-    /// (`bot-huy`, `bot-vox`, `bot-script-doctor`, etc.) have their own isolated `SOUL.md` and are never touched.
+    /// Global Hermes coding instructions (`~/.hermes/SOUL.md`). Custom profiles under `~/.hermes/profiles/*`
+    /// have their own isolated `SOUL.md` and are never touched.
     public static func hermesGlobalRuleURL(home: URL) -> URL {
         home.appendingPathComponent(".hermes/SOUL.md")
     }
@@ -210,7 +210,7 @@ public enum TokenSaverAgentRules {
     static func block(_ s: TokenSaverSettings, home: URL?) throws -> String {
         guard s.rtkEnabled || s.cavemanEnabled || s.ponytailEnabled else { return "" }
         var sections = [begin, "# Token Saver — coding work only",
-            "Apply only to implementing, testing, debugging or reviewing code. Exclude RonC scripts/lyrics, creative writing, Zalo/customer-care and all other non-coding work; preserve their tone."]
+            "Apply only to implementing, testing, debugging or reviewing code. Exclude creative writing, scriptwriting, lyrics, customer-care chat and all other non-coding work; preserve their tone."]
         if s.rtkEnabled {
             if let home {
                 let wrapper = settingsPathForWrapper(home)
@@ -249,7 +249,7 @@ public enum TokenSaverAgentRules {
         guard settings.rtkEnabled else { return base }
         let wrapper = settingsPathForWrapper(home)
         let mappings = """
-        Hermes terminal mappings (coding, including Zalo Dashboard code): check wrapper --version once per session. Search: prefer \(wrapper) rg -n -- 'pattern' path over grep/rg with matching semantics. Read-only preview (skip before editing): \(wrapper) read --level minimal --max-lines 80 path. Exact bytes, editing context or sed line ranges: keep raw cat/sed; previews omit source. Never replace cat redirects/heredocs/file writes. Use terminal(command=...) with quoted wrapper paths. Keep bash/node/test scripts direct; no automatic retries. Rules loaded does not prove RTK ran or saved tokens.
+        Hermes terminal mappings (coding tasks only): check wrapper --version once per session. Search: prefer \(wrapper) rg -n -- 'pattern' path over grep/rg with matching semantics. Read-only preview (skip before editing): \(wrapper) read --level minimal --max-lines 80 path. Exact bytes, editing context or sed line ranges: keep raw cat/sed; previews omit source. Never replace cat redirects/heredocs/file writes. Use terminal(command=...) with quoted wrapper paths. Keep bash/node/test scripts direct; no automatic retries. Rules loaded does not prove RTK ran or saved tokens.
         """
         return base.replacingOccurrences(of: end, with: mappings + "\n" + end)
     }

@@ -34,7 +34,6 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 VStack(alignment: .leading, spacing: 14) {
                     header
                     poolProtectionSection
-                    TokenSaverRuntimeSection(home: tokenSaverHome, rtk: tokenSaverRTK)
 
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -390,6 +389,23 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
 }
 
 
+/// Dedicated pane for Token Saver & Context Optimization.
+struct SubscriptionGatewaySettingsTokenSaverPane: View {
+    var home: URL = FileManager.default.homeDirectoryForCurrentUser
+    var rtk: TokenSaverReleaseRTK = .init()
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(spacing: 8) {
+                Text(L("Token Saver", "Token 节省"))
+                    .font(.title3.weight(.semibold))
+                Spacer()
+            }
+            TokenSaverRuntimeSection(home: home, rtk: rtk)
+        }
+    }
+}
+
 /// Separate observer prevents unrelated runtime form drafts from being replaced.
 struct TokenSaverRuntimeSection: View {
     @StateObject private var saver: TokenSaverSettingsController
@@ -404,7 +420,7 @@ struct TokenSaverRuntimeSection: View {
                     .font(.subheadline.weight(.semibold))
                     .padding(14)
                 Divider()
-                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md). Custom Hermes bot profiles in ~/.hermes/profiles/* stay isolated. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）的托管编程规则。~/.hermes/profiles/* 中的自定义机器人配置保持隔离。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
+                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md). Custom Hermes profiles in ~/.hermes/profiles/* stay isolated. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）的托管编程规则。~/.hermes/profiles/* 中的自定义配置保持隔离。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
                 Divider()
                 row(L("Compress LLM output (Caveman)", "压缩模型输出 (Caveman)"), detail: L("Built-in coding-only concise instructions (works immediately without downloading references). Keeps code exact; no request or response rewriting.", "内置仅限编程的精简输出指令（无需下载参考文档即可直接生效）。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
                 Picker(L("Caveman mode", "Caveman 模式"), selection: Binding(
@@ -426,7 +442,7 @@ struct TokenSaverRuntimeSection: View {
                 HStack {
                     VStack(alignment: .leading, spacing: 4) {
                         Text(L("Apply to Coding Agents only", "仅应用于编程代理")).font(.subheadline.weight(.medium))
-                        Text(L("Always on. Agent rules apply only to coding work; RonC scripts, lyrics and Zalo/customer-care work are excluded. CPA traffic is never modified.", "始终开启。代理规则仅适用于编程工作；排除 RonC 脚本、歌词及 Zalo/客服内容，绝不修改 CPA 流量。"))
+                        Text(L("Always on. Agent rules apply only to coding tasks; creative writing, scriptwriting, lyrics and customer-care chat are excluded. CPA traffic is never modified.", "始终开启。代理规则仅适用于编程任务；排除创意写作、剧本、歌词及客服聊天，绝不修改 CPA 流量。"))
                             .font(.caption).foregroundStyle(.secondary)
                     }
                     Spacer(minLength: 12)
@@ -438,17 +454,12 @@ struct TokenSaverRuntimeSection: View {
                 onboardingChecklist.padding(14)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md) when switches above change. Custom bot profiles in ~/.hermes/profiles/* (bot-huy, bot-vox, bot-script-doctor, etc.) are strictly isolated and never modified. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）保存精简策略。~/.hermes/profiles/* 中的自定义机器人配置（bot-huy、bot-vox、bot-script-doctor 等）完全隔离，绝不修改。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
+                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md) when switches above change. Custom profiles in ~/.hermes/profiles/* stay isolated and are never modified. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）保存精简策略。~/.hermes/profiles/* 中的自定义配置完全隔离，绝不修改。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
                         .font(.caption).foregroundStyle(.secondary)
                     Button(L("Reapply compact rules", "重新应用精简规则")) { saver.apply(saver.settings) }
                         .disabled(saver.isCheckingSetup)
                         .accessibilityIdentifier("token-saver-reapply")
-                    Text(L("Optional A/B benchmark sandbox: if you also use ~/.hermes/profiles/token-saver-test, sync its isolated workspace rules below. Custom bot profiles in ~/.hermes/profiles/* are never changed.", "可选 A/B 测试沙盒：若使用 ~/.hermes/profiles/token-saver-test，可通过下方按钮同步其隔离工作区规则。~/.hermes/profiles/* 中的自定义机器人配置绝不会更改。"))
-                        .font(.caption).foregroundStyle(.secondary)
-                    Button(L("Sync Hermes test profile", "同步 Hermes 测试配置")) { saver.syncHermesTestProfile() }
-                        .disabled(saver.isCheckingSetup)
-                        .accessibilityIdentifier("token-saver-hermes-sync")
-                    Text(L("Start a new coding session after enabling or syncing so your agent reloads instructions. RTK must be installed on the agent's PATH.", "启用或同步后请开启新的编程会话以重新加载指令。RTK 必须安装在代理的 PATH 中。"))
+                    Text(L("Start a new coding session after enabling or updating rules so your agent reloads instructions. RTK must be installed on the agent's PATH.", "启用或更新规则后请开启新的编程会话以重新加载指令。RTK 必须安装在代理的 PATH 中。"))
                         .font(.caption).foregroundStyle(.secondary)
                     if let notice = saver.notice {
                         Text(notice).font(.caption).foregroundStyle(.secondary)
@@ -466,9 +477,7 @@ struct TokenSaverRuntimeSection: View {
     private func harnessLabel(_ harness: TokenSaverOnboarding.Harness) -> String {
         switch harness {
         case .codex, .claude, .antigravity, .openCode: return harness.rawValue
-        case .hermes: return L("Hermes (global ~/.hermes/SOUL.md)", "Hermes（全局 ~/.hermes/SOUL.md）")
-        case .hermesTest: return L("Hermes (CLI test profile only — manual)", "Hermes（仅 CLI 测试配置 — 需手动创建）")
-        case .other: return L("Other / unsupported", "其他 / 不受支持")
+        case .hermes: return L("Hermes (~/.hermes/SOUL.md)", "Hermes（~/.hermes/SOUL.md）")
         }
     }
 
@@ -489,13 +498,9 @@ struct TokenSaverRuntimeSection: View {
         case .off:
             return L("Next step: turn on at least one tool switch above (RTK, Caveman or Ponytail) to write managed rules.", "下一步：请先在上方开启至少一项工具开关（RTK、Caveman 或 Ponytail）以写入托管规则。")
         case .missing:
-            return saver.harness == .hermesTest
-                ? L("Next step: create ~/.hermes/profiles/token-saver-test/config.yaml in Terminal first, then click Sync Hermes test profile below.", "下一步：请先在终端创建 ~/.hermes/profiles/token-saver-test/config.yaml，再点击下方“同步 Hermes 测试配置”。")
-                : L("Next step: click Reapply compact rules below to create the managed rule file.", "下一步：请点击下方“重新应用精简规则”以创建托管规则文件。")
+            return L("Next step: click Reapply compact rules below to create the managed rule file.", "下一步：请点击下方“重新应用精简规则”以创建托管规则文件。")
         case .stale:
-            return saver.harness == .hermesTest
-                ? L("Next step: click Sync Hermes test profile below so the test workspace matches current switches.", "下一步：请点击下方“同步 Hermes 测试配置”以使测试工作区匹配当前开关。")
-                : L("Next step: click Reapply compact rules below to update the rule file.", "下一步：请点击下方“重新应用精简规则”以更新规则文件。")
+            return L("Next step: click Reapply compact rules below to update the rule file.", "下一步：请点击下方“重新应用精简规则”以更新规则文件。")
         case .unreadable:
             return L("Next step: resolve external edits, symlinks or corrupted JSON before reapplying.", "下一步：请先处理外部修改、符号链接或损坏的 JSON，然后再重新应用。")
         case .unsupported:
@@ -517,9 +522,6 @@ struct TokenSaverRuntimeSection: View {
             .accessibilityIdentifier("token-saver-harness")
             if let url = saver.harness.rulesURL(home: saver.home) {
                 Text(url.path).font(.caption2.monospaced()).textSelection(.enabled)
-            } else {
-                Text(L("Unsupported: CLIProxy connection does not load rules for this harness.", "不受支持：连接 CLIProxy 不会为此代理加载规则。"))
-                    .font(.caption).foregroundStyle(.orange)
             }
             Text(saver.localizedRTKStatus)
                 .font(.caption).accessibilityIdentifier("token-saver-setup-rtk")
@@ -568,11 +570,8 @@ struct TokenSaverRuntimeSection: View {
                 .accessibilityIdentifier("token-saver-setup-copy")
             }
             if saver.harness == .hermes {
-                Text(L("Global Hermes (~/.hermes/SOUL.md) is updated automatically when tools above change. Custom bot profiles in ~/.hermes/profiles/* (bot-huy, bot-vox, bot-script-doctor, etc.) are isolated and never modified.", "全局 Hermes（~/.hermes/SOUL.md）会在上方开关更改时自动更新。~/.hermes/profiles/* 中的自定义机器人配置（如 bot-huy、bot-vox、bot-script-doctor 等）完全隔离，绝不会被修改。"))
+                Text(L("Global Hermes (~/.hermes/SOUL.md) is updated automatically when tools above change. Custom profiles in ~/.hermes/profiles/* stay isolated and are never modified.", "全局 Hermes（~/.hermes/SOUL.md）会在上方开关更改时自动更新。~/.hermes/profiles/* 中的自定义配置完全隔离，绝不会被修改。"))
                     .font(.caption).foregroundStyle(.secondary)
-            } else if saver.harness == .hermesTest {
-                Text(L("CLI test profile only: this does NOT enable Token Saver on your default or bot Hermes profiles. Create/configure ~/.hermes/profiles/token-saver-test first, enable tools above, then click Sync Hermes test profile below.", "仅限 CLI 测试配置：此选项不会启用默认或机器人 Hermes 配置的 Token Saver。请先创建并配置 ~/.hermes/profiles/token-saver-test，在上方启用工具后点击下方“同步 Hermes 测试配置”。"))
-                    .font(.caption).foregroundStyle(.orange)
             }
             if let error = saver.localizedSetupError { Text(error).font(.caption).foregroundStyle(.orange) }
         }
@@ -631,7 +630,7 @@ final class TokenSaverSettingsController: ObservableObject {
             try TokenSaverSettingsStore.save(value, home: home)
             settings = value
             error = nil
-            notice = L("Agent settings saved (including ~/.hermes/SOUL.md; custom bot-* profiles stay isolated). Start a new coding session; sync Hermes test rules separately if needed.", "代理设置已保存（含 ~/.hermes/SOUL.md；自定义 bot-* 配置保持隔离）。请开始新的编程会话；如需使用 Hermes 测试配置请单独同步。")
+            notice = L("Agent settings saved (including ~/.hermes/SOUL.md; custom profiles in ~/.hermes/profiles/* stay isolated). Start a new coding session to reload instructions.", "代理设置已保存（含 ~/.hermes/SOUL.md；~/.hermes/profiles/* 中的自定义配置保持隔离）。请开始新的编程会话以重新加载指令。")
         } catch { self.error = error.localizedDescription }
     }
     func syncHermesTestProfile() {

@@ -77,15 +77,17 @@ private func fixtureRTK() -> TokenSaverReleaseRTK {
             TabView(selection: $tab) {
                 SubscriptionGatewaySettingsRuntimePane(runtime:runtime,draftSettings:$draft,onApply:{},tokenSaverHome:fixtureHome(),tokenSaverRTK:fixtureRTK())
                     .tabItem { Text("Runtime") }.tag(0)
+                SubscriptionGatewaySettingsTokenSaverPane(home:fixtureHome(),rtk:fixtureRTK())
+                    .tabItem { Text("Token Saver") }.tag(1)
                 ScrollView {
-                    if tab == 1 {
+                    if tab == 2 {
                         VStack(alignment: .leading, spacing: 20) {
                             FixtureCPAUpdatesSection()
-                            TokenSaverUpdatesSection(manager:releases, onOpenRuntime: { tab = 0 })
+                            TokenSaverUpdatesSection(manager:releases, onOpenRuntime: { tab = 1 })
                         }.padding(20)
                     }
                 }
-                    .tabItem { Text("Updates (offline fixtures)") }.tag(1)
+                    .tabItem { Text("Updates (offline fixtures)") }.tag(2)
             }
             .padding(20).frame(minWidth:760,minHeight:920)
             .onAppear { NSApp.activate(ignoringOtherApps:true) }

@@ -7,7 +7,7 @@ The current handoff (2026-10-29) explicitly excludes Headroom. This integration 
 Agent-side, coding-scoped rules. **No request middleware, listener, Python dependency, response postprocessing, CPA restart or change to `proxy-url`.** Consequently no mutation of Claude thinking signatures, OAuth credentials or provider egress/TLS.
 
 - Each tool is opt-in and off by default. Atomic settings at `~/Library/Application Support/AIUsage/token-saver-settings.json` (0600), protected by an in-process lock.
-- Coding-only isolation is mandatory. Managed agent instructions explicitly exclude RonC scripts, lyrics, creative writing, Zalo/customer-care responses and other non-coding tasks. These are instructions, not an infallible semantic classifier. No claims of guaranteed model compliance or measured savings.
+- Coding-only isolation is mandatory. Managed agent instructions explicitly exclude creative writing, scriptwriting, lyrics, customer-care chat and other non-coding tasks. These are instructions, not an infallible semantic classifier. No claims of guaranteed model compliance or measured savings.
 - RTK rules support Antigravity `run_command` (zsh), Claude Code, Codex and OpenCode. RTK must be on the agent's PATH. A reversible, explicit zsh wrapper under AIUsage/bin supports Antigravity run_command and other agents without changing global PATH. No shell aliases or hidden interception; unsupported commands fall back to originals.
 - Caveman Lite/Full/Ultra controls prose instructions only; exact code, paths, errors, security checks, the user's language and essential explanations remain intact.
 - Ponytail chooses reuse/stdlib/native features and minimal verified code, not speculative abstractions.

@@ -4,8 +4,7 @@ import SQLite3
 /// Read-only setup evidence. Never equates saved rules or global history with agent compliance.
 public enum TokenSaverOnboarding {
     public enum Harness: String, CaseIterable, Sendable {
-        case codex = "Codex", claude = "Claude Code", antigravity = "Antigravity", openCode = "OpenCode"
-        case hermes = "Hermes", hermesTest = "Hermes (test profile)", other = "Other / unsupported"
+        case codex = "Codex", claude = "Claude Code", antigravity = "Antigravity", openCode = "OpenCode", hermes = "Hermes"
         public func rulesURL(home: URL) -> URL? {
             switch self {
             case .codex: TokenSaverAgentRules.rulePaths(home: home)[2]
@@ -13,8 +12,6 @@ public enum TokenSaverOnboarding {
             case .antigravity: TokenSaverAgentRules.rulePaths(home: home)[0]
             case .openCode: TokenSaverAgentRules.rulePaths(home: home)[3]
             case .hermes: TokenSaverAgentRules.hermesGlobalRuleURL(home: home)
-            case .hermesTest: home.appendingPathComponent(".hermes/profiles/token-saver-test/workspace/HERMES.md")
-            case .other: nil
             }
         }
     }
@@ -34,7 +31,7 @@ public enum TokenSaverOnboarding {
         if let url = harness.rulesURL(home: home) {
             do {
                 let settings = try TokenSaverSettingsStore.load(home: home)
-                let expected = try (harness == .hermes || harness == .hermesTest)
+                let expected = try (harness == .hermes)
                     ? TokenSaverAgentRules.hermesBlock(settings, home: home)
                     : TokenSaverAgentRules.block(settings, home: home)
                 let data = try TokenSaverSettingsStore.contents(url)

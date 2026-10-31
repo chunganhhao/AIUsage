@@ -6,6 +6,7 @@ import QuotaBackend
 
 private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     case runtime
+    case tokenSaver
     case keys
     case updates
     case versions
@@ -16,6 +17,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .runtime: return L("Runtime", "运行")
+        case .tokenSaver: return L("Token Saver", "Token 节省")
         case .keys: return L("API Keys", "密钥")
         case .updates: return L("Updates", "更新")
         case .versions: return L("Versions", "版本")
@@ -26,6 +28,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .runtime: return "gearshape"
+        case .tokenSaver: return "bolt.fill"
         case .keys: return "key.fill"
         case .updates: return "arrow.down.circle"
         case .versions: return "shippingbox"
@@ -36,6 +39,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .runtime: return .gray
+        case .tokenSaver: return .purple
         case .keys: return .indigo
         case .updates: return .blue
         case .versions: return .orange
@@ -160,6 +164,16 @@ struct SubscriptionGatewaySettingsView: View {
             .padding(.horizontal, 22)
             .padding(.top, 18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        case .tokenSaver:
+            ScrollView {
+                VStack(alignment: .leading, spacing: 16) {
+                    errorBanners
+                    SubscriptionGatewaySettingsTokenSaverPane()
+                }
+                .padding(22)
+                .frame(maxWidth: 760, alignment: .leading)
+                .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
         case .keys:
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
@@ -177,7 +191,7 @@ struct SubscriptionGatewaySettingsView: View {
                     switch selectedCategory {
                     case .updates:
                         updatesSection
-                        TokenSaverUpdatesSection(manager: tokenSaverReleases, onOpenRuntime: { selectedCategory = .runtime })
+                        TokenSaverUpdatesSection(manager: tokenSaverReleases, onOpenRuntime: { selectedCategory = .tokenSaver })
                     case .versions: versionsSection
                     case .diagnostics: diagnosticsSection
                     default: EmptyView()
@@ -461,13 +475,13 @@ struct TokenSaverUpdatesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L("Token Saver updates", "Token Saver 更新")).font(.title3.weight(.semibold))
-            Label(L("1. Install RTK (Homebrew) → 2. Enable tools in Runtime → 3. Optional: check updates", "1. 安装 RTK (Homebrew) → 2. 在运行页启用工具 → 3. 可选：检查更新"), systemImage: "list.number")
+            Label(L("1. Install RTK (Homebrew) → 2. Enable tools in Token Saver → 3. Optional: check updates", "1. 安装 RTK (Homebrew) → 2. 在 Token 节省页启用工具 → 3. 可选：检查更新"), systemImage: "list.number")
                 .font(.subheadline.weight(.medium))
-            Text(L("Caveman and Ponytail already work immediately in Runtime using built-in compact rules — downloading here is optional and only saves pinned upstream reference docs (never injected into prompts). RTK requires installing the binary via Homebrew. Reload a new coding session after changes; sync Hermes test rules separately. No downloaded scripts are executed.",
-                   "Caveman 和 Ponytail 在运行页使用内置精简规则即可立即生效——此处下载为可选项，仅保存固定提交的上游参考文档（绝不注入提示词）。RTK 需通过 Homebrew 安装二进制文件。更改后请开始新会话；Hermes 测试规则须单独同步。不会执行下载的脚本。"))
+            Text(L("Caveman and Ponytail already work immediately in Token Saver using built-in compact rules — downloading here is optional and only saves pinned upstream reference docs (never injected into prompts). RTK requires installing the binary via Homebrew. Reload a new coding session after changes. No downloaded scripts are executed.",
+                   "Caveman 和 Ponytail 在 Token 节省页使用内置精简规则即可立即生效——此处下载为可选项，仅保存固定提交的上游参考文档（绝不注入提示词）。RTK 需通过 Homebrew 安装二进制文件。更改后请开始新的编程会话。不会执行下载的脚本。"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button(action: onOpenRuntime) {
-                Label(L("Open Runtime to enable tools", "打开运行页以启用工具"), systemImage: "switch.2")
+                Label(L("Open Token Saver to enable tools", "打开 Token 节省页以启用工具"), systemImage: "bolt.fill")
             }.accessibilityIdentifier("token-saver-open-runtime")
             TimelineView(.periodic(from: .now, by: 1)) { context in
                 let coolingDown = manager.retryAfter.map { $0 > context.date } ?? false
@@ -579,9 +593,9 @@ struct TokenSaverUpdatesSection: View {
         if tool == .rtk && status.binaryInspected && status.installedBinaryVersion == nil { return L("Update unavailable: install RTK with Homebrew first, then Check versions. Other installations are not managed here.", "暂不能更新：先通过 Homebrew 安装 RTK，再检查版本。此处不管理其他安装方式。") }
         if coolingDown { return L("GitHub checks and rule downloads are paused until the local time shown above.", "GitHub 检查和规则下载已暂停至上方显示的本地时间。") }
         if status.latest == nil { return L("Start with Check versions to unlock downloads. This does not enable the tool.", "先检查版本以解锁下载。此操作不会启用工具。") }
-        if tool == .rtk { return L("Update RTK runs brew upgrade rtk after confirmation. Homebrew may lag behind GitHub. Then enable RTK in Runtime and start a new coding session.", "确认后通过 brew upgrade rtk 更新。Homebrew 版本可能落后于 GitHub。之后在运行页启用 RTK 并开始新的编程会话。") }
-        if status.isCurrent && status.error == nil { return L("Latest checked reference saved. Compact built-in policy is separate; enable it in Runtime and start a new coding session. No further download needed.", "已保存最新检查的参考文档。精简内置策略单独生效；请在运行页启用并开始新会话，无需再次下载。") }
-        return L("Download reference asks for confirmation; it does not inject full upstream text. Compact built-in policies work without downloads. Enable tools in Runtime and start a new coding session.", "下载参考文档需要确认，不会注入完整上游文本。精简内置策略无需下载即可使用。请在运行页启用工具并开始新会话。")
+        if tool == .rtk { return L("Update RTK runs brew upgrade rtk after confirmation. Homebrew may lag behind GitHub. Then enable RTK in Token Saver and start a new coding session.", "确认后通过 brew upgrade rtk 更新。Homebrew 版本可能落后于 GitHub。之后在 Token 节省页启用 RTK 并开始新的编程会话。") }
+        if status.isCurrent && status.error == nil { return L("Latest checked reference saved. Compact built-in policy is separate; enable it in Token Saver and start a new coding session. No further download needed.", "已保存最新检查的参考文档。精简内置策略单独生效；请在 Token 节省页启用并开始新会话，无需再次下载。") }
+        return L("Download reference asks for confirmation; it does not inject full upstream text. Compact built-in policies work without downloads. Enable tools in Token Saver and start a new coding session.", "下载参考文档需要确认，不会注入完整上游文本。精简内置策略无需下载即可使用。请在 Token 节省页启用工具并开始新会话。")
     }
 
     private var rtkSetup: some View {
@@ -594,7 +608,7 @@ struct TokenSaverUpdatesSection: View {
             Text("brew install rtk").font(.body.monospaced()).textSelection(.enabled)
                 .padding(10).frame(maxWidth: .infinity, alignment: .leading)
                 .background(.quaternary, in: RoundedRectangle(cornerRadius: 6))
-            Text(L("3. Verify rtk --version in your coding agent’s terminal. Return here and Check versions to detect the Homebrew installation. Enable Compress tool output (RTK) in Runtime, then start a new coding session.", "3. 在编程代理的终端验证 rtk --version。返回此处检查版本以识别 Homebrew 安装。在运行页启用 RTK 压缩工具输出，然后开始新的编程会话。"))
+            Text(L("3. Verify rtk --version in your coding agent’s terminal. Return here and Check versions to detect the Homebrew installation. Enable Compress tool output (RTK) in Token Saver, then start a new coding session.", "3. 在编程代理的终端验证 rtk --version。返回此处检查版本以识别 Homebrew 安装。在 Token 节省页启用 RTK 压缩工具输出，然后开始新的编程会话。"))
                 .fixedSize(horizontal: false, vertical: true)
             Text(L("Already installed another way? Keep that setup and update it externally. AIUsage only manages upgrades for the Homebrew rtk package; it does not install hooks or change your PATH.", "已通过其他方式安装？可保留现有设置并自行更新。AIUsage 仅管理 Homebrew rtk 软件包的更新，不会安装钩子或修改 PATH。"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)

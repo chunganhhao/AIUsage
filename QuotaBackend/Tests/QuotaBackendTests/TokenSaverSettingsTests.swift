@@ -29,8 +29,8 @@ final class TokenSaverSettingsTests: XCTestCase {
         for url in TokenSaverAgentRules.rulePaths(home: home) {
             let text = try String(contentsOf: url, encoding: .utf8)
             XCTAssertTrue(text.contains("run_command"))
-            XCTAssertTrue(text.contains("RonC"))
-            XCTAssertTrue(text.contains("Zalo"))
+            XCTAssertTrue(text.contains("creative writing"))
+            XCTAssertTrue(text.contains("customer-care"))
         }
         XCTAssertEqual((try FileManager.default.attributesOfItem(atPath: TokenSaverSettingsStore.settingsURL(home: home).path)[.posixPermissions] as? NSNumber)?.intValue, 0o600)
         value.rtkEnabled = false
@@ -79,7 +79,7 @@ final class TokenSaverSettingsTests: XCTestCase {
                 let rule = try String(contentsOf: path, encoding: .utf8)
                 XCTAssertTrue(rule.contains("Caveman active mode: " + mode.rawValue))
                 XCTAssertTrue(rule.contains("Ponytail"))
-                XCTAssertTrue(rule.contains("Zalo"))
+                XCTAssertTrue(rule.contains("customer-care"))
                 XCTAssertFalse(rule.contains("rtk git"))
             }
         }
@@ -247,7 +247,7 @@ final class TokenSaverSettingsTests: XCTestCase {
         XCTAssertTrue(text.contains("Exact bytes, editing context or sed line ranges: keep raw cat/sed"))
         XCTAssertTrue(text.contains("Never replace cat redirects/heredocs/file writes"))
         XCTAssertTrue(text.contains("terminal(command=...)"))
-        XCTAssertTrue(text.contains("including Zalo Dashboard code"))
+        XCTAssertTrue(text.contains("coding tasks only"))
         XCTAssertTrue(text.utf8.count < 3400)
         XCTAssertEqual(text.components(separatedBy: TokenSaverAgentRules.begin).count, 2)
         XCTAssertEqual(try Data(contentsOf: target), try Data(contentsOf: owned))
@@ -301,10 +301,7 @@ final class TokenSaverSettingsTests: XCTestCase {
             XCTAssertFalse(nonRTKSnapshot.agentCommands?.contains("token-saver-rtk") == true)
         }
         try TokenSaverSettingsStore.save(settings, home: home)
-        let hermesTestMissing = TokenSaverOnboarding.inspect(home: home, harness: .hermesTest)
-        XCTAssertEqual(hermesTestMissing.rules, .missing)
-        XCTAssertEqual(hermesTestMissing.agentCommands, nil)
-        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .other).rules, .unsupported)
+        XCTAssertEqual(TokenSaverOnboarding.Harness.allCases, [.codex, .claude, .antigravity, .openCode, .hermes])
         let codex = TokenSaverOnboarding.Harness.codex.rulesURL(home: home)!
         let edited = Data("unrelated instructions".utf8)
         try TokenSaverSettingsStore.replace(codex, data: edited)
