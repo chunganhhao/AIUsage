@@ -138,4 +138,3 @@ final class TokenSaverReleaseManager: ObservableObject {
         } catch { record(error, for: tool) }
     }
 }
-

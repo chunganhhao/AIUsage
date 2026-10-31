@@ -503,18 +503,6 @@ struct TokenSaverRuntimeSection: View {
                 Divider()
                 row(L("Lazy senior dev (Ponytail)", "极简资深开发 (Ponytail)"), detail: L("Built-in coding-only YAGNI, reuse, stdlib-first and minimal verified code (works immediately without downloading references).", "内置仅限编程的 YAGNI、优先复用、标准库优先及最少验证代码规则（无需下载参考文档即可直接生效）。"), key: \.ponytailEnabled, id: "token-saver-ponytail")
                 Divider()
-                HStack {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(L("Apply to Coding Agents only", "仅应用于编程代理")).font(.subheadline.weight(.medium))
-                        Text(L("Always on. Agent rules apply only to coding tasks; creative writing, scriptwriting, lyrics and customer-care chat are excluded. CPA traffic is never modified.", "始终开启。代理规则仅适用于编程任务；排除创意写作、剧本、歌词及客服聊天，绝不修改 CPA 流量。"))
-                            .font(.caption).foregroundStyle(.secondary)
-                    }
-                    Spacer(minLength: 12)
-                    Toggle(L("Apply to Coding Agents only", "仅应用于编程代理"), isOn: .constant(true))
-                        .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .indigo)).controlSize(.small).tint(.indigo).disabled(true)
-                        .accessibilityIdentifier("token-saver-coding-only")
-                }.padding(14)
-                Divider()
                 onboardingChecklist.padding(14)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
