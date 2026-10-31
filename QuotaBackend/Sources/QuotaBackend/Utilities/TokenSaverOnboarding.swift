@@ -22,7 +22,12 @@ public enum TokenSaverOnboarding {
         public let historyRecords: Int64?
         public let agentCommands: String?
     }
-    public static func inspect(home: URL, harness: Harness) -> Snapshot {
+    public static func inspect(
+        home: URL,
+        harness: Harness,
+        includeHistory: Bool = true,
+        cachedHistoryRecords: Int64? = nil
+    ) -> Snapshot {
         let wrapper = home.appendingPathComponent("Library/Application Support/AIUsage/bin/token-saver-rtk")
         let ready = (try? TokenSaverSettingsStore.contents(wrapper)) == Data(TokenSaverAgentRules.rtkWrapper.utf8)
             && FileManager.default.isExecutableFile(atPath: wrapper.path)
@@ -58,7 +63,8 @@ public enum TokenSaverOnboarding {
                 }
             } catch { state = .unreadable }
         }
-        return Snapshot(rules: state, wrapperReady: ready, historyRecords: historyCount(home: home), agentCommands: commands)
+        let history = includeHistory ? historyCount(home: home) : cachedHistoryRecords
+        return Snapshot(rules: state, wrapperReady: ready, historyRecords: history, agentCommands: commands)
     }
     /// Only the default macOS RTK history. Missing/custom/unknown schemas stay unknown, never zero.
     private static func historyCount(home: URL) -> Int64? {

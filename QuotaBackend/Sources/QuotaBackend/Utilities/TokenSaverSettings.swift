@@ -10,6 +10,10 @@ public struct TokenSaverSettings: Codable, Equatable, Sendable {
     public let codingOnlyScope = true
     public init() {}
 
+    public var enabledToolCount: Int {
+        (rtkEnabled ? 1 : 0) + (cavemanEnabled ? 1 : 0) + (ponytailEnabled ? 1 : 0)
+    }
+
     enum CodingKeys: String, CodingKey {
         case rtkEnabled, cavemanEnabled, cavemanMode, ponytailEnabled, codingOnlyScope
     }
@@ -23,8 +27,20 @@ public struct TokenSaverSettings: Codable, Equatable, Sendable {
     }
 }
 
+public extension Notification.Name {
+    static let tokenSaverSettingsDidChange = Notification.Name("AIUsage.tokenSaverSettingsDidChange")
+}
+
 public enum TokenSaverSettingsStore {
     private static let lock = NSRecursiveLock()
+    public static func canonicalHomePath(_ home: URL) -> String {
+        home.standardizedFileURL.resolvingSymlinksInPath().path
+    }
+    private static func notificationUserInfo(home: URL, origin: UUID?) -> [AnyHashable: Any] {
+        var info: [AnyHashable: Any] = ["home": canonicalHomePath(home)]
+        if let origin { info["origin"] = origin.uuidString }
+        return info
+    }
     public static func settingsURL(home: URL = FileManager.default.homeDirectoryForCurrentUser) -> URL {
         home.appendingPathComponent("Library/Application Support/AIUsage/token-saver-settings.json")
     }
@@ -34,8 +50,43 @@ public enum TokenSaverSettingsStore {
         guard let data = try contents(url) else { return .init() }
         return try JSONDecoder().decode(TokenSaverSettings.self, from: data)
     }
-    public static func save(_ settings: TokenSaverSettings, home: URL = FileManager.default.homeDirectoryForCurrentUser) throws {
-        lock.lock(); defer { lock.unlock() }
+    public static func save(
+        _ settings: TokenSaverSettings,
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        origin: UUID? = nil
+    ) throws {
+        do {
+            lock.lock(); defer { lock.unlock() }
+            try saveLocked(settings, home: home)
+        }
+        NotificationCenter.default.post(
+            name: .tokenSaverSettingsDidChange,
+            object: nil,
+            userInfo: notificationUserInfo(home: home, origin: origin)
+        )
+    }
+    @discardableResult
+    public static func update(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        origin: UUID? = nil,
+        _ transform: (inout TokenSaverSettings) throws -> Void
+    ) throws -> TokenSaverSettings {
+        let updated: TokenSaverSettings
+        do {
+            lock.lock(); defer { lock.unlock() }
+            var current = try load(home: home)
+            try transform(&current)
+            try saveLocked(current, home: home)
+            updated = current
+        }
+        NotificationCenter.default.post(
+            name: .tokenSaverSettingsDidChange,
+            object: nil,
+            userInfo: notificationUserInfo(home: home, origin: origin)
+        )
+        return updated
+    }
+    private static func saveLocked(_ settings: TokenSaverSettings, home: URL) throws {
         let previous = try load(home: home)
         let url = settingsURL(home: home)
         try rejectSymlinks(url)
@@ -225,8 +276,7 @@ public enum TokenSaverAgentRules {
             if let home, let staged = try TokenSaverReleaseStore(root: home.appendingPathComponent("Library/Application Support/AIUsage/Rules")).staged(tool),
                let text = String(data: staged.markdown, encoding: .utf8) {
                 guard !text.contains(begin), !text.contains(end) else { throw TokenSaverSettingsStore.Failure.changed }
-                // Full upstream skills add thousands of prompt tokens; keep verified provenance, not their prose.
-                sections.append("\(tool.title) reference commit: \(staged.commit). Upstream text is stored separately, not injected.")
+                // Full upstream skills and reference commit SHAs stay in local receipts, never injected into prompts.
             }
             if tool == .caveman {
                 let mode: String

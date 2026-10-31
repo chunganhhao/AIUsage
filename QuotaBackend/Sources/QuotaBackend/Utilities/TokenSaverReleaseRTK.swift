@@ -76,7 +76,33 @@ public struct TokenSaverReleaseRTK: Sendable {
     public static func run(_ url: URL, arguments: [String]) async throws -> Output {
         guard paths.contains(url.path), trustedBrewURL()?.path == url.path,
               arguments == ["list", "--versions", "rtk"] || arguments == ["upgrade", "rtk"] else { throw Failure.unavailable }
-        return try await Task.detached {
+        return try await runValidatedProcess(url, arguments: arguments)
+    }
+
+    private static func stopProcessBounded(_ process: Process) async {
+        await Task.detached {
+            guard process.isRunning else { return }
+            let pid = process.processIdentifier
+            process.terminate()
+            for _ in 0..<8 {
+                if !process.isRunning { break }
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            if process.isRunning, pid > 0 {
+                _ = kill(pid, SIGKILL)
+                for _ in 0..<8 {
+                    if !process.isRunning { break }
+                    try? await Task.sleep(nanoseconds: 25_000_000)
+                }
+            }
+            if !process.isRunning {
+                process.waitUntilExit()
+            }
+        }.value
+    }
+
+    internal static func runValidatedProcess(_ url: URL, arguments: [String]) async throws -> Output {
+        let worker = Task.detached { () throws -> Output in
             let process = Process()
             let pipe = Pipe()
             process.executableURL = url
@@ -89,7 +115,7 @@ public struct TokenSaverReleaseRTK: Sendable {
             defer { try? pipe.fileHandleForReading.close() }
             let handle = pipe.fileHandleForReading.fileDescriptor
             guard fcntl(handle, F_SETFL, O_NONBLOCK) != -1 else {
-                process.terminate()
+                await stopProcessBounded(process)
                 throw Failure.limit
             }
             let deadline = Date().addingTimeInterval(180)
@@ -97,30 +123,35 @@ public struct TokenSaverReleaseRTK: Sendable {
             var buffer = [UInt8](repeating: 0, count: 4096)
             while true {
                 if Date() >= deadline || Task.isCancelled {
-                    if process.isRunning { process.terminate() }
+                    await stopProcessBounded(process)
                     throw Failure.limit
                 }
                 let count = Darwin.read(handle, &buffer, buffer.count)
                 if count > 0 {
                     guard data.count + count <= 128 * 1024 else {
-                        if process.isRunning { process.terminate() }
+                        await stopProcessBounded(process)
                         throw Failure.limit
                     }
                     data.append(contentsOf: buffer.prefix(count))
                 } else if count == 0 {
                     // A child may close its output before exiting; retain the deadline.
                     if !process.isRunning { break }
-                    Thread.sleep(forTimeInterval: 0.05)
+                    try? await Task.sleep(nanoseconds: 50_000_000)
                 } else if errno == EAGAIN || errno == EINTR {
-                    Thread.sleep(forTimeInterval: 0.05)
+                    try? await Task.sleep(nanoseconds: 50_000_000)
                 } else {
-                    if process.isRunning { process.terminate() }
+                    await stopProcessBounded(process)
                     throw Failure.limit
                 }
             }
             process.waitUntilExit()
             if process.terminationReason == .uncaughtSignal { throw Failure.limit }
             return Output(status: process.terminationStatus, text: String(decoding: data, as: UTF8.self))
-        }.value
+        }
+        return try await withTaskCancellationHandler {
+            try await worker.value
+        } onCancel: {
+            worker.cancel()
+        }
     }
 }

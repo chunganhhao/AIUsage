@@ -131,8 +131,8 @@ final class TokenSaverSettingsTests: XCTestCase {
             let block = try String(contentsOf: TokenSaverAgentRules.rulePaths(home: home)[2], encoding: .utf8)
             XCTAssertTrue(block.utf8.count < 2400)
             XCTAssertFalse(block.contains("VERBOSE_UPSTREAM_DO_NOT_INLINE"))
-            XCTAssertTrue(block.contains(commit))
-            XCTAssertTrue(block.contains("not injected"))
+            XCTAssertFalse(block.contains(commit))
+            XCTAssertFalse(block.contains("reference commit:"))
             XCTAssertTrue(block.contains("signed history"))
             XCTAssertTrue(block.contains("accessibility"))
             XCTAssertTrue(block.contains("diagnostics"))
@@ -386,5 +386,63 @@ final class TokenSaverSettingsTests: XCTestCase {
             XCTAssertThrowsError(try TokenSaverSettingsStore.exportHermesTestProfile(home: home))
             XCTAssertEqual(try Data(contentsOf: target), corrupt)
         }
+    }
+    func testEnabledToolCountAndNotificationContract() throws {
+        let home = try temporaryHome()
+        let otherHome = try temporaryHome()
+        var s = TokenSaverSettings()
+        XCTAssertEqual(s.enabledToolCount, 0)
+        s.rtkEnabled = true
+        XCTAssertEqual(s.enabledToolCount, 1)
+        s.cavemanEnabled = true
+        XCTAssertEqual(s.enabledToolCount, 2)
+        s.ponytailEnabled = true
+        XCTAssertEqual(s.enabledToolCount, 3)
+
+        var receivedHomes: [String] = []
+        var receivedOrigins: [String?] = []
+        let token = NotificationCenter.default.addObserver(
+            forName: .tokenSaverSettingsDidChange,
+            object: nil,
+            queue: nil
+        ) { note in
+            if let h = note.userInfo?["home"] as? String {
+                receivedHomes.append(h)
+                receivedOrigins.append(note.userInfo?["origin"] as? String)
+            }
+        }
+        addTeardownBlock { NotificationCenter.default.removeObserver(token) }
+
+        let originA = UUID()
+        let updated1 = try TokenSaverSettingsStore.update(home: home, origin: originA) { $0.rtkEnabled = true }
+        XCTAssertTrue(updated1.rtkEnabled)
+        XCTAssertFalse(updated1.ponytailEnabled)
+        XCTAssertEqual(receivedHomes, [TokenSaverSettingsStore.canonicalHomePath(home)])
+        XCTAssertEqual(receivedOrigins, [originA.uuidString])
+
+        let originB = UUID()
+        let updated2 = try TokenSaverSettingsStore.update(home: home, origin: originB) { $0.ponytailEnabled = true }
+        XCTAssertTrue(updated2.rtkEnabled)
+        XCTAssertTrue(updated2.ponytailEnabled)
+        XCTAssertEqual(receivedHomes.count, 2)
+        XCTAssertEqual(receivedOrigins.last ?? nil, originB.uuidString)
+
+        // Failed save must emit zero notifications and keep otherHome untouched.
+        let settingsFile = TokenSaverSettingsStore.settingsURL(home: otherHome)
+        try TokenSaverSettingsStore.replace(settingsFile, data: Data("corrupt".utf8))
+        let countBeforeFailure = receivedHomes.count
+        XCTAssertThrowsError(try TokenSaverSettingsStore.save(s, home: otherHome))
+        XCTAssertThrowsError(try TokenSaverSettingsStore.update(home: otherHome) { $0.rtkEnabled = true })
+        XCTAssertEqual(receivedHomes.count, countBeforeFailure)
+
+        // Rules-only inspection reuses cached history count when includeHistory is false.
+        let snapCached = TokenSaverOnboarding.inspect(
+            home: home,
+            harness: .codex,
+            includeHistory: false,
+            cachedHistoryRecords: 42
+        )
+        XCTAssertEqual(snapCached.rules, .current)
+        XCTAssertEqual(snapCached.historyRecords, 42)
     }
 }

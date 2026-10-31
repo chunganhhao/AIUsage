@@ -475,10 +475,10 @@ struct TokenSaverUpdatesSection: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(L("Token Saver updates", "Token Saver 更新")).font(.title3.weight(.semibold))
-            Label(L("1. Install RTK (Homebrew) → 2. Enable tools in Token Saver → 3. Optional: check updates", "1. 安装 RTK (Homebrew) → 2. 在 Token 节省页启用工具 → 3. 可选：检查更新"), systemImage: "list.number")
+            Label(L("1. Install RTK (Homebrew) → 2. Enable tools in Token Saver → 3. Optional: check RTK updates", "1. 安装 RTK (Homebrew) → 2. 在 Token 节省页启用工具 → 3. 可选：检查 RTK 更新"), systemImage: "list.number")
                 .font(.subheadline.weight(.medium))
-            Text(L("Caveman and Ponytail already work immediately in Token Saver using built-in compact rules — downloading here is optional and only saves pinned upstream reference docs (never injected into prompts). RTK requires installing the binary via Homebrew. Reload a new coding session after changes. No downloaded scripts are executed.",
-                   "Caveman 和 Ponytail 在 Token 节省页使用内置精简规则即可立即生效——此处下载为可选项，仅保存固定提交的上游参考文档（绝不注入提示词）。RTK 需通过 Homebrew 安装二进制文件。更改后请开始新的编程会话。不会执行下载的脚本。"))
+            Text(L("Caveman and Ponytail use built-in compact rules directly in AIUsage — no reference downloads or updates are needed. RTK requires installing the binary via Homebrew. Reload a new coding session after changes. No downloaded scripts are executed.",
+                   "Caveman 和 Ponytail 直接使用 AIUsage 内置精简规则——无需下载或更新参考文档。RTK 需通过 Homebrew 安装二进制文件。更改后请开启新的编程会话。不会执行下载的脚本。"))
                 .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             Button(action: onOpenRuntime) {
                 Label(L("Open Token Saver to enable tools", "打开 Token 节省页以启用工具"), systemImage: "bolt.fill")
@@ -490,8 +490,8 @@ struct TokenSaverUpdatesSection: View {
                         Label {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(L("GitHub checks paused", "GitHub 检查已暂停")).fontWeight(.semibold)
-                                Text(L("Try again after \(retry.formatted(date: .abbreviated, time: .standard)) (local time). Checks and rule downloads resume then; nothing retries automatically. This shared GitHub API limit is not your AI quota.",
-                                       "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查和下载规则，不会自动重试。此共享 GitHub API 限制不是 AI 配额。"))
+                                Text(L("Try again after \(retry.formatted(date: .abbreviated, time: .standard)) (local time). Checks resume then; nothing retries automatically. This shared GitHub API limit is not your AI quota.",
+                                       "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查，不会自动重试。此共享 GitHub API 限制不是 AI 配额。"))
                             }
                         } icon: { Image(systemName: "clock.badge.exclamationmark") }
                         .font(.caption).padding(12)
@@ -506,26 +506,16 @@ struct TokenSaverUpdatesSection: View {
             }
         }
         .sheet(isPresented: $showRTKSetup) { rtkSetup }
-        .alert(pendingInstall == .rtk ? L("Upgrade RTK with Homebrew?", "通过 Homebrew 更新 RTK？") : L("Save upstream reference?", "保存上游参考文档？"), isPresented: Binding(
-            get: { pendingInstall != nil }, set: { if !$0 { pendingInstall = nil } }
+        .alert(L("Upgrade RTK with Homebrew?", "通过 Homebrew 更新 RTK？"), isPresented: Binding(
+            get: { pendingInstall == .rtk }, set: { if !$0 { pendingInstall = nil } }
         )) {
-            if let tool = pendingInstall {
-                Button(tool == .rtk ? L("Run brew upgrade rtk", "运行 brew upgrade rtk") : L("Save & Reapply", "保存并重新应用")) {
-                    pendingInstall = nil
-                    Task {
-                        if tool == .rtk { await manager.updateRTK() }
-                        else { await manager.stage(tool) }
-                    }
-                }
+            Button(L("Run brew upgrade rtk", "运行 brew upgrade rtk")) {
+                pendingInstall = nil
+                Task { await manager.updateRTK() }
             }
             Button(L("Cancel", "取消"), role: .cancel) { pendingInstall = nil }
         } message: {
-            if pendingInstall == .rtk {
-                Text(L("Runs only brew upgrade rtk using trusted Homebrew. RTK must already be installed. Homebrew may update RTK and required dependencies outside AIUsage storage. No brew install or downloaded shell installer is run.", "仅通过可信 Homebrew 运行 brew upgrade rtk。RTK 必须已安装。Homebrew 可能在 AIUsage 存储之外更新 RTK 及必要依赖；不会运行 brew install 或下载的 Shell 安装器。"))
-            } else {
-            Text(L("Downloads pinned upstream SKILL.md as reference only. Git blob integrity is checked, not publisher authenticity. Enabled tools keep compact built-in policies with commit provenance; full upstream prose is not injected. Reload a new coding session; no scripts are executed.",
-                   "下载固定提交的 SKILL.md 仅供参考。校验 Git 内容完整性，非发布者身份认证。已启用工具保留精简内置策略及提交来源，不注入完整上游文本。需开始新会话；不会执行脚本。"))
-            }
+            Text(L("Runs only brew upgrade rtk using trusted Homebrew. RTK must already be installed. Homebrew may update RTK and required dependencies outside AIUsage storage. No brew install or downloaded shell installer is run.", "仅通过可信 Homebrew 运行 brew upgrade rtk。RTK 必须已安装。Homebrew 可能在 AIUsage 存储之外更新 RTK 及必要依赖；不会运行 brew install 或下载的 Shell 安装器。"))
         }
     }
 
@@ -540,39 +530,43 @@ struct TokenSaverUpdatesSection: View {
                 }
                 Text(toolSummary(tool)).font(.caption).foregroundStyle(.secondary)
                     .fixedSize(horizontal: false, vertical: true)
-                HStack(alignment: .top, spacing: 16) {
-                    versionLabel(tool.skillPath != nil ? L("Saved reference · not active policy", "已保存参考文档 · 非生效策略") : L("Installed version", "已安装版本"),
-                                 status.staged?.version ?? (tool.skillPath != nil ? L("Built-in rules only", "仅内置规则") : (status.installedBinaryVersion ?? (status.binaryInspected ? L("Not installed in Homebrew", "Homebrew 未安装") : L("Unknown · not inspected", "未知 · 未检测")))))
-                    versionLabel(L("Latest (GitHub)", "最新（GitHub）"), status.latest?.version ?? L("Not checked", "未检查"))
-                }
-                if let staged = status.staged {
-                    Text("\(L("Staged commit", "暂存提交")): \(staged.commit.prefix(12))").font(.caption2).foregroundStyle(.secondary)
-                }
-                if let notice = status.notice {
-                    Text(notice).font(.caption).foregroundStyle(.secondary)
-                }
-                if let error = status.error, !coolingDown {
-                    Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier("token-saver-\(tool.rawValue)-error")
-                }
-                Label(actionHint(tool, status: status, coolingDown: coolingDown), systemImage: "info.circle")
-                    .font(.caption).foregroundStyle(.secondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .accessibilityIdentifier("token-saver-\(tool.rawValue)-guidance")
-                HStack {
-                    if status.isBusy { ProgressView().controlSize(.small) }
-                    if let checked = status.checkedAt {
-                        Text(checked.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+                if tool == .rtk {
+                    HStack(alignment: .top, spacing: 16) {
+                        versionLabel(L("Installed version", "已安装版本"),
+                                     status.installedBinaryVersion ?? (status.binaryInspected ? L("Not installed in Homebrew", "Homebrew 未安装") : L("Unknown · not inspected", "未知 · 未检测")))
+                        versionLabel(L("Latest (GitHub)", "最新（GitHub）"), status.latest?.version ?? L("Not checked", "未检查"))
                     }
-                    Spacer()
-                    if tool == .rtk {
+                    if let notice = status.notice {
+                        Text(notice).font(.caption).foregroundStyle(.secondary)
+                    }
+                    if let error = status.error, !coolingDown {
+                        Text(error).font(.caption).foregroundStyle(.red).accessibilityIdentifier("token-saver-\(tool.rawValue)-error")
+                    }
+                    Label(actionHint(tool, status: status, coolingDown: coolingDown), systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("token-saver-\(tool.rawValue)-guidance")
+                    HStack {
+                        if status.isBusy { ProgressView().controlSize(.small) }
+                        if let checked = status.checkedAt {
+                            Text(checked.formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        Spacer()
                         Button(L("How to install…", "如何安装…")) { showRTKSetup = true }
                             .accessibilityIdentifier("token-saver-rtk-setup")
+                        Button(status.isBusy ? L("Working…", "处理中…") : L("Check versions", "检查版本")) { Task { await manager.check(tool) } }
+                            .disabled(status.isBusy || coolingDown).help(L("Look up GitHub versions; RTK also reads its Homebrew version. Nothing is installed.", "查询 GitHub 版本；RTK 同时读取 Homebrew 版本。不会安装任何内容。")).accessibilityIdentifier("token-saver-\(tool.rawValue)-check")
+                        Button(L("Update RTK", "更新 RTK")) { pendingInstall = tool }
+                            .disabled(status.isBusy || status.latest == nil || !status.brewAvailable || status.installedBinaryVersion == nil)
+                            .accessibilityIdentifier("token-saver-\(tool.rawValue)-update")
                     }
-                    Button(status.isBusy ? L("Working…", "处理中…") : L("Check versions", "检查版本")) { Task { await manager.check(tool) } }
-                        .disabled(status.isBusy || coolingDown).help(L("Look up GitHub versions; RTK also reads its Homebrew version. Nothing is installed.", "查询 GitHub 版本；RTK 同时读取 Homebrew 版本。不会安装任何内容。")).accessibilityIdentifier("token-saver-\(tool.rawValue)-check")
-                    Button(tool.skillPath == nil ? L("Update RTK", "更新 RTK") : (status.staged == nil ? L("Download reference", "下载参考文档") : L("Update reference", "更新参考文档"))) { pendingInstall = tool }
-                        .disabled(status.isBusy || (tool != .rtk && coolingDown) || status.latest == nil || (tool == .rtk ? (!status.brewAvailable || status.installedBinaryVersion == nil) : (status.isCurrent && status.error == nil)))
-                        .accessibilityIdentifier("token-saver-\(tool.rawValue)-update")
+                } else {
+                    versionLabel(L("Policy source", "策略来源"),
+                                 L("Built-in compact rules · Enable in Token Saver", "内置精简规则 · 在 Token 节省页启用"))
+                    Label(L("Included directly in AIUsage. No reference download is needed — enable in Token Saver and start a new coding session.", "已直接内置于 AIUsage，无需下载参考文档——在 Token 节省页启用并开启新的编程会话即可。"), systemImage: "info.circle")
+                        .font(.caption).foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .accessibilityIdentifier("token-saver-\(tool.rawValue)-guidance")
                 }
             }
         }

@@ -40,7 +40,8 @@ do { let test = TokenSaverReleaseTests(); try await test.testRTKMissingInstallat
 do { let test = TokenSaverReleaseTests(); try await test.testRTKRejectsUnknownBrewAndMalformedVersion(); try test.tearDown(); print("PASS testRTKRejectsUnknownBrewAndMalformedVersion") }
 do { let test = TokenSaverReleaseTests(); try await test.testRTKFailureDoesNotClaimUpgradeSuccess(); try test.tearDown(); print("PASS testRTKFailureDoesNotClaimUpgradeSuccess") }
 do { let test = TokenSaverReleaseTests(); try await test.testConditionalETagReusesCachedReleaseOn304AndPersistsSafely(); try test.tearDown(); print("PASS testConditionalETagReusesCachedReleaseOn304AndPersistsSafely") }
-print("Release offline regression: 20 passed")
+do { let test = TokenSaverReleaseTests(); try await test.testValidatedProcessCancellationTerminatesChildWhilePublicRunStaysRestricted(); try test.tearDown(); print("PASS testValidatedProcessCancellationTerminatesChildWhilePublicRunStaysRestricted") }
+print("Release offline regression: 21 passed")
 try await runManagerChecks()
 }
 }

@@ -165,18 +165,20 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     private var poolProtectionSection: some View {
         GatewayCard {
             VStack(alignment: .leading, spacing: 8) {
-                HStack {
+                HStack(spacing: 8) {
                     Text(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
                         .font(.subheadline.weight(.medium))
+                    poolProtectionBadge
                     Spacer(minLength: 12)
                     Toggle("", isOn: Binding(
                         get: { poolProtectionEnabled },
                         set: { enabled in
                             do {
                                 try AntigravityPoolProtectionSettings.setEnabled(enabled, homeDirectory: tokenSaverHome.path)
-                                poolProtectionEnabled = enabled
-                                poolProtectionError = nil
+                                reloadPoolProtectionState()
                             } catch {
+                                poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
+                                poolProtectionResidual = (try? AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)) ?? poolProtectionResidual
                                 poolProtectionError = L("Could not update protection. Check the CPA version, model exclusions and file permissions.", "无法更新保护设置，请检查 CPA 版本、模型排除规则和文件权限。")
                             }
                         }
@@ -208,6 +210,19 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             }
         }
         .onAppear { reloadPoolProtectionState() }
+    }
+
+    @ViewBuilder
+    private var poolProtectionBadge: some View {
+        if poolProtectionError != nil {
+            TokenSaverStatusBadge(text: L("Issue", "异常"), tone: .danger, id: "pool-protection-badge")
+        } else if poolProtectionEnabled {
+            TokenSaverStatusBadge(text: L("Enabled", "已启用"), tone: .active, id: "pool-protection-badge")
+        } else if poolProtectionResidual {
+            TokenSaverStatusBadge(text: L("Off · Residual rules", "已关闭 · 存在残留规则"), tone: .warning, id: "pool-protection-badge")
+        } else {
+            TokenSaverStatusBadge(text: L("Off", "已关闭"), tone: .neutral, id: "pool-protection-badge")
+        }
     }
 
     private func reloadPoolProtectionState() {
@@ -389,6 +404,46 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
 }
 
 
+struct TokenSaverStatusBadge: View {
+    enum Tone { case active, warning, danger, neutral }
+    let text: String
+    let tone: Tone
+    var id: String = "token-saver-status-badge"
+
+    private var color: Color {
+        switch tone {
+        case .active: return .green
+        case .warning: return .orange
+        case .danger: return .red
+        case .neutral: return .secondary
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Circle()
+                .fill(color)
+                .frame(width: 6, height: 6)
+            Text(text)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(tone == .neutral ? Color.secondary : color)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            Capsule()
+                .fill(color.opacity(tone == .neutral ? 0.10 : 0.14))
+                .overlay(
+                    Capsule()
+                        .strokeBorder(color.opacity(tone == .neutral ? 0.18 : 0.30), lineWidth: 0.75)
+                )
+        )
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(text)
+        .accessibilityIdentifier(id)
+    }
+}
+
 /// Dedicated pane for Token Saver & Context Optimization.
 struct SubscriptionGatewaySettingsTokenSaverPane: View {
     var home: URL = FileManager.default.homeDirectoryForCurrentUser
@@ -416,16 +471,25 @@ struct TokenSaverRuntimeSection: View {
     var body: some View {
         GatewayCard(padding: 0) {
             VStack(alignment: .leading, spacing: 0) {
-                Label(L("Token Saver & Context Optimization", "Token Saver 与上下文优化"), systemImage: "bolt.fill")
-                    .font(.subheadline.weight(.semibold))
-                    .padding(14)
+                HStack(spacing: 8) {
+                    Label(L("Token Saver & Context Optimization", "Token Saver 与上下文优化"), systemImage: "bolt.fill")
+                        .font(.subheadline.weight(.semibold))
+                    Spacer()
+                    let count = saver.settings.enabledToolCount
+                    TokenSaverStatusBadge(
+                        text: count > 0 ? L("Enabled \(count)/3", "已启用 \(count)/3") : L("Off", "已关闭"),
+                        tone: count > 0 ? .active : .neutral,
+                        id: "token-saver-header-badge"
+                    )
+                }
+                .padding(14)
                 Divider()
                 row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md). Custom Hermes profiles in ~/.hermes/profiles/* stay isolated. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）的托管编程规则。~/.hermes/profiles/* 中的自定义配置保持隔离。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
                 Divider()
                 row(L("Compress LLM output (Caveman)", "压缩模型输出 (Caveman)"), detail: L("Built-in coding-only concise instructions (works immediately without downloading references). Keeps code exact; no request or response rewriting.", "内置仅限编程的精简输出指令（无需下载参考文档即可直接生效）。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
                 Picker(L("Caveman mode", "Caveman 模式"), selection: Binding(
                     get: { saver.settings.cavemanMode },
-                    set: { mode in update { $0.cavemanMode = mode } }
+                    set: { mode in saver.mutate { $0.cavemanMode = mode } }
                 )) {
                     ForEach(TokenSaverSettings.CavemanMode.allCases, id: \.self) { mode in
                         Text(mode.rawValue.capitalized).tag(mode)
@@ -434,7 +498,7 @@ struct TokenSaverRuntimeSection: View {
                 .pickerStyle(.segmented)
                 .frame(maxWidth: 240)
                 .padding(.horizontal, 14).padding(.bottom, 12)
-                .disabled(!saver.settings.cavemanEnabled || saver.isCheckingSetup)
+                .disabled(!saver.settings.cavemanEnabled)
                 .accessibilityIdentifier("token-saver-caveman-mode")
                 Divider()
                 row(L("Lazy senior dev (Ponytail)", "极简资深开发 (Ponytail)"), detail: L("Built-in coding-only YAGNI, reuse, stdlib-first and minimal verified code (works immediately without downloading references).", "内置仅限编程的 YAGNI、优先复用、标准库优先及最少验证代码规则（无需下载参考文档即可直接生效）。"), key: \.ponytailEnabled, id: "token-saver-ponytail")
@@ -454,11 +518,19 @@ struct TokenSaverRuntimeSection: View {
                 onboardingChecklist.padding(14)
                 Divider()
                 VStack(alignment: .leading, spacing: 8) {
-                    Text(L("Compact policies are saved automatically for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md) when switches above change. Custom profiles in ~/.hermes/profiles/* stay isolated and are never modified. Full downloaded skills in Updates stay separate as references. Instructions do not guarantee model compliance or token savings.", "上方开关更改时会自动为 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）保存精简策略。~/.hermes/profiles/* 中的自定义配置完全隔离，绝不修改。“更新”页下载的完整技能仅作为独立参考文档保留。指令不能保证模型绝对遵守或必然节省 Token。"))
+                    Text(L("Saves lightweight instruction files for supported coding agents (Antigravity, Claude Code, Codex, OpenCode, and Hermes ~/.hermes/SOUL.md); AIUsage does not install or launch those agents. A new coding session is required. Custom profiles in ~/.hermes/profiles/* remain untouched.", "为受支持的编程代理（Antigravity、Claude Code、Codex、OpenCode 与 Hermes ~/.hermes/SOUL.md）保存轻量指令文件；AIUsage 不会安装或启动这些代理。更改后需开启新的编程会话。~/.hermes/profiles/* 中的自定义配置保持不变。"))
                         .font(.caption).foregroundStyle(.secondary)
-                    Button(L("Reapply compact rules", "重新应用精简规则")) { saver.apply(saver.settings) }
-                        .disabled(saver.isCheckingSetup)
-                        .accessibilityIdentifier("token-saver-reapply")
+                    HStack(spacing: 10) {
+                        Button(L("Reapply compact rules", "重新应用精简规则")) { saver.reapply() }
+                            .accessibilityIdentifier("token-saver-reapply")
+                        if saver.lastSaveSucceeded, saver.error == nil {
+                            TokenSaverStatusBadge(
+                                text: L("Saved — new session required", "已保存 — 需开启新会话"),
+                                tone: .active,
+                                id: "token-saver-saved-badge"
+                            )
+                        }
+                    }
                     Text(L("Start a new coding session after enabling or updating rules so your agent reloads instructions. RTK must be installed on the agent's PATH.", "启用或更新规则后请开启新的编程会话以重新加载指令。RTK 必须安装在代理的 PATH 中。"))
                         .font(.caption).foregroundStyle(.secondary)
                     if let notice = saver.notice {
@@ -471,6 +543,9 @@ struct TokenSaverRuntimeSection: View {
                     }
                 }.padding(14)
             }
+        }
+        .task {
+            await saver.performInitialCheckIfNeeded()
         }
     }
 
@@ -508,6 +583,30 @@ struct TokenSaverRuntimeSection: View {
         }
     }
 
+    @ViewBuilder
+    private var rulesBadge: some View {
+        switch saver.onboarding?.rules {
+        case .current:
+            TokenSaverStatusBadge(text: L("Rules current", "规则已最新"), tone: .active, id: "token-saver-rules-badge")
+        case .off:
+            TokenSaverStatusBadge(text: L("Off", "已关闭"), tone: .neutral, id: "token-saver-rules-badge")
+        case .missing:
+            TokenSaverStatusBadge(text: L("Rules missing", "规则缺失"), tone: .warning, id: "token-saver-rules-badge")
+        case .stale:
+            TokenSaverStatusBadge(text: L("Rules out of date", "规则需更新"), tone: .warning, id: "token-saver-rules-badge")
+        case .unreadable:
+            TokenSaverStatusBadge(text: L("Unreadable", "无法读取"), tone: .danger, id: "token-saver-rules-badge")
+        case .unsupported:
+            TokenSaverStatusBadge(text: L("Unsupported", "不支持"), tone: .neutral, id: "token-saver-rules-badge")
+        case nil:
+            TokenSaverStatusBadge(
+                text: saver.isRefreshingRules ? L("Checking…", "检查中…") : L("Not checked", "未检查"),
+                tone: .neutral,
+                id: "token-saver-rules-badge"
+            )
+        }
+    }
+
     private var onboardingChecklist: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L("Setup & verification (after enabling tools above)", "设置与验证（在上方启用工具后检查）")).font(.subheadline.weight(.semibold))
@@ -518,7 +617,6 @@ struct TokenSaverRuntimeSection: View {
                     Text(harnessLabel(harness)).tag(harness)
                 }
             }
-            .disabled(saver.isCheckingSetup)
             .accessibilityIdentifier("token-saver-harness")
             if let url = saver.harness.rulesURL(home: saver.home) {
                 Text(url.path).font(.caption2.monospaced()).textSelection(.enabled)
@@ -532,17 +630,19 @@ struct TokenSaverRuntimeSection: View {
                     HStack(spacing: 8) {
                         Text(L("Next step: install RTK with Homebrew in Terminal (`brew install rtk`), then check again.", "下一步：在终端通过 Homebrew 安装 RTK（`brew install rtk`），然后重新检查。"))
                             .font(.caption2).foregroundStyle(.orange)
-                        Button(L("Copy: brew install rtk", "复制：brew install rtk")) {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString("brew install rtk", forType: .string)
+                        Button(saver.copiedBrewCommand ? L("✓ Copied!", "✓ 已复制！") : L("Copy: brew install rtk", "复制：brew install rtk")) {
+                            _ = saver.copyBrewInstallCommand()
                         }
                         .controlSize(.small)
                         .accessibilityIdentifier("token-saver-copy-brew-install")
                     }
                 }
             }
-            Text(saver.localizedRulesStatus)
-                .font(.caption).accessibilityIdentifier("token-saver-setup-rules")
+            HStack(spacing: 8) {
+                Text(saver.localizedRulesStatus)
+                    .font(.caption).accessibilityIdentifier("token-saver-setup-rules")
+                rulesBadge
+            }
             if let setup = saver.onboarding {
                 Text(rulesGuidance(setup.rules))
                     .font(.caption2).foregroundStyle(setup.rules == .current ? Color.secondary : Color.orange)
@@ -560,13 +660,10 @@ struct TokenSaverRuntimeSection: View {
                 }
                 .disabled(saver.isCheckingSetup)
                 .accessibilityIdentifier("token-saver-setup-check")
-                Button(L("Copy optional agent diagnostic", "复制可选代理诊断提示词")) {
-                    if let commands = saver.onboarding?.agentCommands {
-                        NSPasteboard.general.clearContents()
-                        NSPasteboard.general.setString(commands, forType: .string)
-                    }
+                Button(saver.copiedDiagnostic ? L("✓ Copied!", "✓ 已复制！") : L("Copy optional agent diagnostic", "复制可选代理诊断提示词")) {
+                    _ = saver.copyDiagnostic()
                 }
-                .disabled(saver.onboarding?.agentCommands == nil || saver.isCheckingSetup)
+                .disabled(saver.onboarding?.agentCommands == nil)
                 .accessibilityIdentifier("token-saver-setup-copy")
             }
             if saver.harness == .hermes {
@@ -587,71 +684,257 @@ struct TokenSaverRuntimeSection: View {
             Spacer(minLength: 12)
             Toggle(title, isOn: Binding(
                 get: { saver.settings[keyPath: key] },
-                set: { enabled in update { $0[keyPath: key] = enabled } }
+                set: { enabled in saver.mutate { $0[keyPath: key] = enabled } }
             ))
             .labelsHidden().toggleStyle(SwitchToggleStyle(tint: .purple)).controlSize(.small).tint(.purple)
             .accessibilityIdentifier(id)
-            .disabled(saver.isCheckingSetup)
         }.padding(14)
-    }
-    private func update(_ change: (inout TokenSaverSettings) -> Void) {
-        var value = saver.settings
-        change(&value)
-        saver.apply(value)
     }
 }
 
 
 /// Agent-side instructions only. No request middleware or CPA runtime changes.
+#if canImport(AppKit)
+import AppKit
+#endif
+
 @MainActor
 final class TokenSaverSettingsController: ObservableObject {
     @Published private(set) var settings = TokenSaverSettings()
     @Published private(set) var error: String?
     @Published private(set) var notice: String?
+    @Published private(set) var lastSaveSucceeded = false
     @Published private(set) var harness = TokenSaverOnboarding.Harness.codex
     @Published private(set) var onboarding: TokenSaverOnboarding.Snapshot?
     @Published private(set) var isCheckingSetup = false
+    @Published private(set) var isRefreshingRules = false
     @Published private(set) var installationStatus = "not checked; install RTK separately"
     @Published private(set) var setupError: String?
+    @Published private(set) var copiedDiagnostic = false
+    @Published private(set) var copiedBrewCommand = false
+
     let home: URL
     private let rtk: TokenSaverReleaseRTK
+    private let copyToClipboard: (String) -> Bool
+    private let copyFeedbackDurationNanoseconds: UInt64
+    private let controllerID = UUID()
+    private var settingsObserver: NSObjectProtocol?
+    private var inspectionGeneration: UInt64 = 0
+    private var inspectionTask: Task<Void, Never>?
+    private var brewGeneration: UInt64 = 0
+    private var cachedHistoryRecords: Int64?
+    private var hasScannedHistory = false
+    private var hasStartedInitialCheck = false
+    private var diagnosticCopyResetTask: Task<Void, Never>?
+    private var brewCopyResetTask: Task<Void, Never>?
 
-    init(home: URL = FileManager.default.homeDirectoryForCurrentUser, rtk: TokenSaverReleaseRTK = .init()) {
+    nonisolated static func defaultCopyToClipboard(_ text: String) -> Bool {
+        #if canImport(AppKit)
+        let pb = NSPasteboard.general
+        pb.clearContents()
+        return pb.setString(text, forType: .string)
+        #else
+        return false
+        #endif
+    }
+
+    init(
+        home: URL = FileManager.default.homeDirectoryForCurrentUser,
+        rtk: TokenSaverReleaseRTK = .init(),
+        copyFeedbackDurationNanoseconds: UInt64 = 1_500_000_000,
+        copyToClipboard: @escaping (String) -> Bool = TokenSaverSettingsController.defaultCopyToClipboard
+    ) {
         self.home = home
         self.rtk = rtk
+        self.copyFeedbackDurationNanoseconds = copyFeedbackDurationNanoseconds
+        self.copyToClipboard = copyToClipboard
         do { settings = try TokenSaverSettingsStore.load(home: home) }
         catch { self.error = error.localizedDescription }
+        let expectedHome = TokenSaverSettingsStore.canonicalHomePath(home)
+        let ownOrigin = controllerID.uuidString
+        settingsObserver = NotificationCenter.default.addObserver(
+            forName: .tokenSaverSettingsDidChange,
+            object: nil,
+            queue: nil
+        ) { [weak self] note in
+            guard let noteHome = note.userInfo?["home"] as? String, noteHome == expectedHome else { return }
+            if let origin = note.userInfo?["origin"] as? String, origin == ownOrigin { return }
+            Task { @MainActor [weak self] in
+                self?.reloadFromExternalNotification()
+            }
+        }
     }
-    func apply(_ value: TokenSaverSettings) {
-        guard !isCheckingSetup else { return }
+
+    deinit {
+        if let settingsObserver {
+            NotificationCenter.default.removeObserver(settingsObserver)
+        }
+        inspectionTask?.cancel()
+        diagnosticCopyResetTask?.cancel()
+        brewCopyResetTask?.cancel()
+    }
+
+    private static func savedNoticeText() -> String {
+        L("Saved. Start a new coding session to reload instructions.", "已保存。请开启新的编程会话以重新加载指令。")
+    }
+
+    func reloadFromExternalNotification() {
+        do {
+            settings = try TokenSaverSettingsStore.load(home: home)
+            error = nil
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        } catch {
+            self.error = error.localizedDescription
+            self.notice = nil
+            self.lastSaveSucceeded = false
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        }
+    }
+
+    func mutate(_ transform: (inout TokenSaverSettings) -> Void) {
         onboarding = nil
         notice = nil
         do {
-            try TokenSaverSettingsStore.save(value, home: home)
+            let updated = try TokenSaverSettingsStore.update(home: home, origin: controllerID) { current in
+                transform(&current)
+            }
+            settings = updated
+            error = nil
+            lastSaveSucceeded = true
+            notice = Self.savedNoticeText()
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        } catch {
+            self.error = error.localizedDescription
+            self.lastSaveSucceeded = false
+            if let persisted = try? TokenSaverSettingsStore.load(home: home) {
+                self.settings = persisted
+            }
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        }
+    }
+
+    func reapply() {
+        mutate { _ in }
+    }
+
+    func apply(_ value: TokenSaverSettings) {
+        onboarding = nil
+        notice = nil
+        do {
+            try TokenSaverSettingsStore.save(value, home: home, origin: controllerID)
             settings = value
             error = nil
-            notice = L("Agent settings saved (including ~/.hermes/SOUL.md; custom profiles in ~/.hermes/profiles/* stay isolated). Start a new coding session to reload instructions.", "代理设置已保存（含 ~/.hermes/SOUL.md；~/.hermes/profiles/* 中的自定义配置保持隔离）。请开始新的编程会话以重新加载指令。")
-        } catch { self.error = error.localizedDescription }
+            lastSaveSucceeded = true
+            notice = Self.savedNoticeText()
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        } catch {
+            self.error = error.localizedDescription
+            self.lastSaveSucceeded = false
+            if let persisted = try? TokenSaverSettingsStore.load(home: home) {
+                self.settings = persisted
+            }
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        }
     }
+
     func syncHermesTestProfile() {
-        guard !isCheckingSetup else { return }
         onboarding = nil
         notice = nil
         do {
             let target = try TokenSaverSettingsStore.exportHermesTestProfile(home: home)
             error = nil
+            lastSaveSucceeded = true
             notice = FileManager.default.fileExists(atPath: target.path)
                 ? L("Hermes test rules synchronized. Start a new coding session in token-saver-test's workspace. Sync again after settings changes; bot/default profiles were not modified.", "Hermes 测试规则已同步。请在 token-saver-test 的工作区开启新的编程会话。更改设置后请重新同步；未修改机器人或默认配置。")
                 : L("Owned Hermes test rules removed. All tools are off; bot/default profiles were not modified.", "已移除托管的 Hermes 测试规则。所有工具均已关闭；未修改机器人或默认配置。")
-        } catch { self.error = error.localizedDescription }
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        } catch {
+            self.error = error.localizedDescription
+            self.lastSaveSucceeded = false
+            scheduleRulesRefresh(includeHistory: !hasScannedHistory)
+        }
     }
+
     func selectHarness(_ value: TokenSaverOnboarding.Harness) {
-        guard !isCheckingSetup else { return }
         harness = value
         onboarding = nil
         setupError = nil
         notice = nil
+        scheduleRulesRefresh(includeHistory: !hasScannedHistory)
     }
+
+    private func scheduleRulesRefresh(includeHistory: Bool) {
+        inspectionGeneration &+= 1
+        let gen = inspectionGeneration
+        let home = self.home
+        let harness = self.harness
+        let shouldScanHistory = includeHistory || !hasScannedHistory
+        let cached = cachedHistoryRecords
+        isRefreshingRules = true
+        inspectionTask?.cancel()
+        inspectionTask = Task { @MainActor [weak self] in
+            let snap = await Task.detached {
+                TokenSaverOnboarding.inspect(
+                    home: home,
+                    harness: harness,
+                    includeHistory: shouldScanHistory,
+                    cachedHistoryRecords: cached
+                )
+            }.value
+            guard let self, self.inspectionGeneration == gen else { return }
+            if shouldScanHistory {
+                self.cachedHistoryRecords = snap.historyRecords
+                self.hasScannedHistory = true
+            }
+            self.onboarding = snap
+            self.isRefreshingRules = false
+        }
+    }
+
+    func waitForPendingInspection() async {
+        await inspectionTask?.value
+    }
+
+    func performInitialCheckIfNeeded() async {
+        guard !hasStartedInitialCheck else { return }
+        hasStartedInitialCheck = true
+        await checkOnboarding()
+    }
+
+    @discardableResult
+    func copyDiagnostic() -> Bool {
+        guard let commands = onboarding?.agentCommands, copyToClipboard(commands) else {
+            copiedDiagnostic = false
+            return false
+        }
+        copiedDiagnostic = true
+        let duration = copyFeedbackDurationNanoseconds
+        diagnosticCopyResetTask?.cancel()
+        diagnosticCopyResetTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: duration)
+            guard !Task.isCancelled else { return }
+            self?.copiedDiagnostic = false
+        }
+        return true
+    }
+
+    @discardableResult
+    func copyBrewInstallCommand() -> Bool {
+        guard copyToClipboard("brew install rtk") else {
+            copiedBrewCommand = false
+            return false
+        }
+        copiedBrewCommand = true
+        let duration = copyFeedbackDurationNanoseconds
+        brewCopyResetTask?.cancel()
+        brewCopyResetTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(nanoseconds: duration)
+            guard !Task.isCancelled else { return }
+            self?.copiedBrewCommand = false
+        }
+        return true
+    }
+
     var localizedRTKStatus: String {
         switch installationStatus {
         case "not checked; install RTK separately":
@@ -719,21 +1002,30 @@ final class TokenSaverSettingsController: ObservableObject {
     }
     func checkOnboarding() async {
         guard !isCheckingSetup else { return }
+        hasStartedInitialCheck = true
         isCheckingSetup = true
         setupError = nil
         notice = nil
         onboarding = nil
         installationStatus = "checking Homebrew; agent PATH is not verified"
+        scheduleRulesRefresh(includeHistory: true)
+        brewGeneration &+= 1
+        let currentBrewGen = brewGeneration
         defer { isCheckingSetup = false }
         do {
             if let version = try await rtk.installedVersion() {
-                installationStatus = "Homebrew \(version); agent PATH is not verified"
-            } else { installationStatus = "not installed in Homebrew; other installations/PATH not verified" }
+                if currentBrewGen == brewGeneration {
+                    installationStatus = "Homebrew \(version); agent PATH is not verified"
+                }
+            } else if currentBrewGen == brewGeneration {
+                installationStatus = "not installed in Homebrew; other installations/PATH not verified"
+            }
         } catch {
-            installationStatus = "not verified"
-            setupError = error.localizedDescription
+            if currentBrewGen == brewGeneration {
+                installationStatus = "not verified"
+                setupError = error.localizedDescription
+            }
         }
-        let home = self.home, harness = self.harness
-        onboarding = await Task.detached { TokenSaverOnboarding.inspect(home: home, harness: harness) }.value
+        await waitForPendingInspection()
     }
 }

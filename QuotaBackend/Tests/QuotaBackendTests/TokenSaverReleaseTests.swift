@@ -339,4 +339,76 @@ final class TokenSaverReleaseTests: XCTestCase {
         catch TokenSaverReleaseError.http(304) { }
     }
 
+    func testValidatedProcessCancellationTerminatesChildWhilePublicRunStaysRestricted() async throws {
+        let dir = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+        let scriptURL = dir.appendingPathComponent("fixture-sleep.sh")
+        let pidURL = dir.appendingPathComponent("child.pid")
+        let script = """
+        #!/bin/sh
+        echo $$ > "$1"
+        exec /bin/sleep 30
+        """
+        try Data(script.utf8).write(to: scriptURL)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+        // Public entrypoint must still reject non-Homebrew executables.
+        do {
+            _ = try await TokenSaverReleaseRTK.run(scriptURL, arguments: [pidURL.path])
+            XCTFail("public run allowed non-brew executable")
+        } catch TokenSaverReleaseRTK.Failure.unavailable { }
+
+        for ignoreTERM in [false, true] {
+            try? FileManager.default.removeItem(at: pidURL)
+            let body = ignoreTERM
+                ? "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1\"\nwhile :; do /bin/sleep 1; done\n"
+                : "#!/bin/sh\necho $$ > \"$1\"\nexec /bin/sleep 30\n"
+            try Data(body.utf8).write(to: scriptURL)
+            try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
+
+            let task = Task {
+                try await TokenSaverReleaseRTK.runValidatedProcess(scriptURL, arguments: [pidURL.path])
+            }
+            var pid: pid_t = 0
+            for _ in 0..<50 {
+                if let text = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
+                   let parsed = Int32(text), parsed > 0 {
+                    pid = parsed
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 20_000_000)
+            }
+            XCTAssertTrue(pid > 0)
+            XCTAssertEqual(kill(pid, 0), 0)
+
+            let watchdog = Task.detached {
+                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                if !Task.isCancelled, pid > 0, kill(pid, 0) == 0 {
+                    _ = kill(pid, SIGKILL)
+                }
+            }
+            let cancelledAt = Date()
+            task.cancel()
+            do {
+                _ = try await task.value
+                XCTFail("expected cancelled process to throw limit")
+            } catch TokenSaverReleaseRTK.Failure.limit { }
+            watchdog.cancel()
+            let elapsed = Date().timeIntervalSince(cancelledAt)
+            XCTAssertTrue(elapsed < 1.0)
+
+            var exited = false
+            for _ in 0..<20 {
+                if kill(pid, 0) != 0 {
+                    exited = true
+                    break
+                }
+                try? await Task.sleep(nanoseconds: 25_000_000)
+            }
+            if !exited { _ = kill(pid, SIGKILL) }
+            XCTAssertTrue(exited)
+        }
+    }
+
 }
