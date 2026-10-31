@@ -445,4 +445,39 @@ final class TokenSaverSettingsTests: XCTestCase {
         XCTAssertEqual(snapCached.rules, .current)
         XCTAssertEqual(snapCached.historyRecords, 42)
     }
+    func testAntigravityGlobalConfigRulePathAndLegacyCleanup() throws {
+        let home = try temporaryHome()
+        let agyConfigURL = home.appendingPathComponent(".gemini/config/AGENTS.md")
+        let legacyURL = home.appendingPathComponent(".gemini/antigravity/rules/aiusage-token-saver.md")
+        XCTAssertEqual(TokenSaverOnboarding.Harness.antigravity.rulesURL(home: home), agyConfigURL)
+
+        let existingHeader = Data("# Antigravity Global Guidelines\nKeep this matrix intact.\n".utf8)
+        try TokenSaverSettingsStore.replace(agyConfigURL, data: existingHeader)
+
+        var active = TokenSaverSettings()
+        active.rtkEnabled = true
+        active.cavemanEnabled = true
+        active.cavemanMode = .lite
+        active.ponytailEnabled = true
+        try TokenSaverSettingsStore.save(active, home: home)
+
+        let savedText = try String(contentsOf: agyConfigURL, encoding: .utf8)
+        XCTAssertTrue(savedText.hasPrefix("# Antigravity Global Guidelines\nKeep this matrix intact.\n"))
+        XCTAssertTrue(savedText.contains("Caveman active mode: lite."))
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .antigravity).rules, .current)
+
+        // Simulate upgrade from legacy .gemini/antigravity/rules/aiusage-token-saver.md with reapply (oldBlock == newBlock):
+        try TokenSaverSettingsStore.replace(agyConfigURL, data: existingHeader)
+        let block = try TokenSaverAgentRules.block(active, home: home)
+        try TokenSaverSettingsStore.replace(legacyURL, data: Data(("\n" + block).utf8))
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .antigravity).rules, .stale)
+
+        _ = try TokenSaverSettingsStore.update(home: home) { _ in }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacyURL.path))
+        XCTAssertEqual(TokenSaverOnboarding.inspect(home: home, harness: .antigravity).rules, .current)
+
+        // Turning all tools off restores ~/.gemini/config/AGENTS.md byte-for-byte.
+        try TokenSaverSettingsStore.save(TokenSaverSettings(), home: home)
+        XCTAssertEqual(try Data(contentsOf: agyConfigURL), existingHeader)
+    }
 }

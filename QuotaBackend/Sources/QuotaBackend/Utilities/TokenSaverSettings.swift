@@ -246,8 +246,11 @@ public enum TokenSaverAgentRules {
     static let begin = "<!-- AIUsage Token Saver BEGIN -->"
     static let end = "<!-- AIUsage Token Saver END -->"
     public static func rulePaths(home: URL) -> [URL] {
-        [".gemini/antigravity/rules/aiusage-token-saver.md", ".claude/rules/aiusage-token-saver.md",
+        [".gemini/config/AGENTS.md", ".claude/rules/aiusage-token-saver.md",
          ".codex/AGENTS.md", ".config/opencode/AGENTS.md"].map { home.appendingPathComponent($0) }
+    }
+    static func legacyAntigravityRuleURL(home: URL) -> URL {
+        home.appendingPathComponent(".gemini/antigravity/rules/aiusage-token-saver.md")
     }
     /// Global Hermes coding instructions (`~/.hermes/SOUL.md`). Custom profiles under `~/.hermes/profiles/*`
     /// have their own isolated `SOUL.md` and are never touched.
@@ -309,7 +312,7 @@ public enum TokenSaverAgentRules {
         return "'" + path.replacingOccurrences(of: "'", with: "'\"'\"'") + "'"
     }
     static func singleChange(url: URL, from oldBlock: String, to newBlock: String) throws -> (URL, Data?, Data?)? {
-        guard oldBlock != newBlock else { return nil }
+        guard oldBlock != newBlock || !newBlock.isEmpty else { return nil }
         let before = try TokenSaverSettingsStore.contents(url)
         guard var text = before.flatMap({ String(data: $0, encoding: .utf8) }) ?? (before == nil ? "" : nil) else {
             throw TokenSaverSettingsStore.Failure.changed
@@ -329,9 +332,14 @@ public enum TokenSaverAgentRules {
         return before == after ? nil : (url, before, after)
     }
     static func changes(from oldBlock: String, to newBlock: String, home: URL) throws -> [(URL, Data?, Data?)] {
-        guard oldBlock != newBlock else { return [] }
-        return try rulePaths(home: home).compactMap { url in
+        guard oldBlock != newBlock || !newBlock.isEmpty else { return [] }
+        var result = try rulePaths(home: home).compactMap { url in
             try singleChange(url: url, from: oldBlock, to: newBlock)
         }
+        if !oldBlock.isEmpty,
+           let legacyCleanup = try singleChange(url: legacyAntigravityRuleURL(home: home), from: oldBlock, to: "") {
+            result.append(legacyCleanup)
+        }
+        return result
     }
 }
