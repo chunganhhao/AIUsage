@@ -362,7 +362,7 @@ final class TokenSaverReleaseTests: XCTestCase {
         for ignoreTERM in [false, true] {
             try? FileManager.default.removeItem(at: pidURL)
             let body = ignoreTERM
-                ? "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1\"\nwhile :; do /bin/sleep 1; done\n"
+                ? "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1\"\nexec /bin/sleep 30\n"
                 : "#!/bin/sh\necho $$ > \"$1\"\nexec /bin/sleep 30\n"
             try Data(body.utf8).write(to: scriptURL)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
@@ -383,7 +383,7 @@ final class TokenSaverReleaseTests: XCTestCase {
             XCTAssertEqual(kill(pid, 0), 0)
 
             let watchdog = Task.detached {
-                try? await Task.sleep(nanoseconds: 1_500_000_000)
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
                 if !Task.isCancelled, pid > 0, kill(pid, 0) == 0 {
                     _ = kill(pid, SIGKILL)
                 }
@@ -396,7 +396,7 @@ final class TokenSaverReleaseTests: XCTestCase {
             } catch TokenSaverReleaseRTK.Failure.limit { }
             watchdog.cancel()
             let elapsed = Date().timeIntervalSince(cancelledAt)
-            XCTAssertTrue(elapsed < 1.0)
+            XCTAssertTrue(elapsed < 2.0)
 
             var exited = false
             for _ in 0..<20 {

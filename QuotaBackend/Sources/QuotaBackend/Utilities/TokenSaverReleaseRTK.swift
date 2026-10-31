@@ -79,26 +79,24 @@ public struct TokenSaverReleaseRTK: Sendable {
         return try await runValidatedProcess(url, arguments: arguments)
     }
 
-    private static func stopProcessBounded(_ process: Process) async {
-        await Task.detached {
-            guard process.isRunning else { return }
-            let pid = process.processIdentifier
-            process.terminate()
+    private static func stopProcessBounded(_ process: Process) {
+        guard process.isRunning else { return }
+        let pid = process.processIdentifier
+        process.terminate()
+        for _ in 0..<8 {
+            if !process.isRunning { break }
+            Darwin.usleep(20_000)
+        }
+        if process.isRunning, pid > 0 {
+            _ = kill(pid, SIGKILL)
             for _ in 0..<8 {
                 if !process.isRunning { break }
-                try? await Task.sleep(nanoseconds: 25_000_000)
+                Darwin.usleep(20_000)
             }
-            if process.isRunning, pid > 0 {
-                _ = kill(pid, SIGKILL)
-                for _ in 0..<8 {
-                    if !process.isRunning { break }
-                    try? await Task.sleep(nanoseconds: 25_000_000)
-                }
-            }
-            if !process.isRunning {
-                process.waitUntilExit()
-            }
-        }.value
+        }
+        if !process.isRunning {
+            process.waitUntilExit()
+        }
     }
 
     internal static func runValidatedProcess(_ url: URL, arguments: [String]) async throws -> Output {
@@ -115,7 +113,7 @@ public struct TokenSaverReleaseRTK: Sendable {
             defer { try? pipe.fileHandleForReading.close() }
             let handle = pipe.fileHandleForReading.fileDescriptor
             guard fcntl(handle, F_SETFL, O_NONBLOCK) != -1 else {
-                await stopProcessBounded(process)
+                stopProcessBounded(process)
                 throw Failure.limit
             }
             let deadline = Date().addingTimeInterval(180)
@@ -123,13 +121,13 @@ public struct TokenSaverReleaseRTK: Sendable {
             var buffer = [UInt8](repeating: 0, count: 4096)
             while true {
                 if Date() >= deadline || Task.isCancelled {
-                    await stopProcessBounded(process)
+                    stopProcessBounded(process)
                     throw Failure.limit
                 }
                 let count = Darwin.read(handle, &buffer, buffer.count)
                 if count > 0 {
                     guard data.count + count <= 128 * 1024 else {
-                        await stopProcessBounded(process)
+                        stopProcessBounded(process)
                         throw Failure.limit
                     }
                     data.append(contentsOf: buffer.prefix(count))
@@ -140,7 +138,7 @@ public struct TokenSaverReleaseRTK: Sendable {
                 } else if errno == EAGAIN || errno == EINTR {
                     try? await Task.sleep(nanoseconds: 50_000_000)
                 } else {
-                    await stopProcessBounded(process)
+                    stopProcessBounded(process)
                     throw Failure.limit
                 }
             }
