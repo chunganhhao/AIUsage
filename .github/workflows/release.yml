@@ -96,6 +96,10 @@ jobs:
         shell: bash
         run: bash scripts/run_codex_reset_cards_regression.sh
 
+      - name: Run Antigravity pool protection regression
+        shell: bash
+        run: bash scripts/run_pool_circuit_breaker_regression.sh
+
       - name: Render Codex reset cards previews
         shell: bash
         run: TMPDIR="$RUNNER_TEMP" bash scripts/run_codex_reset_cards_regression.sh --render "$RUNNER_TEMP/reset-cards-preview"
@@ -114,6 +118,10 @@ jobs:
       - name: Run common config regression
         shell: bash
         run: bash scripts/run_common_config_regression.sh
+
+      - name: Run Claude Desktop regression
+        shell: bash
+        run: bash scripts/run_claude_desktop_regression.sh
 
       # Import the stable self-signed code signing certificate (issue #35).
       # Skipped automatically if the secret is absent, in which case the

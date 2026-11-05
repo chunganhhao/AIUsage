@@ -377,6 +377,9 @@ extension ProviderRefreshCoordinator {
             "Warp reports credits through its API: the cycle allowance is used first, then bonus and add-on credits.": "Warp 通过官方接口报告积分：先消耗本周期额度，再用奖励积分和加购积分。",
             "Warp API key was rejected. Create a personal key in Warp → Settings → Cloud platform → API keys.": "Warp API Key 被拒绝。请在 Warp → Settings → Cloud platform → API keys 中新建一个 Personal Key。",
             "Warp API is rate limiting requests. Try again later.": "Warp 接口正在限流，请稍后再试。",
+            "Pool Protection Needs Attention": "分池保护需要处理",
+            "Pool Protection Active": "分池保护已生效",
+            "Pool protection could not be synchronized. Check the managed CPA version and model exclusions.": "分池保护未能同步，请检查托管 CPA 版本和模型排除规则。",
             "Local cost telemetry": "本地费用统计",
             "Local spend ledger": "本地费用账本",
             "Account": "账号",
@@ -447,6 +450,9 @@ extension ProviderRefreshCoordinator {
             "Local token and cost ledger from Claude proxy usage": "基于 Claude 代理用量的本地 Token 与费用账本",
             "Proxy cost ledger plus non-proxy Codex token usage": "Codex 代理费用账本与非代理 Token 用量",
             "Codex": "Codex",
+            "Antigravity transcript tokens this month": "本月 Antigravity 会话 Token",
+            "This tracker reads local Antigravity transcript tokens only. Proxy costs are not included.": "此账本仅统计本地 Antigravity 会话 Token，不包含代理费用。",
+            "No Antigravity transcript token usage recorded": "尚无 Antigravity 会话 Token 用量记录",
             "Local token ledger": "本地 Token 账本",
             "Codex proxy + non-proxy usage this month": "本月 Codex 代理 + 非代理用量",
             "Local ledgers and usage-derived spend": "本地账本与用量推导费用",
@@ -484,6 +490,7 @@ extension ProviderRefreshCoordinator {
         if let mapped = Self.exactTranslations[text] { return mapped }
 
         var result = text
+        result = replacingRegex(#"^Protected pools: (.+)\. Other pools remain available\. Recovery requires weekly > 3% and five-hour > 5%\.$"#, in: result, template: "受保护的池：$1。其他池仍可用；恢复需周剩余额度 > 3%、五小时剩余额度 > 5%。")
         result = replacingRegex(#"^Plan · (.+)$"#, in: result, template: "计划 · $1")
         result = replacingRegex(#"^Membership · (.+)$"#, in: result, template: "会员 · $1")
         result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5小时")
