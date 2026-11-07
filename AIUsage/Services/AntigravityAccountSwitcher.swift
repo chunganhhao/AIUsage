@@ -914,12 +914,18 @@ enum AntigravityAccountSwitcher {
         }
 
         var fileBackups: [(path: String, data: Data?)] = []
-        let candidateRollbackPaths = existingDBPaths.flatMap {
-            [$0, $0 + "-wal", $0 + "-shm", $0 + ".backup", $0 + ".backup-wal", $0 + ".backup-shm"]
-        } + [
+        var candidateRollbackPaths: [String] = [
             "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
             "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
         ]
+        for dbPath in existingDBPaths {
+            candidateRollbackPaths.append(dbPath)
+            candidateRollbackPaths.append("\(dbPath)-wal")
+            candidateRollbackPaths.append("\(dbPath)-shm")
+            candidateRollbackPaths.append("\(dbPath).backup")
+            candidateRollbackPaths.append("\(dbPath).backup-wal")
+            candidateRollbackPaths.append("\(dbPath).backup-shm")
+        }
         for path in candidateRollbackPaths {
             if FileManager.default.fileExists(atPath: path) {
                 fileBackups.append((path: path, data: FileManager.default.contents(atPath: path)))
