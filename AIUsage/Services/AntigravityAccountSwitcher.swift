@@ -103,6 +103,27 @@ enum AntigravityAccountSwitcher {
         return candidates.first { FileManager.default.fileExists(atPath: $0) } ?? candidates[0]
     }
 
+    static func appStoragePath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        "\(homeDirectory)/Library/Application Support/Antigravity/app_storage.json"
+    }
+
+    static func standaloneTokenPath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        "\(homeDirectory)/.gemini/jetski-standalone-oauth-token"
+    }
+
+    static func activeStorageDisplayPath(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> String {
+        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
+        let appStorage = appStoragePath(homeDirectory: homeDirectory)
+        let dbDate = fileModificationDate(atPath: dbPath)
+        let appStorageDate = fileModificationDate(atPath: appStorage)
+        if let appStorageDate, dbDate == nil || appStorageDate > dbDate! {
+            return "~/Library/Application Support/Antigravity/app_storage.json"
+        }
+        return "~/Library/Application Support/Antigravity/.../state.vscdb"
+    }
+
     static func snapshotsDirectory(homeDirectory: String) -> URL {
         URL(fileURLWithPath: homeDirectory)
             .appendingPathComponent(".config/aiusage/antigravity-switch/snapshots", isDirectory: true)
@@ -113,29 +134,83 @@ enum AntigravityAccountSwitcher {
     static func detectActiveAccount(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> AntigravityDetectedAccount? {
+        var candidates: [(account: AntigravityDetectedAccount, modifiedAt: Date, priority: Int)] = []
+
         let dbPath = primaryDBPath(homeDirectory: homeDirectory)
         if FileManager.default.fileExists(atPath: dbPath),
            let detected = detectAccountFromDB(at: dbPath) {
-            return detected
+            let mtime = fileModificationDate(atPath: dbPath) ?? .distantPast
+            candidates.append((detected, mtime, 3))
         }
 
-        let standalonePath = "\(homeDirectory)/.gemini/jetski-standalone-oauth-token"
-        if let data = FileManager.default.contents(atPath: standalonePath),
-           let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-           let token = json["token"] as? [String: Any] {
-            let access = (token["access_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let refresh = (token["refresh_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-            if (access?.isEmpty == false) || (refresh?.isEmpty == false) {
-                return AntigravityDetectedAccount(
-                    email: email,
-                    name: email,
-                    hasAccessToken: access?.isEmpty == false,
-                    hasRefreshToken: refresh?.isEmpty == false
-                )
-            }
+        let standalonePath = standaloneTokenPath(homeDirectory: homeDirectory)
+        if let detected = detectAccountFromStandaloneFile(at: standalonePath) {
+            let mtime = fileModificationDate(atPath: standalonePath) ?? .distantPast
+            candidates.append((detected, mtime, 2))
         }
-        return nil
+
+        let appStorage = appStoragePath(homeDirectory: homeDirectory)
+        if let detected = detectAccountFromAppStorage(at: appStorage, homeDirectory: homeDirectory) {
+            let mtime = fileModificationDate(atPath: appStorage) ?? .distantPast
+            candidates.append((detected, mtime, 1))
+        }
+
+        return candidates.max { lhs, rhs in
+            if lhs.modifiedAt != rhs.modifiedAt {
+                return lhs.modifiedAt < rhs.modifiedAt
+            }
+            return lhs.priority < rhs.priority
+        }?.account
+    }
+
+    private static func fileModificationDate(atPath path: String) -> Date? {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path) else {
+            return nil
+        }
+        return attrs[.modificationDate] as? Date
+    }
+
+    private static func detectAccountFromStandaloneFile(at path: String) -> AntigravityDetectedAccount? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let token = (json["token"] as? [String: Any]) ?? json
+        let access = (token["access_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let refresh = (token["refresh_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawEmail = ((json["id_token_email"] as? String)
+            ?? (json["email"] as? String)
+            ?? (token["email"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let email = (rawEmail?.isEmpty == false) ? rawEmail : nil
+        guard email != nil || (access?.isEmpty == false) || (refresh?.isEmpty == false) else {
+            return nil
+        }
+        return AntigravityDetectedAccount(
+            email: email,
+            name: email,
+            hasAccessToken: access?.isEmpty == false,
+            hasRefreshToken: refresh?.isEmpty == false
+        )
+    }
+
+    private static func detectAccountFromAppStorage(
+        at path: String,
+        homeDirectory: String
+    ) -> AntigravityDetectedAccount? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let rawEmail = (json["agy.onboarding.lastLoginUsername"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawEmail.isEmpty else {
+            return nil
+        }
+        let hasRefresh = extractRefreshToken(forEmail: rawEmail, homeDirectory: homeDirectory) != nil
+        return AntigravityDetectedAccount(
+            email: rawEmail,
+            name: rawEmail.components(separatedBy: "@").first ?? rawEmail,
+            hasAccessToken: hasRefresh,
+            hasRefreshToken: hasRefresh
+        )
     }
 
     static func extractRefreshToken(
@@ -189,7 +264,11 @@ enum AntigravityAccountSwitcher {
             if let data = fm.contents(atPath: path),
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
                 let tokenObj = (json["token"] as? [String: Any]) ?? json
-                let fileEmail = normalizeEmail((json["email"] as? String) ?? (tokenObj["email"] as? String))
+                let fileEmail = normalizeEmail(
+                    (json["id_token_email"] as? String)
+                        ?? (json["email"] as? String)
+                        ?? (tokenObj["email"] as? String)
+                )
                 if let targetEmail, fileEmail != targetEmail {
                     continue
                 }
@@ -400,7 +479,11 @@ enum AntigravityAccountSwitcher {
             throw AntigravitySwitchError.missingAccessToken
         }
 
-        let rawEmail = ((root["email"] as? String) ?? (tokenDict["email"] as? String) ?? fallbackEmail ?? "")
+        let rawEmail = ((root["email"] as? String)
+            ?? (root["id_token_email"] as? String)
+            ?? (tokenDict["email"] as? String)
+            ?? fallbackEmail
+            ?? "")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         let email = rawEmail.isEmpty ? "antigravity-user@google.com" : rawEmail
         let rawName = ((root["name"] as? String) ?? fallbackName ?? "")
@@ -455,7 +538,9 @@ enum AntigravityAccountSwitcher {
         let existingDBPaths = candidateDBPaths(homeDirectory: homeDirectory).filter {
             FileManager.default.fileExists(atPath: $0)
         }
-        guard !existingDBPaths.isEmpty else {
+        let appStorage = appStoragePath(homeDirectory: homeDirectory)
+        let hasAppStorage = FileManager.default.fileExists(atPath: appStorage)
+        guard !existingDBPaths.isEmpty || hasAppStorage else {
             throw AntigravitySwitchError.databaseNotFound(primaryDBPath(homeDirectory: homeDirectory))
         }
 
@@ -507,7 +592,8 @@ enum AntigravityAccountSwitcher {
             }
         }
 
-        // Sync standalone/CLI fallback files if present on disk
+        // Sync Antigravity 2.0 Hub app_storage.json and standalone/CLI fallback files if present on disk
+        syncAppStorageFile(credential: parsed, homeDirectory: homeDirectory)
         syncStandaloneFallbackFiles(credential: parsed, homeDirectory: homeDirectory)
 
         return AntigravitySwitchedIdentity(
@@ -631,6 +717,26 @@ enum AntigravityAccountSwitcher {
         }
     }
 
+    private static func syncAppStorageFile(credential: ParsedCredential, homeDirectory: String) {
+        let path = appStoragePath(homeDirectory: homeDirectory)
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: path) else { return }
+
+        var storageDict: [String: Any] = [:]
+        if let existingData = fm.contents(atPath: path),
+           let json = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any] {
+            storageDict = json
+        }
+        storageDict["agy.onboarding.lastLoginUsername"] = credential.email
+        if storageDict["agy.onboarding.lastLoginIsGcpTos"] == nil {
+            storageDict["agy.onboarding.lastLoginIsGcpTos"] = "false"
+        }
+        guard let encoded = try? JSONSerialization.data(withJSONObject: storageDict, options: [.prettyPrinted, .sortedKeys]) else {
+            return
+        }
+        try? encoded.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
     private static func syncStandaloneFallbackFiles(credential: ParsedCredential, homeDirectory: String) {
         let expiryISO = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(credential.expirySeconds)))
         var payload: [String: Any] = [
@@ -641,10 +747,15 @@ enum AntigravityAccountSwitcher {
                 "expiry": expiryISO
             ],
             "auth_method": "consumer",
-            "email": credential.email
+            "email": credential.email,
+            "id_token_email": credential.email,
+            "writer_id": UUID().uuidString.lowercased()
         ]
         if let idToken = credential.idToken {
             payload["id_token"] = idToken
+        }
+        if let projectId = credential.projectId {
+            payload["project_id"] = projectId
         }
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
             return

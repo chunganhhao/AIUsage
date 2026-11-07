@@ -767,7 +767,7 @@ struct AntigravitySubscriptionSection: View {
                         .background(Capsule().fill(Color.primary.opacity(0.06)))
                 }
                 Spacer()
-                Text("~/Library/Application Support/Antigravity/.../state.vscdb")
+                Text(AntigravityAccountSwitcher.activeStorageDisplayPath())
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }

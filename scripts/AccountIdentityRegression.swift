@@ -880,5 +880,67 @@ struct AccountIdentityRegression {
         )
         check(normalRestartResult && relaunchCount == 1 && relaunchedURL?.path == "\(tempHome.path)/Applications/Antigravity.app",
               "AGY P2 Restart: returns true and relaunches app only after old process terminates")
+
+        // 8. Antigravity 2.0 (v2.29.0) app_storage.json active account detection & switching
+        let agy2Home = fm.temporaryDirectory.appendingPathComponent("agy2-app-storage-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: agy2Home) }
+
+        let staleDBPath = AntigravityAccountSwitcher.primaryDBPath(homeDirectory: agy2Home.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: staleDBPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        var staleDB: OpaquePointer?
+        _ = sqlite3_open(staleDBPath, &staleDB)
+        _ = sqlite3_exec(staleDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(staleDB, #"INSERT INTO ItemTable VALUES ('antigravityAuthStatus', '{"email":"chunganhhao@gmail.com","apiKey":"ya29.stale"}');"#, nil, nil, nil)
+        sqlite3_close(staleDB)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_770_117_163)], ofItemAtPath: staleDBPath)
+
+        let appStoragePath = AntigravityAccountSwitcher.appStoragePath(homeDirectory: agy2Home.path)
+        let initialAppStorage: [String: Any] = [
+            "agy.onboarding.lastLoginUsername": "chungduccc@gmail.com",
+            "agy.onboarding.lastLoginIsGcpTos": "false",
+            "lastCreatedProjectId": "keep-this-project-id"
+        ]
+        try! JSONSerialization.data(withJSONObject: initialAppStorage).write(to: URL(fileURLWithPath: appStoragePath))
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_794_038_000)], ofItemAtPath: appStoragePath)
+
+        let detectedAGY2 = AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)
+        check(detectedAGY2?.email == "chungduccc@gmail.com",
+              "AGY 2.0: detectActiveAccount prefers newer app_storage.json over stale legacy state.vscdb")
+        check(AntigravityAccountSwitcher.activeStorageDisplayPath(homeDirectory: agy2Home.path) == "~/Library/Application Support/Antigravity/app_storage.json",
+              "AGY 2.0: activeStorageDisplayPath reports app_storage.json when newer than state.vscdb")
+
+        // Switch account in Antigravity 2.0 environment without state.vscdb (only app_storage.json + standalone token)
+        try! fm.removeItem(atPath: staleDBPath)
+        let agy2StandalonePath = AntigravityAccountSwitcher.standaloneTokenPath(homeDirectory: agy2Home.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: agy2StandalonePath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! Data(#"{"token":{"access_token":"ya29.old","refresh_token":"1//old"},"id_token_email":"chungduccc@gmail.com"}"#.utf8)
+            .write(to: URL(fileURLWithPath: agy2StandalonePath))
+
+        let switchedAGY2Auth = agy2Home.appendingPathComponent("next_account.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "access_token": "ya29.next_token",
+            "refresh_token": "1//next_refresh_token",
+            "email": "chunganhduc123@gmail.com",
+            "project_id": "proj-123"
+        ]).write(to: switchedAGY2Auth)
+
+        let switchedAGY2 = try! AntigravityAccountSwitcher.switchAccount(
+            authFileURL: switchedAGY2Auth,
+            homeDirectory: agy2Home.path
+        )
+        check(switchedAGY2.email == "chunganhduc123@gmail.com",
+              "AGY 2.0: switchAccount succeeds when only app_storage.json exists without legacy state.vscdb")
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)?.email == "chunganhduc123@gmail.com",
+              "AGY 2.0: detectActiveAccount returns newly switched account from app_storage.json / standalone token")
+
+        let updatedAppStorage = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: appStoragePath)))) as? [String: Any]
+        check(updatedAppStorage?["agy.onboarding.lastLoginUsername"] as? String == "chunganhduc123@gmail.com"
+                && updatedAppStorage?["lastCreatedProjectId"] as? String == "keep-this-project-id",
+              "AGY 2.0: switchAccount updates agy.onboarding.lastLoginUsername and preserves existing keys in app_storage.json")
+
+        let updatedStandalone = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: agy2StandalonePath)))) as? [String: Any]
+        check(updatedStandalone?["id_token_email"] as? String == "chunganhduc123@gmail.com"
+                && updatedStandalone?["project_id"] as? String == "proj-123",
+              "AGY 2.0: switchAccount writes StoredToken schema (id_token_email & project_id) to jetski-standalone-oauth-token")
     }
 }
