@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SQLite3
 #if canImport(AppKit)
 import AppKit
@@ -131,6 +132,35 @@ enum AntigravityAccountSwitcher {
         "\(homeDirectory)/Library/Application Support/Antigravity/app_storage.json"
     }
 
+    static func credentialUserScopePath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        "\(homeDirectory)/Library/Application Support/Antigravity/credential-user-scope"
+    }
+
+    static func computeUserScope(fromIDToken idToken: String?) -> String? {
+        guard let idToken = idToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !idToken.isEmpty else {
+            return nil
+        }
+        let segments = idToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count >= 2 else { return nil }
+        var b64 = String(segments[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = b64.count % 4
+        if remainder > 0 {
+            b64 += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let payloadData = Data(base64Encoded: b64),
+              let claims = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
+              let sub = (claims["sub"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sub.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(sub.utf8))
+        let hex16 = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "u" + hex16
+    }
+
     static func standaloneTokenPath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
         "\(homeDirectory)/.gemini/jetski-standalone-oauth-token"
     }
@@ -230,7 +260,7 @@ enum AntigravityAccountSwitcher {
     private static func runSecurityCommand(
         arguments: [String],
         stdinString: String? = nil,
-        timeoutSeconds: TimeInterval = 2.0
+        timeoutSeconds: TimeInterval = 5.0
     ) -> (exitCode: Int32, stdout: String)? {
         let securityPath = "/usr/bin/security"
         guard FileManager.default.isExecutableFile(atPath: securityPath) else { return nil }
@@ -812,6 +842,9 @@ enum AntigravityAccountSwitcher {
             if ts > 1_000_000_000 {
                 expirySeconds = ts
             }
+        } else if let expiryDateVal = int64Value(tokenDict["expiry_date"]) ?? int64Value(root["expiry_date"]),
+                  expiryDateVal > 1_000_000_000 {
+            expirySeconds = expiryDateVal > 10_000_000_000 ? (expiryDateVal / 1000) : expiryDateVal
         } else if let timestampMs = int64Value(root["timestamp"]),
                   let expiresIn = int64Value(root["expires_in"]) {
             expirySeconds = (timestampMs / 1000) + expiresIn
@@ -837,6 +870,8 @@ enum AntigravityAccountSwitcher {
         )
     }
 
+    private static let switchMutationLock = NSRecursiveLock()
+
     @discardableResult
     static func switchAccount(
         authFileURL: URL,
@@ -844,6 +879,9 @@ enum AntigravityAccountSwitcher {
         fallbackName: String? = nil,
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) throws -> AntigravitySwitchedIdentity {
+        switchMutationLock.lock()
+        defer { switchMutationLock.unlock() }
+
         var parsed = try parseCredentialFile(at: authFileURL, fallbackEmail: fallbackEmail, fallbackName: fallbackName)
 
         let existingDBPaths = candidateDBPaths(homeDirectory: homeDirectory).filter {
@@ -916,7 +954,8 @@ enum AntigravityAccountSwitcher {
         var fileBackups: [(path: String, data: Data?)] = []
         var candidateRollbackPaths: [String] = [
             "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
-            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
+            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token",
+            credentialUserScopePath(homeDirectory: homeDirectory)
         ]
         for dbPath in existingDBPaths {
             candidateRollbackPaths.append(dbPath)
@@ -966,7 +1005,10 @@ enum AntigravityAccountSwitcher {
                 updatedAnyAuthStore = true
             }
 
-            // 3. Commit authoritative Antigravity 2.0 KeyringTokenStorage last so a SQLite/fallback failure
+            // 3. Sync Antigravity 2.0 credential-user-scope (u<sha256(sub)[:16]>) or clear stale scope when sub is absent.
+            try syncCredentialUserScopeFile(idToken: parsed.idToken, homeDirectory: homeDirectory)
+
+            // 4. Commit authoritative Antigravity 2.0 KeyringTokenStorage last so a SQLite/fallback failure
             // never leaves Keyring holding the new account while local stores fail.
             if let preflightKeyringSecret {
                 try writeKeyringRawSecret(preflightKeyringSecret, homeDirectory: homeDirectory)
@@ -1193,6 +1235,31 @@ enum AntigravityAccountSwitcher {
             return
         }
         try? encoded.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    private static func syncCredentialUserScopeFile(idToken: String?, homeDirectory: String) throws {
+        let scopePath = credentialUserScopePath(homeDirectory: homeDirectory)
+        let parentDir = URL(fileURLWithPath: scopePath).deletingLastPathComponent().path
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: parentDir) else { return }
+
+        if let scope = computeUserScope(fromIDToken: idToken) {
+            let url = URL(fileURLWithPath: scopePath)
+            do {
+                try Data(scope.utf8).write(to: url, options: .atomic)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: scopePath)
+            } catch {
+                throw AntigravitySwitchError.databaseWriteFailed("Could not update credential-user-scope at \(scopePath).")
+            }
+        } else if fm.fileExists(atPath: scopePath) {
+            do {
+                try fm.removeItem(atPath: scopePath)
+            } catch {
+                if fm.fileExists(atPath: scopePath) {
+                    throw AntigravitySwitchError.databaseWriteFailed("Could not remove stale credential-user-scope at \(scopePath).")
+                }
+            }
+        }
     }
 
     @discardableResult
@@ -1733,6 +1800,52 @@ enum AntigravityAccountSwitcher {
         return true
     }
 
+    private static func isAntigravityLanguageServerRunning() -> Bool {
+        let pgrepPath = "/usr/bin/pgrep"
+        guard FileManager.default.isExecutableFile(atPath: pgrepPath) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pgrepPath)
+        process.arguments = ["-f", "/Antigravity.app/Contents/Resources/bin/language_server"]
+        process.terminationHandler = { _ in }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(0.5)
+        while process.isRunning && Date() < deadline {
+            Darwin.usleep(5_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            return false
+        }
+        return process.terminationStatus == 0
+    }
+
+    private static func terminateOrphanedLanguageServer() {
+        let pkillPath = "/usr/bin/pkill"
+        guard FileManager.default.isExecutableFile(atPath: pkillPath) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pkillPath)
+        process.arguments = ["-TERM", "-f", "/Antigravity.app/Contents/Resources/bin/language_server"]
+        process.terminationHandler = { _ in }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        try? process.run()
+        let deadline = Date().addingTimeInterval(0.5)
+        while process.isRunning && Date() < deadline {
+            Darwin.usleep(5_000)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+
     @MainActor
     private static func defaultRelaunchAntigravity(at appURL: URL) async -> Bool {
         let config = NSWorkspace.OpenConfiguration()
@@ -1745,6 +1858,101 @@ enum AntigravityAccountSwitcher {
         }
     }
 
+    struct RestartTargetCandidate: Equatable, Sendable {
+        let activeKey: String?
+        let authFileURL: URL
+        let email: String?
+        let displayName: String?
+
+        init(activeKey: String? = nil, authFileURL: URL, email: String?, displayName: String?) {
+            self.activeKey = activeKey
+            self.authFileURL = authFileURL
+            self.email = email
+            self.displayName = displayName
+        }
+    }
+
+    /// Selects the authoritative account target to reapply after Antigravity shuts down.
+    /// Prefers `lastActivated` whenever it matches `currentActiveKey` (or when `currentActiveKey`
+    /// is unset) so an account switch performed while awaiting shutdown is never overwritten
+    /// by a stale pre-await `fallback` entry.
+    static func selectRestartTarget(
+        lastActivated: RestartTargetCandidate?,
+        currentActiveKey: String?,
+        fallback: RestartTargetCandidate?,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> RestartTargetCandidate? {
+        let normalizedCurrentKey = currentActiveKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let hasCurrentKey = normalizedCurrentKey?.isEmpty == false
+
+        if let lastActivated, fileExists(lastActivated.authFileURL.path) {
+            let lastKey = lastActivated.activeKey?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let lastEmail = lastActivated.email?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !hasCurrentKey
+                || (lastKey?.isEmpty == false && lastKey == normalizedCurrentKey)
+                || (lastEmail?.isEmpty == false && lastEmail == normalizedCurrentKey) {
+                return lastActivated
+            }
+        }
+
+        if let fallback, fileExists(fallback.authFileURL.path) {
+            let fallbackKey = fallback.activeKey?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let fallbackEmail = fallback.email?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !hasCurrentKey
+                || (fallbackKey?.isEmpty == false && fallbackKey == normalizedCurrentKey)
+                || (fallbackEmail?.isEmpty == false && fallbackEmail == normalizedCurrentKey)
+                || lastActivated == nil {
+                return fallback
+            }
+        }
+
+        if let lastActivated, fileExists(lastActivated.authFileURL.path) {
+            return lastActivated
+        }
+        return nil
+    }
+
+    /// Re-applies the authoritative Antigravity account target before relaunch, retrying if a
+    /// newer account selection (`generation`) occurred while the detached credential write was in flight.
+    static func reapplyAuthoritativeRestartTarget(
+        maxAttempts: Int = 3,
+        resolveCurrentTarget: () async -> (generation: UInt64, target: RestartTargetCandidate?),
+        currentGeneration: () async -> UInt64,
+        applyTarget: @Sendable @escaping (RestartTargetCandidate) throws -> AntigravitySwitchedIdentity = { candidate in
+            try switchAccount(
+                authFileURL: candidate.authFileURL,
+                fallbackEmail: candidate.email,
+                fallbackName: candidate.displayName
+            )
+        },
+        commitAppliedTarget: (UInt64, RestartTargetCandidate, AntigravitySwitchedIdentity) async -> Void
+    ) async throws {
+        for _ in 0..<max(1, maxAttempts) {
+            let (genBefore, selected) = await resolveCurrentTarget()
+            guard let selected else { return }
+
+            let switched = try await Task.detached(priority: .userInitiated) {
+                try applyTarget(selected)
+            }.value
+
+            let genAfter = await currentGeneration()
+            if genAfter == genBefore {
+                await commitAppliedTarget(genBefore, selected, switched)
+                return
+            }
+        }
+    }
+
     @MainActor
     static func restartAntigravityApp(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
@@ -1753,7 +1961,10 @@ enum AntigravityAccountSwitcher {
         appExists: ((String) -> Bool)? = nil,
         isTargetRunning: (() -> Bool)? = nil,
         requestTerminate: (() -> Bool)? = nil,
-        relaunchApp: ((URL) async -> Bool)? = nil
+        isLanguageServerRunning: (@Sendable () -> Bool)? = nil,
+        terminateLanguageServer: (@Sendable () -> Void)? = nil,
+        relaunchApp: ((URL) async -> Bool)? = nil,
+        reapplyBeforeRelaunch: (() async throws -> Void)? = nil
     ) async -> Bool {
         let checkAppExists = appExists ?? { FileManager.default.fileExists(atPath: $0) }
         let checkRunning = isTargetRunning ?? { defaultIsAntigravityRunning() }
@@ -1782,11 +1993,50 @@ enum AntigravityAccountSwitcher {
             }
         }
 
-        // Re-sync app_storage.json after the old Electron process has exited and before relaunching,
-        // so quit-time windowState writes cannot clobber agy.onboarding.lastLoginUsername.
-        if let activeEmail = detectActiveAccount(homeDirectory: homeDirectory)?.email {
-            syncAppStorageFile(email: activeEmail, homeDirectory: homeDirectory)
+        let shouldCheckLanguageServer = isLanguageServerRunning != nil
+            || (isTargetRunning == nil && isRealUserHomeDirectory(homeDirectory))
+        if shouldCheckLanguageServer {
+            let checkLS = isLanguageServerRunning ?? { isAntigravityLanguageServerRunning() }
+            let terminateLS = terminateLanguageServer ?? { terminateOrphanedLanguageServer() }
+            let pollNs = UInt64(max(10, pollIntervalMilliseconds)) * 1_000_000
+            let waitTimeout = isLanguageServerRunning != nil ? min(timeoutSeconds, 0.2) : 1.5
+            let postTermTimeout = isLanguageServerRunning != nil ? min(timeoutSeconds, 0.2) : 1.0
+            let lsExited = await Task.detached(priority: .userInitiated) { () -> Bool in
+                let lsDeadline = Date().addingTimeInterval(waitTimeout)
+                while Date() < lsDeadline && checkLS() {
+                    try? await Task.sleep(nanoseconds: pollNs)
+                }
+                if checkLS() {
+                    terminateLS()
+                    let postTermDeadline = Date().addingTimeInterval(postTermTimeout)
+                    while Date() < postTermDeadline && checkLS() {
+                        try? await Task.sleep(nanoseconds: pollNs)
+                    }
+                }
+                return !checkLS()
+            }.value
+            // Abort before reapply/relaunch if the language server is still alive and could flush old credentials.
+            guard lsExited else {
+                return false
+            }
         }
+
+        // Re-apply the active account credentials after the old Electron & language_server processes have
+        // completely exited and before relaunching, so quit-time Keyring/app_storage.json/SQLite flushes
+        // from the old process can never revert the newly switched account.
+        if let reapplyBeforeRelaunch {
+            do {
+                try await reapplyBeforeRelaunch()
+            } catch {
+                return false
+            }
+        }
+
+        await Task.detached(priority: .userInitiated) {
+            if let activeEmail = detectActiveAccount(homeDirectory: homeDirectory)?.email {
+                syncAppStorageFile(email: activeEmail, homeDirectory: homeDirectory)
+            }
+        }.value
 
         return await relaunch(URL(fileURLWithPath: appPath))
     }

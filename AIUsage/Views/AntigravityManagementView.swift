@@ -92,6 +92,7 @@ struct AntigravityManagementView: View {
                 AntigravitySubscriptionSection(
                     entries: antigravityEntries,
                     isAppInstalled: envSummary.isAppInstalled,
+                    isRestarting: isRestartingAGY || activation.isAntigravityRestarting,
                     storageDisplayPath: envSummary.activeStoragePath,
                     onAddAccount: { showingAddAccount = true },
                     onRestartApp: { restartAntigravity() },
@@ -261,11 +262,18 @@ struct AntigravityManagementView: View {
     }
 
     private func restartAntigravity() {
-        guard !isRestartingAGY else { return }
+        guard !isRestartingAGY, !activation.isAntigravityRestarting else { return }
         isRestartingAGY = true
+        activation.isAntigravityRestarting = true
         Task { @MainActor in
-            let ok = await AntigravityAccountSwitcher.restartAntigravityApp()
+            let ok = await AntigravityAccountSwitcher.restartAntigravityApp(
+                reapplyBeforeRelaunch: {
+                    let latestActiveEntry = await MainActor.run { self.activeEntry }
+                    try await activation.reapplyAntigravityAccountForRestart(fallbackEntry: latestActiveEntry)
+                }
+            )
             isRestartingAGY = false
+            activation.isAntigravityRestarting = false
             refreshEnvironment()
             withAnimation(.easeInOut(duration: 0.2)) {
                 statusBannerIsError = !ok
@@ -744,6 +752,7 @@ struct AntigravityManagementView: View {
 struct AntigravitySubscriptionSection: View {
     let entries: [ProviderAccountEntry]
     let isAppInstalled: Bool
+    let isRestarting: Bool
     let storageDisplayPath: String
     let onAddAccount: () -> Void
     let onRestartApp: () -> Void
@@ -1125,7 +1134,8 @@ struct AntigravitySubscriptionSection: View {
                     }
                 ))
                 .labelsHidden()
-                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.antigravityBrand, isBusy: false))
+                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.antigravityBrand, isBusy: isRestarting))
+                .disabled(isRestarting)
                 .help(L(
                     "Switch Antigravity account in Keychain / state.vscdb without signing in via browser.",
                     "直接写入 Keychain / state.vscdb 切换 Antigravity 账号，无需再次打开浏览器登录。"
@@ -1161,6 +1171,7 @@ struct AntigravitySubscriptionSection: View {
                 } label: {
                     Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
                 }
+                .disabled(isRestarting)
 
                 if isAppInstalled {
                     Button {
@@ -1174,6 +1185,7 @@ struct AntigravitySubscriptionSection: View {
                     } label: {
                         Label(L("Switch & Restart Antigravity", "切换并重启 Antigravity"), systemImage: "arrow.clockwise.circle")
                     }
+                    .disabled(isRestarting)
                 }
                 Divider()
             }

@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Combine
 import QuotaBackend
@@ -51,8 +52,12 @@ final class ProviderActivationManager: ObservableObject {
 
     @Published var activationResult: ActivationResult?
     @Published var codexActivationResult: CodexActivationResult?
+    @Published var isAntigravityRestarting = false
 
     private var antigravityDetectionTask: Task<Void, Never>?
+    private var codexGlobalStateReconcileTask: Task<Void, Never>?
+    private var lastActivatedAntigravityTarget: AntigravityAccountSwitcher.RestartTargetCandidate?
+    private var antigravitySwitchGeneration: UInt64 = 0
 
     let accountStore = AccountStore.shared
     let settings = AppSettings.shared
@@ -105,9 +110,15 @@ final class ProviderActivationManager: ObservableObject {
             && !hasLocalAuthSource(for: entry)
     }
 
+    func isSwitchingDisabled(for providerId: String) -> Bool {
+        providerId == "antigravity" && isAntigravityRestarting
+    }
+
     /// 各处「切换 / 激活」入口的统一判定。
     func canSwitch(to entry: ProviderAccountEntry) -> Bool {
-        canActivateProvider(entry.providerId) && !isRemoteViewOnly(entry)
+        canActivateProvider(entry.providerId)
+            && !isRemoteViewOnly(entry)
+            && !isSwitchingDisabled(for: entry.providerId)
     }
 
     /// 互斥：Codex 代理接管 ~/.codex/config.toml 时调用，把当前 Codex 订阅账号标记为未激活，
@@ -129,6 +140,14 @@ final class ProviderActivationManager: ObservableObject {
             if entry.providerId == "codex" { codexActivationResult = .failure(msg) }
             throw ProviderError("remote_view_only", msg)
         }
+        if isSwitchingDisabled(for: entry.providerId) {
+            let msg = settings.t(
+                "Antigravity is currently restarting. Please wait for it to finish.",
+                "Antigravity 正在重启，请等待完成后再切换。"
+            )
+            activationResult = .failure(msg)
+            throw ProviderError("restart_in_progress", msg)
+        }
         switch entry.providerId {
         case "codex":
             try activateCodexAccount(entry: entry)
@@ -144,7 +163,12 @@ final class ProviderActivationManager: ObservableObject {
     /// 用户主动停用某账号（清除该 provider 的「当前激活」标记，不改动 auth.json 内容）。
     /// 与节点开关「关」对齐：关掉后该 provider 无激活账号（账号轨道与代理轨道仍互斥）。
     func deactivateAccount(entry: ProviderAccountEntry) {
+        guard !isSwitchingDisabled(for: entry.providerId) else { return }
         guard isActiveAccount(entry) else { return }
+        if entry.providerId == "antigravity" {
+            antigravitySwitchGeneration &+= 1
+            lastActivatedAntigravityTarget = nil
+        }
         activeProviderAccountIds[entry.providerId] = nil
         persistActiveIds()
         providerActivationLog.info("Deactivated \(entry.providerId, privacy: .public) account by user toggle")
@@ -225,11 +249,31 @@ final class ProviderActivationManager: ObservableObject {
             ))
         }
 
+        let targetOwnerHash = CodexAccountIdentity.rendererOwnerHash(fromAuthJSON: nativeJSON)
+        let knownOwnerHashes = allKnownCodexOwnerHashes(excluding: targetOwnerHash)
+
         // 目标账号验证完成后再解除代理接管，避免坏文件让当前可用路由先被停掉。
         // 停进程走通知（异步），但文件必须在写账号之前同步归位，否则异步 restore 会覆盖新账号。
+        // 先完成 config.toml 与 auth.json 写入，成功后才更新 .codex-global-state.json，避免切换失败时污染 renderer 状态。
         NotificationCenter.default.post(name: .codexSubscriptionAccountActivating, object: nil)
         try CodexConfigManager.shared.restore()
         try writeAuthFileWithBackup(targetDir: codexDir, targetPath: targetPath, data: nativeData, fm: fm)
+
+        let isCodexRunning = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+            .contains { !$0.isTerminated }
+        let syncOutcome = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexDir,
+            targetOwnerHash: targetOwnerHash,
+            additionalOwnerHashes: knownOwnerHashes,
+            transitionOwner: !isCodexRunning
+        )
+
+        scheduleCodexGlobalStateReconciliation(
+            codexDir: codexDir,
+            targetOwnerHash: targetOwnerHash,
+            additionalOwnerHashes: knownOwnerHashes,
+            syncOutcome: syncOutcome
+        )
 
         activeProviderAccountIds["codex"] = nativeIdentity.key
         persistActiveIds()
@@ -238,6 +282,88 @@ final class ProviderActivationManager: ObservableObject {
         let msg = settings.t("Switched to \(label)", "已切换到 \(label)")
         activationResult = .success(msg)
         codexActivationResult = .success(msg)
+    }
+
+    private func allKnownCodexOwnerHashes(excluding excludedHash: String? = nil) -> Set<String> {
+        let fm = FileManager.default
+        let codexDir = NSString(string: "~/.codex").expandingTildeInPath
+        var candidatePaths: Set<String> = [
+            "\(codexDir)/auth.json",
+            "\(codexDir)/auth.json.bak"
+        ]
+        for account in accountStore.accountRegistry where account.providerId == "codex" {
+            if let path = account.sourceFilePath?.nilIfBlank {
+                candidatePaths.insert(NSString(string: path).expandingTildeInPath)
+            }
+        }
+        for credential in AccountCredentialStore.shared.loadCredentials(for: "codex") {
+            if credential.authMethod == .authFile, let path = credential.credential.nilIfBlank {
+                candidatePaths.insert(NSString(string: path).expandingTildeInPath)
+            }
+            if let path = credential.metadata["sourcePath"]?.nilIfBlank {
+                candidatePaths.insert(NSString(string: path).expandingTildeInPath)
+            }
+        }
+
+        var hashes: Set<String> = []
+        for path in candidatePaths where fm.fileExists(atPath: path) {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let hash = CodexAccountIdentity.rendererOwnerHash(fromAuthJSON: json) else {
+                continue
+            }
+            hashes.insert(hash)
+        }
+        if let excludedHash {
+            hashes.remove(excludedHash)
+        }
+        return hashes
+    }
+
+    private func scheduleCodexGlobalStateReconciliation(
+        codexDir: String,
+        targetOwnerHash: String?,
+        additionalOwnerHashes: Set<String>,
+        syncOutcome: CodexGlobalStateSync.SyncOutcome
+    ) {
+        codexGlobalStateReconcileTask?.cancel()
+        codexGlobalStateReconcileTask = Task.detached(priority: .utility) {
+            try? await Task.sleep(nanoseconds: 1_200_000_000)
+            guard !Task.isCancelled else { return }
+
+            let bundleURL = await MainActor.run { () -> URL? in
+                NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+                    .first(where: { !$0.isTerminated })?
+                    .bundleURL
+            }
+
+            _ = await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+                codexDir: codexDir,
+                targetOwnerHash: targetOwnerHash,
+                additionalOwnerHashes: additionalOwnerHashes,
+                syncOutcome: syncOutcome,
+                isCodexRunning: {
+                    await MainActor.run {
+                        NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+                            .contains { !$0.isTerminated }
+                    }
+                },
+                requestTerminate: {
+                    await MainActor.run {
+                        let apps = NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+                            .filter { !$0.isTerminated }
+                        guard !apps.isEmpty else { return true }
+                        return apps.allSatisfy { $0.terminate() }
+                    }
+                },
+                relaunchCodex: {
+                    guard let bundleURL else { return }
+                    let config = NSWorkspace.OpenConfiguration()
+                    config.activates = false
+                    _ = try? await NSWorkspace.shared.openApplication(at: bundleURL, configuration: config)
+                }
+            )
+        }
     }
 
     // MARK: Gemini activation
@@ -324,8 +450,9 @@ final class ProviderActivationManager: ObservableObject {
         }
 
         do {
+            let authURL = URL(fileURLWithPath: resolved)
             let switched = try AntigravityAccountSwitcher.switchAccount(
-                authFileURL: URL(fileURLWithPath: resolved),
+                authFileURL: authURL,
                 fallbackEmail: email,
                 fallbackName: displayName
             )
@@ -334,6 +461,13 @@ final class ProviderActivationManager: ObservableObject {
                 ?? resolved
             let activeKey = AccountCredentialStore.normalizedAuthFilePath(entryPath).nilIfBlank
                 ?? switched.email.lowercased()
+            antigravitySwitchGeneration &+= 1
+            lastActivatedAntigravityTarget = AntigravityAccountSwitcher.RestartTargetCandidate(
+                activeKey: activeKey,
+                authFileURL: authURL,
+                email: switched.email.nilIfBlank ?? email,
+                displayName: switched.name.nilIfBlank ?? displayName
+            )
             antigravityDetectionTask?.cancel()
             activeProviderAccountIds["antigravity"] = activeKey
             persistActiveIds()
@@ -350,6 +484,64 @@ final class ProviderActivationManager: ObservableObject {
             activationResult = .failure(msg)
             throw error
         }
+    }
+
+    func reapplyAntigravityAccountForRestart(fallbackEntry: ProviderAccountEntry?) async throws {
+        let fm = FileManager.default
+        let fallbackCandidate: AntigravityAccountSwitcher.RestartTargetCandidate? = {
+            guard let fallbackEntry,
+                  !isRemoteViewOnly(fallbackEntry),
+                  hasLocalAuthSource(for: fallbackEntry),
+                  let resolved = resolveManagedSource(entry: fallbackEntry),
+                  fm.fileExists(atPath: resolved) else {
+                return nil
+            }
+            let email = fallbackEntry.accountEmail
+                ?? fallbackEntry.storedAccount?.email
+                ?? fallbackEntry.liveProvider?.accountLabel
+            let displayName = fallbackEntry.accountDisplayName
+                ?? fallbackEntry.storedAccount?.displayName
+                ?? email
+            let entryPath = fallbackEntry.storedAccount?.sourceFilePath
+                ?? fallbackEntry.liveProvider?.sourceFilePath
+                ?? resolved
+            let activeKey = AccountCredentialStore.normalizedAuthFilePath(entryPath).nilIfBlank
+                ?? email?.lowercased()
+            return AntigravityAccountSwitcher.RestartTargetCandidate(
+                activeKey: activeKey,
+                authFileURL: URL(fileURLWithPath: resolved),
+                email: email,
+                displayName: displayName
+            )
+        }()
+
+        try await AntigravityAccountSwitcher.reapplyAuthoritativeRestartTarget(
+            resolveCurrentTarget: {
+                await MainActor.run {
+                    let selected = AntigravityAccountSwitcher.selectRestartTarget(
+                        lastActivated: self.lastActivatedAntigravityTarget,
+                        currentActiveKey: self.activeProviderAccountIds["antigravity"],
+                        fallback: fallbackCandidate,
+                        fileExists: { fm.fileExists(atPath: $0) }
+                    )
+                    return (self.antigravitySwitchGeneration, selected)
+                }
+            },
+            currentGeneration: {
+                await MainActor.run { self.antigravitySwitchGeneration }
+            },
+            commitAppliedTarget: { generation, selected, switched in
+                await MainActor.run {
+                    guard self.antigravitySwitchGeneration == generation else { return }
+                    self.lastActivatedAntigravityTarget = AntigravityAccountSwitcher.RestartTargetCandidate(
+                        activeKey: selected.activeKey ?? switched.email.lowercased(),
+                        authFileURL: selected.authFileURL,
+                        email: switched.email.nilIfBlank ?? selected.email,
+                        displayName: switched.name.nilIfBlank ?? selected.displayName
+                    )
+                }
+            }
+        )
     }
 
     // MARK: Codex format conversion
@@ -516,8 +708,14 @@ final class ProviderActivationManager: ObservableObject {
 
     func applyDetectedAntigravityEmail(_ rawEmail: String?) {
         guard let email = rawEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank else {
+            lastActivatedAntigravityTarget = nil
             applyDetectedActiveId(nil, for: "antigravity", reason: "Antigravity credential store has no active account")
             return
+        }
+
+        if let targetEmail = lastActivatedAntigravityTarget?.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           targetEmail != email {
+            lastActivatedAntigravityTarget = nil
         }
 
         let matches = accountStore.accountRegistry.filter {

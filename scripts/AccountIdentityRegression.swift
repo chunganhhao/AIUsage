@@ -1249,5 +1249,400 @@ struct AccountIdentityRegression {
                 && AntigravityAccountSwitcher.extractRefreshToken(forEmail: "b@example.com", homeDirectory: r5NegativeHome.path) == "1//refresh-b-only"
                 && AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path) == nil,
               "AGY 2.0 R6 P2: refresh-only standalone is retained in resolveActiveStorageCandidates over conflicting legacy DB and returns default + explicit refresh token")
+
+        // 8l. [R7] Antigravity 2.0 credential-user-scope (u<sha256(sub)[:16]>) and post-termination reapplyBeforeRelaunch
+        let scopeHome = fm.temporaryDirectory.appendingPathComponent("agy2-user-scope-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: scopeHome) }
+
+        let jwtHeader = Data(#"{"alg":"RS256","typ":"JWT"}"#.utf8).base64EncodedString()
+        let jwtPayload = Data(#"{"sub":"102124208064353618681","email":"haindl8799@gmail.com"}"#.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+        let sampleIDToken = "\(jwtHeader).\(jwtPayload).sig"
+        check(AntigravityAccountSwitcher.computeUserScope(fromIDToken: sampleIDToken) == "uc292414f69fafb89",
+              "AGY 2.0 R7: computeUserScope computes u<sha256(sub)[:16]> matching language_server authstore.scopeForUserID")
+
+        let scopePath = AntigravityAccountSwitcher.credentialUserScopePath(homeDirectory: scopeHome.path)
+        let scopeAppStorage = AntigravityAccountSwitcher.appStoragePath(homeDirectory: scopeHome.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: scopePath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "chuydehotboy@gmail.com"])
+            .write(to: URL(fileURLWithPath: scopeAppStorage))
+
+        let haindlAuthFile = scopeHome.appendingPathComponent("haindl8799.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "haindl8799@gmail.com",
+            "access_token": "ya29.haindl_access",
+            "refresh_token": "1//haindl_refresh",
+            "id_token": sampleIDToken,
+            "expiry_date": 1_893_456_000_000
+        ]).write(to: haindlAuthFile)
+
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
+        let writtenScope = (try? String(contentsOfFile: scopePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        check(writtenScope == "uc292414f69fafb89",
+              "AGY 2.0 R7: switchAccount writes u<sha256(sub)[:16]> to credential-user-scope when id_token is present")
+
+        // Simulate running Electron + language_server clobbering Keyring, credential-user-scope, and app_storage.json on quit,
+        // and verify restartAntigravityApp's reapplyBeforeRelaunch hook restores all stores after termination and before relaunch.
+        var scopeAppRunning = true
+        let restartWithReapply = await AntigravityAccountSwitcher.restartAntigravityApp(
+            homeDirectory: scopeHome.path,
+            timeoutSeconds: 0.1,
+            pollIntervalMilliseconds: 10,
+            appExists: { $0 == "/Applications/Antigravity.app" },
+            isTargetRunning: { scopeAppRunning },
+            requestTerminate: {
+                // Simulate old process flushing stale account on exit
+                let clobberedToken = try! JSONSerialization.data(withJSONObject: [
+                    "id_token_email": "chuydehotboy@gmail.com",
+                    "token": ["access_token": "ya29.stale_chuyde", "refresh_token": "1//stale_chuyde"]
+                ])
+                try? AntigravityAccountSwitcher.writeKeyringRawSecret(
+                    AntigravityAccountSwitcher.encodeKeyringSecret(clobberedToken),
+                    homeDirectory: scopeHome.path
+                )
+                try? Data("ustale00000000000".utf8).write(to: URL(fileURLWithPath: scopePath))
+                try? JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "chuydehotboy@gmail.com"])
+                    .write(to: URL(fileURLWithPath: scopeAppStorage))
+                scopeAppRunning = false
+                return true
+            },
+            relaunchApp: { _ in true },
+            reapplyBeforeRelaunch: {
+                _ = try AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
+            }
+        )
+        let scopeAfterRestart = (try? String(contentsOfFile: scopePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storageAfterRestart = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: scopeAppStorage)))) as? [String: Any]
+        check(restartWithReapply
+                && AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: scopeHome.path)?.email == "haindl8799@gmail.com"
+                && scopeAfterRestart == "uc292414f69fafb89"
+                && storageAfterRestart?["agy.onboarding.lastLoginUsername"] as? String == "haindl8799@gmail.com",
+              "AGY 2.0 R7: restartAntigravityApp reapplyBeforeRelaunch restores Keyring, credential-user-scope, and app_storage.json after quit-time clobber")
+
+        // Switching to an account without id_token clears stale credential-user-scope so language_server derives scope cleanly
+        let noIDTokenAuth = scopeHome.appendingPathComponent("no_id_token.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "noidtoken@gmail.com",
+            "access_token": "ya29.noid_access",
+            "refresh_token": "1//noid_refresh"
+        ]).write(to: noIDTokenAuth)
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: noIDTokenAuth, homeDirectory: scopeHome.path)
+        check(!fm.fileExists(atPath: scopePath),
+              "AGY 2.0 R7: switchAccount removes stale credential-user-scope when target account lacks id_token")
+
+        // [R8 Finding 4] restartAntigravityApp aborts before reapply/relaunch if language_server fails to exit
+        var lsReapplyCalled = false
+        var lsRelaunchCalled = false
+        let restartBlockedByLS = await AntigravityAccountSwitcher.restartAntigravityApp(
+            homeDirectory: scopeHome.path,
+            timeoutSeconds: 0.05,
+            pollIntervalMilliseconds: 10,
+            appExists: { $0 == "/Applications/Antigravity.app" },
+            isTargetRunning: { false },
+            requestTerminate: { true },
+            isLanguageServerRunning: { true },
+            terminateLanguageServer: { },
+            relaunchApp: { _ in
+                lsRelaunchCalled = true
+                return true
+            },
+            reapplyBeforeRelaunch: {
+                lsReapplyCalled = true
+            }
+        )
+        check(!restartBlockedByLS && !lsReapplyCalled && !lsRelaunchCalled,
+              "AGY 2.0 R8 Finding 4: restartAntigravityApp fails closed without reapply or relaunch when language_server refuses to exit")
+
+        // [R8 Finding 5] selectRestartTarget prefers newer lastActivated account over stale pre-await fallback entry
+        let candidateA = AntigravityAccountSwitcher.RestartTargetCandidate(
+            activeKey: haindlAuthFile.path.lowercased(),
+            authFileURL: haindlAuthFile,
+            email: "haindl8799@gmail.com",
+            displayName: "Haindl"
+        )
+        let candidateB = AntigravityAccountSwitcher.RestartTargetCandidate(
+            activeKey: noIDTokenAuth.path.lowercased(),
+            authFileURL: noIDTokenAuth,
+            email: "noidtoken@gmail.com",
+            displayName: "NoID"
+        )
+        let selectedDuringMidShutdownSwitch = AntigravityAccountSwitcher.selectRestartTarget(
+            lastActivated: candidateB,
+            currentActiveKey: noIDTokenAuth.path.lowercased(),
+            fallback: candidateA
+        )
+        check(selectedDuringMidShutdownSwitch == candidateB,
+              "AGY 2.0 R8 Finding 5: selectRestartTarget keeps newer mid-shutdown account B instead of reverting to stale pre-await fallback A")
+
+        // [R8 Re-review P2 #3] reapplyAuthoritativeRestartTarget retries and writes newer account B if generation advances during detached write of A
+        final class ReapplyRaceHarness: @unchecked Sendable {
+            var generation: UInt64 = 1
+            var activeCandidate: AntigravityAccountSwitcher.RestartTargetCandidate
+            var appliedEmails: [String] = []
+            var committedEmail: String?
+            let replacementCandidate: AntigravityAccountSwitcher.RestartTargetCandidate
+
+            init(
+                initial: AntigravityAccountSwitcher.RestartTargetCandidate,
+                replacement: AntigravityAccountSwitcher.RestartTargetCandidate
+            ) {
+                self.activeCandidate = initial
+                self.replacementCandidate = replacement
+            }
+        }
+        let raceHarness = ReapplyRaceHarness(initial: candidateA, replacement: candidateB)
+        try! await AntigravityAccountSwitcher.reapplyAuthoritativeRestartTarget(
+            resolveCurrentTarget: {
+                (raceHarness.generation, raceHarness.activeCandidate)
+            },
+            currentGeneration: {
+                raceHarness.generation
+            },
+            applyTarget: { candidate in
+                let email = candidate.email ?? ""
+                raceHarness.appliedEmails.append(email)
+                if raceHarness.generation == 1 {
+                    // Simulate another UI surface activating account B while account A's detached write is in flight
+                    raceHarness.generation = 2
+                    raceHarness.activeCandidate = raceHarness.replacementCandidate
+                }
+                return AntigravitySwitchedIdentity(
+                    email: email,
+                    name: candidate.displayName ?? email,
+                    sourceFilePath: candidate.authFileURL.path
+                )
+            },
+            commitAppliedTarget: { _, _, switched in
+                raceHarness.committedEmail = switched.email
+            }
+        )
+        check(raceHarness.appliedEmails == ["haindl8799@gmail.com", "noidtoken@gmail.com"]
+                && raceHarness.committedEmail == "noidtoken@gmail.com",
+              "AGY 2.0 R8 Re-review P2 #3: reapplyAuthoritativeRestartTarget detects mid-write generation change and re-applies latest account B before relaunch")
+
+        // 8m. Codex Desktop `.codex-global-state.json` `electron-account-renderer-state-v1` project preservation across switches
+        let codexNewPayload = try! JSONSerialization.data(withJSONObject: [
+            "email": "thuynmarket@gmail.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_user_id": "user-M3iQyBihTZHr2fsTMkxbdIIh",
+                "chatgpt_account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34"
+            ]
+        ]).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let codexNewIDToken = "\(jwtHeader).\(codexNewPayload).sig"
+        let codexNewAuthJSON: [String: Any] = [
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34"
+            ]
+        ]
+        let expectedNewOwner = "e5e65172e49b105ece5eb716096c7ebd5850162284878f507f991ee55623aefd"
+        let expectedOldOwner = "6faffb3f2b256e735438283a3e5367793c287e4d7b0eee82d0b1cec2050b4098"
+        let expectedThirdOwner = "feab04e26773b0b80be5aa0faa24f55e4a8fc214324f7e359fe47ee137c58fd8"
+
+        check(CodexAccountIdentity.rendererOwnerHash(fromAuthJSON: codexNewAuthJSON) == expectedNewOwner,
+              "Codex Desktop R8: rendererOwnerHash preserves mixed-case userId and matches sha256(JSON.stringify([userId, accountId]))")
+
+        let codexStateDir = scopeHome.appendingPathComponent("codex-global-state-r8", isDirectory: true)
+        try! fm.createDirectory(at: codexStateDir, withIntermediateDirectories: true)
+        let codexGlobalStateFile = codexStateDir.appendingPathComponent(".codex-global-state.json")
+
+        let simulatedGlobalState: [String: Any] = [
+            "electron-persisted-atom-state": ["theme": "dark-old"],
+            "active-workspace-roots": ["/Users/apple/Downloads/Repo Github/AIUsage"],
+            "electron-account-renderer-state-v1": [
+                "owner": expectedOldOwner,
+                "inactive": [
+                    expectedNewOwner: [
+                        "atoms": ["flat-project-sidebar-preferences-v1": ["mode": "project"], "pref": "new-owner"],
+                        "globals": [
+                            "active-workspace-roots": ["/tmp/keep-new-root"],
+                            "electron-workspace-root-labels": ["/tmp/keep-new-root": "NewRootLabel"]
+                        ]
+                    ]
+                ]
+            ],
+            "local-projects": [
+                "794e1659-fa82-4bbb-b1b0-64bcef1b9aae": [
+                    "id": "794e1659-fa82-4bbb-b1b0-64bcef1b9aae",
+                    "name": "AIUsage",
+                    "rootPaths": ["/Users/apple/Downloads/Repo Github/AIUsage"],
+                    "createdAt": 1_793_888_118_060,
+                    "updatedAt": 1_793_888_118_060,
+                    "chatGptBacking": ["accountId": "b73b560c-13eb-49f1-8bd7-666b0009a0cf", "userId": "user-betSUdib31A928IHX7RMfp9C", "projectId": "g-p-123"]
+                ]
+            ],
+            "project-order": ["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"],
+            "thread-project-assignments": [
+                "01a087c3-1de4-72d0-af42-0fba9478f1f7": [
+                    "projectKind": "local",
+                    "projectId": "794e1659-fa82-4bbb-b1b0-64bcef1b9aae"
+                ]
+            ]
+        ]
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+
+        // [R8 Finding 2] Same-owner sync retains the owner's own chatGptBacking and preserves inactive snapshots' roots/labels/atoms
+        _ = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedOldOwner,
+            additionalOwnerHashes: [expectedNewOwner, expectedThirdOwner]
+        )
+        let sameOwnerState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let sameOwnerTopProjects = (sameOwnerState["local-projects"] as? [String: Any]) ?? [:]
+        let sameOwnerAIUsage = (sameOwnerTopProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let sameOwnerRenderer = (sameOwnerState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let sameOwnerInactive = (sameOwnerRenderer["inactive"] as? [String: Any]) ?? [:]
+        let preseededNewEntry = (sameOwnerInactive[expectedNewOwner] as? [String: Any]) ?? [:]
+        let preseededNewAtoms = (preseededNewEntry["atoms"] as? [String: Any]) ?? [:]
+        let preseededNewGlobals = (preseededNewEntry["globals"] as? [String: Any]) ?? [:]
+        check(sameOwnerAIUsage["chatGptBacking"] != nil
+                && (preseededNewAtoms["pref"] as? String) == "new-owner"
+                && (preseededNewGlobals["active-workspace-roots"] as? [String]) == ["/tmp/keep-new-root"]
+                && ((preseededNewGlobals["electron-workspace-root-labels"] as? [String: String])?["/tmp/keep-new-root"]) == "NewRootLabel",
+              "Codex Desktop R8 Finding 1 & 2: same-owner sync retains owner's chatGptBacking and preserves inactive account's atoms, roots, and labels")
+
+        // [R8 Finding 1] Pre-auth sync (`transitionOwner: false`) does NOT change owner or delete target's inactive snapshot
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+        let preseedSync = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner, expectedThirdOwner],
+            transitionOwner: false
+        )
+        let preseededState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let preseededRenderer = (preseededState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let preseededInactive = (preseededRenderer["inactive"] as? [String: Any]) ?? [:]
+        check(!preseedSync.wasTargetPreseeded
+                && preseedSync.projectCount == 1
+                && (preseededRenderer["owner"] as? String) == expectedOldOwner
+                && preseededInactive[expectedNewOwner] != nil,
+              "Codex Desktop R8 Finding 1: non-transition sync preserves current owner and keeps destination account snapshot in inactive")
+
+        // [R8 Finding 1 & 2] Explicit owner transition (`transitionOwner: true`) restores target atoms/globals, strips foreign backing on target, and keeps source backing in inactive[oldOwner]
+        let transitionSync = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner, expectedThirdOwner],
+            transitionOwner: true
+        )
+        let syncedState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let syncedTopProjects = (syncedState["local-projects"] as? [String: Any]) ?? [:]
+        let syncedAIUsageProject = (syncedTopProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let syncedTopAtoms = (syncedState["electron-persisted-atom-state"] as? [String: Any]) ?? [:]
+        let syncedRendererState = (syncedState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let syncedInactive = (syncedRendererState["inactive"] as? [String: Any]) ?? [:]
+        let oldOwnerEntry = (syncedInactive[expectedOldOwner] as? [String: Any]) ?? [:]
+        let oldOwnerGlobals = (oldOwnerEntry["globals"] as? [String: Any]) ?? [:]
+        let oldOwnerProjects = (oldOwnerGlobals["local-projects"] as? [String: Any]) ?? [:]
+        let oldOwnerAIUsage = (oldOwnerProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let thirdOwnerEntry = (syncedInactive[expectedThirdOwner] as? [String: Any]) ?? [:]
+        let thirdOwnerGlobals = (thirdOwnerEntry["globals"] as? [String: Any]) ?? [:]
+        let thirdOwnerProjects = (thirdOwnerGlobals["local-projects"] as? [String: Any]) ?? [:]
+
+        check(transitionSync.wasTargetPreseeded
+                && (syncedRendererState["owner"] as? String) == expectedNewOwner
+                && (syncedAIUsageProject["name"] as? String) == "AIUsage"
+                && syncedAIUsageProject["chatGptBacking"] == nil
+                && oldOwnerAIUsage["chatGptBacking"] != nil
+                && (syncedTopAtoms["pref"] as? String) == "new-owner"
+                && (syncedState["active-workspace-roots"] as? [String]) == ["/tmp/keep-new-root"]
+                && thirdOwnerProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] != nil
+                && syncedInactive[expectedNewOwner] == nil,
+              "Codex Desktop R8 Finding 1 & 2: transitionOwner restores target atoms/globals, strips foreign chatGptBacking on target, and retains source owner's chatGptBacking in inactive")
+
+        // [R8 Finding 3] reconcileRunningCodexDesktop fails closed if Codex Desktop refuses termination or times out, and transitions/relaunches only after verified exit
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+        var codexRelaunched = false
+        let codexTimeoutResult = await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner],
+            syncOutcome: preseedSync,
+            pollAttempts: 2,
+            pollIntervalNanoseconds: 1_000_000,
+            isCodexRunning: { true },
+            requestTerminate: { true },
+            relaunchCodex: { codexRelaunched = true }
+        )
+        let stateAfterTimeout = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterTimeout = ((stateAfterTimeout["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(!codexTimeoutResult && !codexRelaunched && ownerAfterTimeout == expectedOldOwner,
+              "Codex Desktop R8 Finding 3: reconcileRunningCodexDesktop fails closed without owner transition or relaunch when running Codex Desktop does not exit")
+
+        var simulatedCodexRunning = true
+        let cleanExitResult = await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner],
+            syncOutcome: preseedSync,
+            pollAttempts: 3,
+            pollIntervalNanoseconds: 1_000_000,
+            isCodexRunning: { simulatedCodexRunning },
+            requestTerminate: {
+                simulatedCodexRunning = false
+                return true
+            },
+            relaunchCodex: { codexRelaunched = true }
+        )
+        let stateAfterCleanExit = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterCleanExit = ((stateAfterCleanExit["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(cleanExitResult && codexRelaunched && ownerAfterCleanExit == expectedNewOwner,
+              "Codex Desktop R8 Finding 3: reconcileRunningCodexDesktop transitions owner and relaunches after verified Codex Desktop exit")
+
+        // [R8 Re-review P2 #1] accountId-only chatGptBacking (without userId) is preserved for a real hashed renderer owner
+        let realHashedOwnerA = CodexAccountIdentity.rendererOwnerHash(userId: "user-A", accountId: "account-A")!
+        try! JSONSerialization.data(withJSONObject: [
+            "local-projects": [
+                "p": [
+                    "id": "p",
+                    "name": "P",
+                    "chatGptBacking": ["accountId": "account-A", "projectId": "cloud-p"]
+                ]
+            ],
+            "electron-account-renderer-state-v1": [
+                "owner": realHashedOwnerA,
+                "inactive": [String: Any]()
+            ]
+        ]).write(to: codexGlobalStateFile)
+        _ = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: realHashedOwnerA
+        )
+        let partialBackingState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let partialBackingProject = ((partialBackingState["local-projects"] as? [String: Any])?["p"]) as? [String: Any]
+        check(partialBackingProject?["chatGptBacking"] != nil,
+              "Codex Desktop R8 Re-review P2 #1: accountId-only chatGptBacking is preserved for real hashed renderer owner")
+
+        // [R8 Re-review P2 #2] Cancelled reconciliation while suspended in isCodexRunning does not commit stale owner
+        try! JSONSerialization.data(withJSONObject: [
+            "local-projects": ["p": ["id": "p", "name": "P"]],
+            "electron-account-renderer-state-v1": [
+                "owner": expectedNewOwner,
+                "inactive": [String: Any]()
+            ]
+        ]).write(to: codexGlobalStateFile)
+        let cancelledDuringCheckTask = Task {
+            await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+                codexDir: codexStateDir.path,
+                targetOwnerHash: expectedOldOwner,
+                syncOutcome: .init(wasTargetPreseeded: false, projectCount: 1),
+                isCodexRunning: {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return false
+                },
+                requestTerminate: { false },
+                relaunchCodex: { }
+            )
+        }
+        let cancelledDuringCheckOutcome = await cancelledDuringCheckTask.value
+        let stateAfterCancelledCheck = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterCancelledCheck = ((stateAfterCancelledCheck["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(!cancelledDuringCheckOutcome && ownerAfterCancelledCheck == expectedNewOwner,
+              "Codex Desktop R8 Re-review P2 #2: reconciliation cancelled inside isCodexRunning aborts without mutating owner to stale account")
     }
 }
