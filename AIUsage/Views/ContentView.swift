@@ -188,6 +188,9 @@ struct ContentView: View {
                 case .opencodeManagement:
                     OpenCodeManagementView()
                         .navigationTitle(L("OpenCode Proxy", "OpenCode 代理"))
+                case .antigravityManagement:
+                    AntigravityManagementView()
+                        .navigationTitle("Antigravity")
                 case .scienceProxyManagement:
                     ClaudeHubView(initialTab: .science)
                         .navigationTitle("Claude")

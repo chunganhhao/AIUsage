@@ -18,7 +18,7 @@ extension Notification.Name {
 final class ProviderActivationManager: ObservableObject {
     static let shared = ProviderActivationManager()
 
-    static let activatableProviders: Set<String> = ["codex", "gemini"]
+    static let activatableProviders: Set<String> = ["codex", "gemini", "antigravity"]
 
     @Published var activeProviderAccountIds: [String: String] = {
         guard let data = UserDefaults.standard.data(forKey: DefaultsKey.activeProviderAccountIds) else {
@@ -132,6 +132,8 @@ final class ProviderActivationManager: ObservableObject {
             try activateCodexAccount(entry: entry)
         case "gemini":
             try activateGeminiAccount(entry: entry)
+        case "antigravity":
+            try activateAntigravityAccount(entry: entry)
         default:
             break
         }
@@ -153,6 +155,19 @@ final class ProviderActivationManager: ObservableObject {
             let identity = entry.liveProvider.map { AccountIdentityPolicy.codexIdentity(for: $0) }
                 ?? entry.storedAccount.map { AccountIdentityPolicy.codexIdentity(for: $0) }
             return identity?.key != nil && identity?.key == activeId
+        }
+
+        if entry.providerId == "antigravity" {
+            if let entryPath = entry.storedAccount?.sourceFilePath ?? entry.liveProvider?.sourceFilePath,
+               AccountCredentialStore.normalizedAuthFilePath(entryPath) == activeId {
+                return true
+            }
+            if !activeId.contains("/"),
+               let email = entry.accountEmail?.lowercased().nilIfBlank,
+               email == activeId {
+                return true
+            }
+            return false
         }
 
         if AccountIdentityPolicy.isMultiWorkspace(entry.providerId) {
@@ -286,6 +301,52 @@ final class ProviderActivationManager: ObservableObject {
 
         let data = try JSONSerialization.data(withJSONObject: accounts, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: URL(fileURLWithPath: googleAccountsPath), options: .atomic)
+    }
+
+    // MARK: Antigravity activation
+
+    func activateAntigravityAccount(entry: ProviderAccountEntry) throws {
+        let fm = FileManager.default
+        let email = entry.accountEmail
+            ?? entry.storedAccount?.email
+            ?? entry.liveProvider?.accountLabel
+        let displayName = entry.accountDisplayName
+            ?? entry.storedAccount?.displayName
+            ?? email
+
+        let resolved = resolveManagedSource(entry: entry)
+        guard let resolved, fm.fileExists(atPath: resolved) else {
+            let msg = settings.t("Auth file not found for this account.", "找不到该账号的认证文件")
+            activationResult = .failure(msg)
+            throw ProviderError("source_not_found", msg)
+        }
+
+        do {
+            let switched = try AntigravityAccountSwitcher.switchAccount(
+                authFileURL: URL(fileURLWithPath: resolved),
+                fallbackEmail: email,
+                fallbackName: displayName
+            )
+            let entryPath = entry.storedAccount?.sourceFilePath
+                ?? entry.liveProvider?.sourceFilePath
+                ?? resolved
+            let activeKey = AccountCredentialStore.normalizedAuthFilePath(entryPath).nilIfBlank
+                ?? switched.email.lowercased()
+            activeProviderAccountIds["antigravity"] = activeKey
+            persistActiveIds()
+
+            let label = switched.email.nilIfBlank ?? email ?? "Antigravity"
+            let msg = settings.t(
+                "Switched to \(label). Quit & reopen Antigravity to apply.",
+                "已切换到 \(label)，重启 Antigravity 后生效。"
+            )
+            activationResult = .success(msg)
+        } catch {
+            let redacted = SensitiveDataRedactor.redactedMessage(for: error)
+            let msg = settings.t("Switch failed: \(redacted)", "切换失败：\(redacted)")
+            activationResult = .failure(msg)
+            throw error
+        }
     }
 
     // MARK: Codex format conversion
@@ -448,6 +509,36 @@ final class ProviderActivationManager: ObservableObject {
 
         let active = (json["active"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         applyDetectedActiveId(active, for: "gemini", reason: "google_accounts.json has no active account")
+    }
+
+    func detectActiveAntigravityAccount() {
+        guard let detected = AntigravityAccountSwitcher.detectActiveAccount(),
+              let email = detected.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank else {
+            applyDetectedActiveId(nil, for: "antigravity", reason: "Antigravity state.vscdb has no active account")
+            return
+        }
+
+        let matches = accountStore.accountRegistry.filter {
+            $0.providerId == "antigravity"
+                && !$0.isHidden
+                && !$0.isPermanentlyRemoved
+                && $0.email.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == email
+        }
+
+        if let currentActive = activeProviderAccountIds["antigravity"]?.lowercased(),
+           matches.contains(where: {
+               guard let path = $0.sourceFilePath else { return false }
+               return AccountCredentialStore.normalizedAuthFilePath(path) == currentActive
+           }) {
+            return
+        }
+
+        if let matchedPath = matches.first?.sourceFilePath,
+           let normalizedPath = AccountCredentialStore.normalizedAuthFilePath(matchedPath).nilIfBlank {
+            applyDetectedActiveId(normalizedPath, for: "antigravity", reason: "matched Antigravity state.vscdb email to stored sourceFilePath")
+        } else {
+            applyDetectedActiveId(email, for: "antigravity", reason: "matched Antigravity state.vscdb email")
+        }
     }
 
 }

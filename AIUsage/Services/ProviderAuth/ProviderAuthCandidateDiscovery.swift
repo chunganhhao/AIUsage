@@ -64,17 +64,19 @@ extension ProviderAuthManager {
         return deduplicated(candidates)
     }
 
-    internal static func antigravityCandidates() -> [ProviderAuthCandidate] {
-        guard let authStatus = readAntigravityAuthStatus() else { return [] }
-        guard let apiKey = authStatus["apiKey"] as? String, !apiKey.isEmpty else { return [] }
+    internal static func antigravityCandidates(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> [ProviderAuthCandidate] {
+        guard let payload = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: homeDirectory) else {
+            return []
+        }
 
-        let email = authStatus["email"] as? String
-        let name = authStatus["name"] as? String
+        let email = payload.email
+        let name = payload.name
         let title = email ?? name ?? "Antigravity IDE session"
         let sourceId = "antigravity-ide:\(email?.lowercased() ?? "default")"
 
         let fileManager = FileManager.default
-        let home = fileManager.homeDirectoryForCurrentUser.path
         let sessionDir = fileManager.temporaryDirectory
             .appendingPathComponent("aiusage-antigravity-import-\(sourceId.hashValue)", isDirectory: true)
         try? fileManager.createDirectory(at: sessionDir, withIntermediateDirectories: true)
@@ -82,12 +84,12 @@ extension ProviderAuthManager {
         let authFileURL = sessionDir.appendingPathComponent("antigravity_ide_creds.json")
 
         var authJSON: [String: Any] = [
-            "access_token": apiKey,
+            "access_token": payload.accessToken,
             "token_type": "Bearer",
             "expired": "2000-01-01T00:00:00Z"
         ]
         if let email { authJSON["email"] = email }
-        if let refreshToken = extractAntigravityRefreshToken() {
+        if let refreshToken = payload.refreshToken, !refreshToken.isEmpty {
             authJSON["refresh_token"] = refreshToken
         }
 
@@ -96,8 +98,7 @@ extension ProviderAuthManager {
             return []
         }
 
-        let dbPath = "\(home)/Library/Application Support/Antigravity/User/globalStorage/state.vscdb"
-        let dbURL = URL(fileURLWithPath: dbPath)
+        let dbURL = URL(fileURLWithPath: payload.databasePath)
         let modifiedAt = modificationDate(for: dbURL)
 
         return [
@@ -117,90 +118,6 @@ extension ProviderAuthManager {
                 identityScope: .sharedSource
             )
         ]
-    }
-
-    private static let antigravityDBPath: String = {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        return "\(home)/Library/Application Support/Antigravity/User/globalStorage/state.vscdb"
-    }()
-
-    private static func readAntigravityAuthStatus() -> [String: Any]? {
-        guard FileManager.default.fileExists(atPath: antigravityDBPath) else { return nil }
-        guard let db = openSQLiteDB(at: antigravityDBPath) else { return nil }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        let query = "SELECT value FROM ItemTable WHERE key = 'antigravityAuthStatus'"
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(stmt) }
-
-        guard sqlite3_step(stmt) == SQLITE_ROW,
-              let cString = sqlite3_column_text(stmt, 0) else { return nil }
-
-        let jsonString = String(cString: cString)
-        guard let data = jsonString.data(using: .utf8),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            return nil
-        }
-        return json
-    }
-
-    private static func extractAntigravityRefreshToken() -> String? {
-        guard FileManager.default.fileExists(atPath: antigravityDBPath) else { return nil }
-        guard let db = openSQLiteDB(at: antigravityDBPath) else { return nil }
-        defer { sqlite3_close(db) }
-
-        var stmt: OpaquePointer?
-        let query = "SELECT value FROM ItemTable WHERE key = 'antigravityUnifiedStateSync.oauthToken'"
-        guard sqlite3_prepare_v2(db, query, -1, &stmt, nil) == SQLITE_OK else { return nil }
-        defer { sqlite3_finalize(stmt) }
-
-        guard sqlite3_step(stmt) == SQLITE_ROW,
-              let cString = sqlite3_column_text(stmt, 0) else { return nil }
-
-        let b64String = String(cString: cString)
-        guard let outerDecoded = Data(base64Encoded: b64String) else { return nil }
-
-        // Protobuf binary: use .isoLatin1 to losslessly map every byte to a character
-        guard let outerText = String(data: outerDecoded, encoding: .isoLatin1) else { return nil }
-
-        guard let refreshTokenPattern = try? NSRegularExpression(pattern: #"1//[A-Za-z0-9_-]+"#) else { return nil }
-
-        if let match = refreshTokenPattern.firstMatch(in: outerText, range: NSRange(outerText.startIndex..., in: outerText)),
-           let range = Range(match.range, in: outerText) {
-            return String(outerText[range])
-        }
-
-        // Protobuf nests tokens inside inner Base64 segments; decode and search each
-        guard let innerB64Pattern = try? NSRegularExpression(pattern: #"[A-Za-z0-9+/_-]{40,}"#) else { return nil }
-        let innerMatches = innerB64Pattern.matches(in: outerText, range: NSRange(outerText.startIndex..., in: outerText))
-        for innerMatch in innerMatches {
-            guard let matchRange = Range(innerMatch.range, in: outerText) else { continue }
-            let segment = String(outerText[matchRange])
-                .replacingOccurrences(of: "-", with: "+")
-                .replacingOccurrences(of: "_", with: "/")
-            let padded = segment + String(repeating: "=", count: (4 - segment.count % 4) % 4)
-            guard let innerData = Data(base64Encoded: padded),
-                  let innerText = String(data: innerData, encoding: .isoLatin1) else {
-                continue
-            }
-            if let match = refreshTokenPattern.firstMatch(in: innerText, range: NSRange(innerText.startIndex..., in: innerText)),
-               let range = Range(match.range, in: innerText) {
-                return String(innerText[range])
-            }
-        }
-        return nil
-    }
-
-    private static func openSQLiteDB(at path: String) -> OpaquePointer? {
-        var db: OpaquePointer?
-        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_NOMUTEX
-        guard sqlite3_open_v2(path, &db, flags, nil) == SQLITE_OK else {
-            if let db { sqlite3_close(db) }
-            return nil
-        }
-        sqlite3_exec(db, "PRAGMA journal_mode=wal;", nil, nil, nil)
-        return db
     }
 
     private static let kiroFingerprintKeys = ["email", "userId", "accountEmail", "profile_arn", "profileArn"]

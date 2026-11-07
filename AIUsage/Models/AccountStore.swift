@@ -393,50 +393,47 @@ final class AccountStore: ObservableObject {
     /// Permanent delete: remove linked Keychain credentials and suppress rediscovery.
     /// Multi-workspace providers (Codex) can come back from ~/.codex or AuthImports unless
     /// a permanently-removed tombstone remains — those are hidden from the Hidden Accounts UI.
+    @discardableResult
     func deleteAccount(
         _ entry: ProviderAccountEntry,
-        onPostRegistryDelete: () -> Void
-    ) {
-        let matchedCredentials = matchingCredentialsImpl(for: entry)
-        for credential in matchedCredentials {
-            AccountCredentialStore.shared.deleteCredential(credential)
-        }
-
-        let matchingIndices = matchingStoredAccountIndices(for: entry)
-        for index in matchingIndices.sorted(by: >) {
-            accountRegistry.remove(at: index)
-        }
-
-        if let tombstone = makeStoredAccount(
-            from: entry,
-            note: nil,
-            isHidden: true,
-            lastSeenAt: SharedFormatters.iso8601String(from: Date()),
-            isPermanentlyRemoved: true
-        ) {
-            accountRegistry.append(tombstone)
-        }
-
-        _ = normalizeAccountRegistryAgainstCredentials()
-        deduplicateAccountRegistry()
-        persistAccountRegistry()
-
-        onPostRegistryDelete()
-
-        cleanupManagedCredentialArtifacts()
+        onPostRegistryDelete: () -> Void = {}
+    ) -> Bool {
+        !deleteAccounts([entry], onPostRegistryDelete: { _ in onPostRegistryDelete() }).isEmpty
     }
 
+    @_disfavoredOverload
+    @discardableResult
     func deleteAccounts(
         _ entries: [ProviderAccountEntry],
         onPostRegistryDelete: () -> Void
-    ) {
-        guard !entries.isEmpty else { return }
+    ) -> [ProviderAccountEntry] {
+        deleteAccounts(entries) { _ in
+            onPostRegistryDelete()
+        }
+    }
+
+    @discardableResult
+    func deleteAccounts(
+        _ entries: [ProviderAccountEntry],
+        onPostRegistryDelete: ([ProviderAccountEntry]) -> Void = { _ in }
+    ) -> [ProviderAccountEntry] {
+        guard !entries.isEmpty else { return [] }
+
+        var allCredentialsDeleted = true
+        var deletedEntries: [ProviderAccountEntry] = []
 
         for entry in entries {
             let matchedCredentials = matchingCredentialsImpl(for: entry)
-            for credential in matchedCredentials {
-                AccountCredentialStore.shared.deleteCredential(credential)
+            do {
+                try AccountCredentialStore.shared.deleteCredentials(matchedCredentials)
+            } catch {
+                accountPersistenceLog.error(
+                    "Failed to delete credentials for \(entry.providerId, privacy: .public): \(String(describing: error), privacy: .public)"
+                )
+                allCredentialsDeleted = false
+                continue
             }
+            deletedEntries.append(entry)
 
             let matchingIndices = matchingStoredAccountIndices(for: entry)
             for index in matchingIndices.sorted(by: >) {
@@ -454,13 +451,19 @@ final class AccountStore: ObservableObject {
             }
         }
 
+        guard !deletedEntries.isEmpty else { return [] }
+
         _ = normalizeAccountRegistryAgainstCredentials()
         deduplicateAccountRegistry()
-        persistAccountRegistry()
+        let registryPersisted = persistAccountRegistry()
 
-        onPostRegistryDelete()
+        onPostRegistryDelete(deletedEntries)
 
-        cleanupManagedCredentialArtifacts()
+        if registryPersisted, allCredentialsDeleted {
+            cleanupManagedCredentialArtifacts()
+        }
+
+        return deletedEntries
     }
 
     func accountNote(for provider: ProviderData) -> String? {

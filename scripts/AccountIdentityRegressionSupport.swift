@@ -16,16 +16,34 @@ final class AccountCredentialStore {
         var isEmpty: Bool { true }
     }
     var credentials: [AccountCredential] = []
+    var shouldFailDelete = false
+    var failSavesAfterDeleteFailure = false
+    var writeFailureActive = false
+    var failedDeleteIDs: Set<String> = []
     func loadCredentials(for id: String) -> [AccountCredential] { credentials.filter { $0.providerId == id } }
     func loadAllCredentials() -> [AccountCredential] { credentials }
     func loadCredential(providerId: String, credentialId: String) -> AccountCredential? {
         credentials.first { $0.providerId == providerId && $0.id == credentialId }
     }
     func saveCredential(_ credential: AccountCredential) throws {
+        if writeFailureActive {
+            throw CredentialStoreError.keychainWriteFailed(-25291)
+        }
         credentials.removeAll { $0.id == credential.id }
         credentials.append(credential)
     }
-    func deleteCredential(_ credential: AccountCredential) { credentials.removeAll { $0.id == credential.id } }
+    func deleteCredential(_ credential: AccountCredential) throws {
+        try deleteCredentials([credential])
+    }
+    func deleteCredentials(_ credentialsToRemove: [AccountCredential]) throws {
+        guard !credentialsToRemove.isEmpty else { return }
+        if shouldFailDelete || writeFailureActive || credentialsToRemove.contains(where: { failedDeleteIDs.contains($0.id) }) {
+            if failSavesAfterDeleteFailure { writeFailureActive = true }
+            throw CredentialStoreError.keychainWriteFailed(-25291)
+        }
+        let idsToRemove = Set(credentialsToRemove.map(\.id))
+        credentials.removeAll { idsToRemove.contains($0.id) }
+    }
     func planCredentialDeduplication(for id: String? = nil) -> Plan { Plan() }
     func commitCredentialDeduplication(_ plan: Plan) -> Bool { true }
     func bootstrapCredentialIndex(references: [AccountCredentialReference]) {}
@@ -39,8 +57,11 @@ final class SecureAccountVault {
 }
 
 enum ProviderManagedImportStore {
+    static var cleanupInvocations = 0
     static func reuseManagedImportIfPossible(existingCredential: AccountCredential, incomingCredential: inout AccountCredential) {}
-    static func cleanupOrphanedManagedImports(referencedBy credentials: [AccountCredential]) {}
+    static func cleanupOrphanedManagedImports(referencedBy credentials: [AccountCredential]) {
+        cleanupInvocations += 1
+    }
 }
 
 enum ProviderAuthManager {}

@@ -62,6 +62,9 @@ enum SidebarNavigation {
                        tint: .primary, isHideable: true),
         SidebarNavItem(section: .opencodeManagement, titleEn: "OpenCode", titleZh: "OpenCode",
                        localizationKey: "nav.opencode_management", icon: .providerAsset("opencode"),
+                       tint: .primary, isHideable: true),
+        SidebarNavItem(section: .antigravityManagement, titleEn: "Antigravity", titleZh: "Antigravity",
+                       localizationKey: "nav.antigravity_management", icon: .providerAsset("antigravity"),
                        tint: .primary, isHideable: true)
     ]
 

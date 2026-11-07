@@ -163,6 +163,7 @@ class AppState: ObservableObject {
 
         activationManager.detectActiveCodexAccount()
         activationManager.detectActiveGeminiAccount()
+        activationManager.detectActiveAntigravityAccount()
 
         // 任一上游源变更都可能改变 providerAccountGroups 的输入，先置脏再转发 objectWillChange。
         activationManager.objectWillChange
@@ -398,11 +399,7 @@ class AppState: ObservableObject {
     }
 
     func deleteAccount(_ entry: ProviderAccountEntry) {
-        ClaudeSubscriptionManager.shared.releaseDeletedAccounts([entry])
-        accountStore.deleteAccount(entry) { [weak self] in
-            self?.refreshCoordinator.removeLiveProviders(matching: entry)
-            self?.refreshCoordinator.reapplyVisibleSortedProviders()
-        }
+        deleteAccounts([entry])
     }
 
     func hideAccount(_ entry: ProviderAccountEntry) {
@@ -418,9 +415,9 @@ class AppState: ObservableObject {
     }
 
     func deleteAccounts(_ entries: [ProviderAccountEntry]) {
-        ClaudeSubscriptionManager.shared.releaseDeletedAccounts(entries)
-        accountStore.deleteAccounts(entries) { [weak self] in
-            self?.refreshCoordinator.removeLiveProviders(matching: entries)
+        accountStore.deleteAccounts(entries) { [weak self] deletedEntries in
+            ClaudeSubscriptionManager.shared.releaseDeletedAccounts(deletedEntries)
+            self?.refreshCoordinator.removeLiveProviders(matching: deletedEntries)
             self?.refreshCoordinator.reapplyVisibleSortedProviders()
         }
     }

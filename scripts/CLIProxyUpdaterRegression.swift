@@ -306,9 +306,9 @@ struct CLIProxyUpdaterRegression {
         try expect(config.contains("request-retry: 4"), "retry count was not generated")
         try expect(config.contains("max-retry-interval: 30"), "max retry interval was not generated")
         try expect(config.contains("max-retry-credentials: 0"), "max retry credentials was not generated")
-        try expect(config.contains("switch-project: true"), "quota switch-project was not generated")
+        try expect(config.contains("switch-project: false"), "quota switch-project was not forced off for TOS protection")
         try expect(config.contains("switch-preview-model: true"), "quota switch-preview-model was not generated")
-        try expect(config.contains("antigravity-credits: true"), "quota antigravity-credits was not generated")
+        try expect(config.contains("antigravity-credits: false"), "quota antigravity-credits was not forced off for TOS protection")
         try expect(config.contains("management-secret"), "management secret was not generated")
         try expect(config.contains("client-secret"), "client key was not generated")
         try expect(config.contains("ws-auth: true"), "WebSocket client authentication was not enabled")
@@ -320,7 +320,8 @@ struct CLIProxyUpdaterRegression {
             from: Data(#"{"port":14420,"autoStart":true,"routingStrategy":"round-robin","requestRetry":2,"proxyURL":"","enablePlugins":false}"#.utf8)
         )
         try expect(!migrated.allowLANAccess, "legacy settings did not migrate to LAN access disabled")
-        try expect(migrated.quotaSwitchProject, "legacy settings did not default quota switch-project on")
+        try expect(!migrated.quotaSwitchProject, "legacy settings did not default quota switch-project off for TOS protection")
+        try expect(!migrated.quotaAntigravityCredits, "legacy settings did not default quota antigravity-credits off for TOS protection")
         try expect(migrated.maxRetryInterval == 30, "legacy settings did not default max-retry-interval to 30")
 
         let generatedPluginBlock = "plugins:\n  enabled: true\n  dir: \"\(paths.pluginsDirectory.path)\""

@@ -8,12 +8,17 @@
 
 import AppKit
 import Combine
+import CryptoKit
+import Darwin
 import Foundation
 import Network
 import QuotaBackend
 
 @MainActor
 final class AntigravityLoginCoordinator: ObservableObject {
+    typealias DataLoader = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+    typealias ListenerFactory = @Sendable () throws -> NWListener
+
     @Published private(set) var phase: LoginPhase = .idle
     @Published private(set) var authURL: URL?
     @Published private(set) var callbackURL: URL?
@@ -22,22 +27,51 @@ final class AntigravityLoginCoordinator: ObservableObject {
     @Published private(set) var importedAuthFileURL: URL?
     @Published private(set) var accountEmail: String?
 
-    private struct OAuthConfiguration {
+    struct OAuthConfiguration: Equatable, Sendable {
         let clientId: String
         let clientSecret: String
     }
 
-    private static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
-    private static let userInfoURL = URL(string: "https://www.googleapis.com/oauth2/v2/userinfo")!
+    nonisolated static let callbackPath = "/oauth2callback"
+    nonisolated static let tokenURL = URL(string: "https://oauth2.googleapis.com/token")!
+    nonisolated static let userInfoURL = URL(string: "https://www.googleapis.com/oauth2/v2/userinfo")!
+    nonisolated static let maxCallbackHeaderBytes = 64 * 1024
+    nonisolated static let callbackReadTimeoutSeconds: TimeInterval = 5.0
 
     private let listenerQueue = DispatchQueue(label: "AIUsage.AntigravityOAuth")
+    private let dataLoader: DataLoader
+    private let oauthConfigurationProvider: @Sendable () -> OAuthConfiguration?
+    private let openBrowserHandler: @MainActor (URL) -> Void
+    private let listenerFactory: ListenerFactory
     private var listener: NWListener?
     private var timeoutTask: Task<Void, Never>?
+    private var sessionID: UUID?
     private var sessionDirectoryURL: URL?
     private var redirectURL: URL?
     private var stateToken: String?
+    private var codeVerifier: String?
     private var oauthConfiguration: OAuthConfiguration?
     private var didFinish = false
+
+    init(
+        dataLoader: @escaping DataLoader = { request in
+            try await URLSession.shared.data(for: request)
+        },
+        oauthConfigurationProvider: @escaping @Sendable () -> OAuthConfiguration? = {
+            AntigravityLoginCoordinator.resolveOAuthConfiguration()
+        },
+        openBrowserHandler: @escaping @MainActor (URL) -> Void = { url in
+            NSWorkspace.shared.open(url)
+        },
+        listenerFactory: @escaping ListenerFactory = {
+            try AntigravityLoginCoordinator.makeLoopbackListener()
+        }
+    ) {
+        self.dataLoader = dataLoader
+        self.oauthConfigurationProvider = oauthConfigurationProvider
+        self.openBrowserHandler = openBrowserHandler
+        self.listenerFactory = listenerFactory
+    }
 
     var isRunning: Bool {
         switch phase {
@@ -53,6 +87,8 @@ final class AntigravityLoginCoordinator: ObservableObject {
     func start() {
         cancel()
 
+        let currentSessionID = UUID()
+        sessionID = currentSessionID
         phase = .launching
         authURL = nil
         callbackURL = nil
@@ -63,18 +99,19 @@ final class AntigravityLoginCoordinator: ObservableObject {
 
         let fileManager = FileManager.default
         let sessionDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("aiusage-antigravity-login-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("aiusage-antigravity-login-\(currentSessionID.uuidString)", isDirectory: true)
 
         do {
             try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
         } catch {
+            sessionID = nil
             phase = .failed("Failed to prepare an Antigravity login session: \(SensitiveDataRedactor.redactedMessage(for: error))")
             return
         }
 
         sessionDirectoryURL = sessionDirectory
 
-        guard let oauthConfiguration = Self.resolveOAuthConfiguration() else {
+        guard let oauthConfiguration = oauthConfigurationProvider() else {
             cleanup(removeArtifacts: true)
             phase = .failed("AIUsage could not find Antigravity OAuth configuration. Install Antigravity or set AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID / AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET.")
             return
@@ -82,18 +119,23 @@ final class AntigravityLoginCoordinator: ObservableObject {
         self.oauthConfiguration = oauthConfiguration
 
         do {
-            let listener = try NWListener(using: .tcp, on: .any)
+            let listener = try listenerFactory()
             self.listener = listener
 
             listener.stateUpdateHandler = { [weak self] state in
                 DispatchQueue.main.async {
-                    self?.handleListenerState(state)
+                    guard let self, self.sessionID == currentSessionID else { return }
+                    self.handleListenerState(state, sessionID: currentSessionID)
                 }
             }
 
             listener.newConnectionHandler = { [weak self] connection in
                 DispatchQueue.main.async {
-                    self?.accept(connection)
+                    guard let self, self.sessionID == currentSessionID else {
+                        connection.cancel()
+                        return
+                    }
+                    self.accept(connection, sessionID: currentSessionID)
                 }
             }
 
@@ -109,8 +151,10 @@ final class AntigravityLoginCoordinator: ObservableObject {
         timeoutTask = nil
         listener?.cancel()
         listener = nil
+        sessionID = nil
         redirectURL = nil
         stateToken = nil
+        codeVerifier = nil
         oauthConfiguration = nil
         didFinish = false
         cleanup(removeArtifacts: true)
@@ -123,12 +167,13 @@ final class AntigravityLoginCoordinator: ObservableObject {
 
     func reopenInBrowser() {
         guard let authURL else { return }
-        NSWorkspace.shared.open(authURL)
+        openBrowserHandler(authURL)
     }
 
     // MARK: - Listener
 
-    private func handleListenerState(_ state: NWListener.State) {
+    private func handleListenerState(_ state: NWListener.State, sessionID: UUID) {
+        guard self.sessionID == sessionID, !didFinish else { return }
         switch state {
         case .ready:
             guard let listener,
@@ -139,22 +184,7 @@ final class AntigravityLoginCoordinator: ObservableObject {
                 return
             }
 
-            let stateToken = Self.randomStateToken()
-            self.stateToken = stateToken
-            let redirectURL = URL(string: "http://127.0.0.1:\(port)/oauth2callback")!
-            self.redirectURL = redirectURL
-            self.authURL = Self.makeAuthURL(
-                clientId: oauthConfiguration.clientId,
-                redirectURL: redirectURL,
-                stateToken: stateToken
-            )
-
-            phase = .waitingForBrowser
-            outputSummary = "Google sign-in opened in your browser. Finish authentication and AIUsage will connect the account automatically."
-            if let authURL {
-                NSWorkspace.shared.open(authURL)
-            }
-            beginTimeout()
+            activateSession(port: port, oauthConfiguration: oauthConfiguration, sessionID: sessionID)
         case .failed(let error):
             phase = .failed("Antigravity sign-in listener failed: \(SensitiveDataRedactor.redactedMessage(for: error))")
             cleanup(removeArtifacts: true)
@@ -163,11 +193,47 @@ final class AntigravityLoginCoordinator: ObservableObject {
         }
     }
 
-    private func beginTimeout() {
+    func activateSessionForTesting(port: UInt16) {
+        let currentSessionID = UUID()
+        sessionID = currentSessionID
+        didFinish = false
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-antigravity-test-\(currentSessionID.uuidString)", isDirectory: true)
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        sessionDirectoryURL = dir
+        let config = oauthConfigurationProvider() ?? OAuthConfiguration(clientId: Self.knownClientId, clientSecret: Self.knownClientSecret)
+        oauthConfiguration = config
+        activateSession(port: port, oauthConfiguration: config, sessionID: currentSessionID)
+    }
+
+    private func activateSession(port: UInt16, oauthConfiguration: OAuthConfiguration, sessionID: UUID) {
+        let stateToken = Self.randomStateToken()
+        let codeVerifier = Self.randomPKCECodeVerifier()
+        let codeChallenge = Self.pkceCodeChallenge(for: codeVerifier)
+        self.stateToken = stateToken
+        self.codeVerifier = codeVerifier
+        let redirectURL = URL(string: "http://127.0.0.1:\(port)\(Self.callbackPath)")!
+        self.redirectURL = redirectURL
+        self.authURL = Self.makeAuthURL(
+            clientId: oauthConfiguration.clientId,
+            redirectURL: redirectURL,
+            stateToken: stateToken,
+            codeChallenge: codeChallenge
+        )
+
+        phase = .waitingForBrowser
+        outputSummary = "Google sign-in opened in your browser. Finish authentication and AIUsage will connect the account automatically."
+        if let authURL {
+            openBrowserHandler(authURL)
+        }
+        beginTimeout(sessionID: sessionID)
+    }
+
+    private func beginTimeout(sessionID: UUID) {
         timeoutTask?.cancel()
         timeoutTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: 5 * 60 * 1_000_000_000)
-            guard let self, !Task.isCancelled, !didFinish else { return }
+            guard let self, !Task.isCancelled, self.sessionID == sessionID, !self.didFinish else { return }
             self.phase = .failed("Antigravity authentication timed out after 5 minutes. Please try again.")
             self.cleanup(removeArtifacts: true)
         }
@@ -175,83 +241,250 @@ final class AntigravityLoginCoordinator: ObservableObject {
 
     // MARK: - Connection Handling
 
-    private func accept(_ connection: NWConnection) {
+    private final class CallbackReadState: @unchecked Sendable {
+        var buffer = Data()
+        var finished = false
+        var timeoutItem: DispatchWorkItem?
+
+        func markFinished() {
+            finished = true
+            timeoutItem?.cancel()
+            timeoutItem = nil
+        }
+    }
+
+    private func accept(_ connection: NWConnection, sessionID: UUID) {
+        if let remoteEndpoint = connection.currentPath?.remoteEndpoint,
+           !Self.isLoopbackEndpoint(remoteEndpoint) {
+            connection.cancel()
+            return
+        }
         connection.stateUpdateHandler = { _ in }
         connection.start(queue: listenerQueue)
-        connection.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, _, error in
-            guard let self else { return }
+
+        let readState = CallbackReadState()
+        let timeoutItem = DispatchWorkItem { [weak self] in
+            guard let self, !readState.finished else { return }
+            readState.markFinished()
+            self.respond(
+                on: connection,
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: "AIUsage timed out waiting for the complete Antigravity sign-in callback.")
+            )
+        }
+        readState.timeoutItem = timeoutItem
+        listenerQueue.asyncAfter(
+            deadline: .now() + Self.callbackReadTimeoutSeconds,
+            execute: timeoutItem
+        )
+
+        receiveNextCallbackChunk(
+            on: connection,
+            sessionID: sessionID,
+            readState: readState
+        )
+    }
+
+    private nonisolated func receiveNextCallbackChunk(
+        on connection: NWConnection,
+        sessionID: UUID,
+        readState: CallbackReadState
+    ) {
+        let remainingAllowance = max(1, Self.maxCallbackHeaderBytes - readState.buffer.count + 1)
+        connection.receive(minimumIncompleteLength: 1, maximumLength: remainingAllowance) { [weak self] data, _, isComplete, error in
+            guard let self else {
+                readState.markFinished()
+                connection.cancel()
+                return
+            }
+            guard !readState.finished else { return }
 
             if let error {
+                readState.markFinished()
                 Task { @MainActor in
-                    self.phase = .failed("Antigravity callback failed: \(SensitiveDataRedactor.redactedMessage(for: error))")
+                    guard self.sessionID == sessionID, self.phase == .waitingForBrowser, !self.didFinish else { return }
+                    self.outputSummary = "Ignored transient callback connection error: \(SensitiveDataRedactor.redactedMessage(for: error))"
                 }
                 connection.cancel()
                 return
             }
 
-            guard let data, !data.isEmpty,
-                  let request = String(data: data, encoding: .utf8),
-                  let requestURL = Self.extractRequestURL(from: request) else {
+            if let remoteEndpoint = connection.currentPath?.remoteEndpoint,
+               !Self.isLoopbackEndpoint(remoteEndpoint) {
+                readState.markFinished()
+                connection.cancel()
+                return
+            }
+
+            if let data, !data.isEmpty {
+                readState.buffer.append(data)
+                if readState.buffer.count > Self.maxCallbackHeaderBytes {
+                    readState.markFinished()
+                    self.respond(
+                        on: connection,
+                        statusLine: "HTTP/1.1 400 Bad Request",
+                        html: Self.failureHTML(message: "Antigravity sign-in callback exceeded the maximum allowed header size.")
+                    )
+                    return
+                }
+            }
+
+            if Self.containsHTTPHeaderTerminator(readState.buffer) {
+                readState.markFinished()
+                guard let request = String(data: readState.buffer, encoding: .utf8) else {
+                    self.respond(
+                        on: connection,
+                        statusLine: "HTTP/1.1 400 Bad Request",
+                        html: Self.failureHTML(message: "AIUsage could not read the Antigravity sign-in callback.")
+                    )
+                    return
+                }
+                Task { @MainActor in
+                    guard self.sessionID == sessionID else {
+                        connection.cancel()
+                        return
+                    }
+                    let htmlResponse = await self.processRawHTTPRequest(request, sessionID: sessionID)
+                    self.respond(
+                        on: connection,
+                        statusLine: htmlResponse.statusLine,
+                        html: htmlResponse.html
+                    )
+                }
+                return
+            }
+
+            if isComplete {
+                readState.markFinished()
                 self.respond(
                     on: connection,
-                    html: Self.failureHTML(message: "AIUsage could not read the Antigravity sign-in callback.")
+                    statusLine: "HTTP/1.1 400 Bad Request",
+                    html: Self.failureHTML(message: "AIUsage received an incomplete Antigravity sign-in callback.")
                 )
                 return
             }
 
-            Task { @MainActor in
-                await self.handleCallback(requestURL, connection: connection)
-            }
+            self.receiveNextCallbackChunk(
+                on: connection,
+                sessionID: sessionID,
+                readState: readState
+            )
         }
     }
 
-    private func handleCallback(_ url: URL, connection: NWConnection) async {
-        callbackURL = url
+    struct CallbackHTTPResponse: Equatable, Sendable {
+        let statusLine: String
+        let html: String
+    }
 
-        guard Self.isSuccessfulCallbackURL(url) else {
-            respond(
-                on: connection,
+    func processRawHTTPRequest(_ request: String, sessionID: UUID? = nil) async -> CallbackHTTPResponse {
+        let effectiveSessionID = sessionID ?? self.sessionID
+        guard let effectiveSessionID,
+              self.sessionID == effectiveSessionID,
+              phase == .waitingForBrowser,
+              !didFinish,
+              let expectedRedirectURL = redirectURL,
+              let expectedState = stateToken,
+              let verifier = codeVerifier,
+              let oauthConfig = oauthConfiguration,
+              let sessionDir = sessionDirectoryURL else {
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: "No active Antigravity sign-in session is waiting for a callback.")
+            )
+        }
+
+        guard let requestURL = Self.parseCallbackRequest(request, expectedRedirectURL: expectedRedirectURL),
+              Self.isSuccessfulCallbackURL(requestURL, expectedRedirectURL: expectedRedirectURL) else {
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
                 html: Self.failureHTML(message: "Unexpected Antigravity callback URL.")
             )
-            return
         }
 
-        let components = URLComponents(url: url, resolvingAgainstBaseURL: false)
+        let components = URLComponents(url: requestURL, resolvingAgainstBaseURL: false)
         let queryItems = components?.queryItems ?? []
-        let queryValue: (String) -> String? = { name in
-            queryItems.first(where: { $0.name == name })?.value
+
+        // Validate state strictly (single occurrence, exact match) before honoring error or code
+        // so stray or unauthenticated requests cannot abort the active browser login session.
+        guard case .single(let receivedState) = Self.queryParameter("state", in: queryItems),
+              receivedState == expectedState else {
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: "Antigravity OAuth state mismatch. Please try again.")
+            )
         }
 
-        if let errorCode = queryValue("error") {
-            let description = queryValue("error_description") ?? "No additional details provided."
+        callbackURL = requestURL
+
+        switch Self.queryParameter("error", in: queryItems) {
+        case .duplicate:
+            let message = "Ambiguous OAuth error callback parameters."
+            phase = .failed(message)
+            cleanup(removeArtifacts: true)
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: message)
+            )
+        case .single(let errorCode):
+            let description: String
+            if case .single(let desc) = Self.queryParameter("error_description", in: queryItems), !desc.isEmpty {
+                description = desc
+            } else {
+                description = "No additional details provided."
+            }
             let message = "Google OAuth error: \(errorCode). \(description)"
             phase = .failed(message)
-            respond(on: connection, html: Self.failureHTML(message: message))
             cleanup(removeArtifacts: true)
-            return
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: message)
+            )
+        case .missing:
+            break
         }
 
-        guard queryValue("state") == stateToken else {
-            let message = "Antigravity OAuth state mismatch. Please try again."
+        guard case .single(let rawCode) = Self.queryParameter("code", in: queryItems) else {
+            let message = "No valid authorization code was returned by Google OAuth."
             phase = .failed(message)
-            respond(on: connection, html: Self.failureHTML(message: message))
             cleanup(removeArtifacts: true)
-            return
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: message)
+            )
         }
 
-        guard let code = queryValue("code")?.trimmingCharacters(in: .whitespacesAndNewlines), !code.isEmpty else {
+        let code = rawCode.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !code.isEmpty else {
             let message = "No authorization code was returned by Google OAuth."
             phase = .failed(message)
-            respond(on: connection, html: Self.failureHTML(message: message))
             cleanup(removeArtifacts: true)
-            return
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: message)
+            )
         }
 
+        // Consume one-time state/verifier before awaiting network I/O so duplicate callbacks cannot re-enter.
+        self.stateToken = nil
+        self.codeVerifier = nil
         phase = .waitingForCompletion
         outputSummary = "Google sign-in approved. Finalizing Antigravity account…"
 
         do {
-            let (authFileURL, email) = try await finalizeLogin(usingAuthorizationCode: code)
+            let (authFileURL, email) = try await finalizeLogin(
+                usingAuthorizationCode: code,
+                codeVerifier: verifier,
+                oauthConfiguration: oauthConfig,
+                redirectURL: expectedRedirectURL,
+                sessionDirectoryURL: sessionDir
+            )
+            guard self.sessionID == effectiveSessionID, !self.didFinish else {
+                return CallbackHTTPResponse(
+                    statusLine: "HTTP/1.1 400 Bad Request",
+                    html: Self.failureHTML(message: "Antigravity sign-in session was superseded.")
+                )
+            }
             accountEmail = email
             importedAuthFileURL = authFileURL
             didFinish = true
@@ -262,43 +495,49 @@ final class AntigravityLoginCoordinator: ObservableObject {
                 outputSummary = "Antigravity account connected."
             }
 
-            respond(on: connection, html: Self.successHTML(email: email))
             timeoutTask?.cancel()
             timeoutTask = nil
             listener?.cancel()
             listener = nil
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 200 OK",
+                html: Self.successHTML(email: email)
+            )
         } catch {
+            guard self.sessionID == effectiveSessionID, !self.didFinish else {
+                return CallbackHTTPResponse(
+                    statusLine: "HTTP/1.1 400 Bad Request",
+                    html: Self.failureHTML(message: "Antigravity sign-in session was superseded.")
+                )
+            }
             let message = SensitiveDataRedactor.redactedMessage(for: error)
             phase = .failed(message)
-            respond(on: connection, html: Self.failureHTML(message: message))
             cleanup(removeArtifacts: true)
+            return CallbackHTTPResponse(
+                statusLine: "HTTP/1.1 400 Bad Request",
+                html: Self.failureHTML(message: message)
+            )
         }
     }
 
     // MARK: - Token Exchange
 
-    private func finalizeLogin(usingAuthorizationCode code: String) async throws -> (URL, String?) {
-        guard let oauthConfiguration,
-              let redirectURL,
-              let sessionDirectoryURL else {
-            throw ProviderError("oauth_setup_failed", "Antigravity OAuth session was not fully initialized.")
-        }
+    private func finalizeLogin(
+        usingAuthorizationCode code: String,
+        codeVerifier: String,
+        oauthConfiguration: OAuthConfiguration,
+        redirectURL: URL,
+        sessionDirectoryURL: URL
+    ) async throws -> (URL, String?) {
+        let request = Self.makeTokenRequest(
+            clientId: oauthConfiguration.clientId,
+            clientSecret: oauthConfiguration.clientSecret,
+            code: code,
+            redirectURL: redirectURL,
+            codeVerifier: codeVerifier
+        )
 
-        var request = URLRequest(url: Self.tokenURL)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-
-        var bodyComponents = URLComponents()
-        bodyComponents.queryItems = [
-            URLQueryItem(name: "client_id", value: oauthConfiguration.clientId),
-            URLQueryItem(name: "client_secret", value: oauthConfiguration.clientSecret),
-            URLQueryItem(name: "code", value: code),
-            URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString),
-            URLQueryItem(name: "grant_type", value: "authorization_code")
-        ]
-        request.httpBody = bodyComponents.percentEncodedQuery?.data(using: .utf8)
-
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await dataLoader(request)
         if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
             let payload = String(data: data, encoding: .utf8) ?? ""
             throw ProviderError("oauth_exchange_failed", "Antigravity OAuth token exchange failed (\(http.statusCode)). \(payload)")
@@ -332,7 +571,7 @@ final class AntigravityLoginCoordinator: ObservableObject {
         var request = URLRequest(url: Self.userInfoURL)
         request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
 
-        let (data, response) = try await URLSession.shared.data(for: request)
+        let (data, response) = try await dataLoader(request)
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode),
               let json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
@@ -342,11 +581,12 @@ final class AntigravityLoginCoordinator: ObservableObject {
 
     // MARK: - HTTP Response
 
-    private nonisolated func respond(on connection: NWConnection, html: String) {
+    private nonisolated func respond(on connection: NWConnection, statusLine: String = "HTTP/1.1 200 OK", html: String) {
         let data = """
-        HTTP/1.1 200 OK\r
+        \(statusLine)\r
         Content-Type: text/html; charset=utf-8\r
         Content-Length: \(html.utf8.count)\r
+        Cache-Control: no-store\r
         Connection: close\r
         \r
         \(html)
@@ -364,8 +604,10 @@ final class AntigravityLoginCoordinator: ObservableObject {
         listener = nil
         timeoutTask?.cancel()
         timeoutTask = nil
+        sessionID = nil
         redirectURL = nil
         stateToken = nil
+        codeVerifier = nil
         oauthConfiguration = nil
 
         if removeArtifacts, let sessionDirectoryURL {
@@ -384,9 +626,9 @@ final class AntigravityLoginCoordinator: ObservableObject {
     // Contents/Resources/bin/language_server（Go 二进制），且二进制内 client_id 与 secret
     // 相距甚远、无法就近配对，故以下述实证常量作兜底；如官方轮换，可用环境变量覆盖。
     // 常量按片段运行时拼接，避免被密钥扫描器误判（值本身是公开分发的桌面应用凭据，非用户私密）。
-    private static let knownClientId =
+    private nonisolated static let knownClientId =
         "1071006060591-tmhssin2h21lcre235vtolojh4g403ep" + "." + "apps" + ".googleusercontent.com"
-    private static let knownClientSecret = "GOCS" + "PX-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
+    private nonisolated static let knownClientSecret = "GOCS" + "PX-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
 
     /// 解析顺序：环境变量 > 本地旧版 Electron JS 提取 > 内置已知常量兜底。
     private nonisolated static func resolveOAuthConfiguration() -> OAuthConfiguration? {
@@ -464,9 +706,27 @@ final class AntigravityLoginCoordinator: ObservableObject {
         return String(content[range])
     }
 
-    // MARK: - URL Helpers
+    // MARK: - URL, PKCE & Callback Helpers
 
-    private nonisolated static func makeAuthURL(clientId: String, redirectURL: URL, stateToken: String) -> URL? {
+    enum QueryParameterResult: Equatable, Sendable {
+        case missing
+        case single(String)
+        case duplicate
+    }
+
+    nonisolated static func queryParameter(_ name: String, in items: [URLQueryItem]) -> QueryParameterResult {
+        let matching = items.filter { $0.name == name }
+        guard !matching.isEmpty else { return .missing }
+        guard matching.count == 1, let value = matching[0].value else { return .duplicate }
+        return .single(value)
+    }
+
+    nonisolated static func makeAuthURL(
+        clientId: String,
+        redirectURL: URL,
+        stateToken: String,
+        codeChallenge: String
+    ) -> URL? {
         var components = URLComponents(string: "https://accounts.google.com/o/oauth2/v2/auth")
         components?.queryItems = [
             URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString),
@@ -479,30 +739,252 @@ final class AntigravityLoginCoordinator: ObservableObject {
             ].joined(separator: " ")),
             URLQueryItem(name: "state", value: stateToken),
             URLQueryItem(name: "response_type", value: "code"),
-            URLQueryItem(name: "client_id", value: clientId)
+            URLQueryItem(name: "client_id", value: clientId),
+            URLQueryItem(name: "code_challenge", value: codeChallenge),
+            URLQueryItem(name: "code_challenge_method", value: "S256")
         ]
         return components?.url
     }
 
-    private nonisolated static func randomStateToken() -> String {
+    nonisolated static func makeTokenRequest(
+        tokenURL: URL = AntigravityLoginCoordinator.tokenURL,
+        clientId: String,
+        clientSecret: String,
+        code: String,
+        redirectURL: URL,
+        codeVerifier: String
+    ) -> URLRequest {
+        var request = URLRequest(url: tokenURL)
+        request.httpMethod = "POST"
+        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
+
+        var bodyComponents = URLComponents()
+        bodyComponents.queryItems = [
+            URLQueryItem(name: "client_id", value: clientId),
+            URLQueryItem(name: "client_secret", value: clientSecret),
+            URLQueryItem(name: "code", value: code),
+            URLQueryItem(name: "redirect_uri", value: redirectURL.absoluteString),
+            URLQueryItem(name: "grant_type", value: "authorization_code"),
+            URLQueryItem(name: "code_verifier", value: codeVerifier)
+        ]
+        request.httpBody = bodyComponents.percentEncodedQuery?.data(using: .utf8)
+        return request
+    }
+
+    nonisolated static func randomStateToken() -> String {
         Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }).map {
             String(format: "%02x", $0)
         }.joined()
     }
 
-    private nonisolated static func extractRequestURL(from request: String) -> URL? {
-        guard let firstLine = request.components(separatedBy: .newlines).first else { return nil }
-        let parts = firstLine.split(separator: " ")
-        guard parts.count >= 2 else { return nil }
-        return URL(string: String(parts[1]), relativeTo: URL(string: "http://127.0.0.1"))
+    nonisolated static func randomPKCECodeVerifier() -> String {
+        base64URLEncoded(Data((0..<32).map { _ in UInt8.random(in: .min ... .max) }))
     }
 
-    private nonisolated static func isSuccessfulCallbackURL(_ url: URL) -> Bool {
-        guard let host = url.host?.lowercased(),
-              host.contains("localhost") || host.contains("127.0.0.1") else {
+    nonisolated static func pkceCodeChallenge(for codeVerifier: String) -> String {
+        let digest = SHA256.hash(data: Data(codeVerifier.utf8))
+        return base64URLEncoded(Data(digest))
+    }
+
+    private nonisolated static func base64URLEncoded(_ data: Data) -> String {
+        data.base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    nonisolated static func makeLoopbackListener(
+        maxAttempts: Int = 3,
+        portAllocator: () -> UInt16? = allocateLoopbackPort
+    ) throws -> NWListener {
+        var lastError: Error?
+        for _ in 0..<max(1, maxAttempts) {
+            guard let port = portAllocator(),
+                  port > 0,
+                  let nwPort = NWEndpoint.Port(rawValue: port) else {
+                continue
+            }
+            let params = NWParameters.tcp
+            params.allowLocalEndpointReuse = true
+            params.requiredLocalEndpoint = .hostPort(host: .ipv4(.loopback), port: nwPort)
+            do {
+                return try NWListener(using: params)
+            } catch {
+                lastError = error
+            }
+        }
+        if let lastError {
+            throw lastError
+        }
+        throw ProviderError(
+            "oauth_listener_failed",
+            "Could not bind the Antigravity OAuth callback listener to 127.0.0.1."
+        )
+    }
+
+    nonisolated static func allocateLoopbackPort() -> UInt16? {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        defer { close(fd) }
+
+        var reuse: Int32 = 1
+        _ = setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &reuse, socklen_t(MemoryLayout<Int32>.size))
+
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = 0
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+
+        let bindResult = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                bind(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size))
+            }
+        }
+        guard bindResult == 0 else { return nil }
+
+        var boundAddr = sockaddr_in()
+        var addrLen = socklen_t(MemoryLayout<sockaddr_in>.size)
+        let nameResult = withUnsafeMutablePointer(to: &boundAddr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) {
+                getsockname(fd, $0, &addrLen)
+            }
+        }
+        guard nameResult == 0 else { return nil }
+        let port = UInt16(bigEndian: boundAddr.sin_port)
+        return port > 0 ? port : nil
+    }
+
+    nonisolated static func isLoopbackEndpoint(_ endpoint: NWEndpoint) -> Bool {
+        switch endpoint {
+        case .hostPort(let host, _):
+            switch host {
+            case .ipv4(let ipv4):
+                return ipv4 == .loopback || ipv4.rawValue.first == 127
+            case .ipv6(let ipv6):
+                return ipv6 == .loopback
+            case .name(let name, _):
+                return isAllowedLoopbackHost(name)
+            @unknown default:
+                return false
+            }
+        default:
             return false
         }
-        return url.path.lowercased().contains("oauth2callback")
+    }
+
+    nonisolated static func isAllowedLoopbackHost(_ host: String) -> Bool {
+        let normalized = host.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized == "127.0.0.1" || normalized == "localhost"
+    }
+
+    nonisolated static func containsHTTPHeaderTerminator(_ data: Data) -> Bool {
+        data.range(of: Data([13, 10, 13, 10])) != nil || data.range(of: Data([10, 10])) != nil
+    }
+
+    nonisolated static func parseCallbackRequest(_ request: String, expectedRedirectURL: URL) -> URL? {
+        guard containsHTTPHeaderTerminator(Data(request.utf8)) else {
+            return nil
+        }
+        let lines = request
+            .replacingOccurrences(of: "\r\n", with: "\n")
+            .components(separatedBy: "\n")
+        guard let requestLine = lines.first?.trimmingCharacters(in: .whitespaces),
+              !requestLine.isEmpty else {
+            return nil
+        }
+
+        let parts = requestLine.split(separator: " ", omittingEmptySubsequences: true)
+        guard parts.count == 3,
+              parts[0] == "GET",
+              parts[2].hasPrefix("HTTP/1.") else {
+            return nil
+        }
+
+        let target = String(parts[1])
+        let expectedPort = expectedRedirectURL.port
+
+        var hostHeaders: [String] = []
+        for line in lines.dropFirst() {
+            if line.isEmpty { break }
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
+            if name == "host" {
+                let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+                hostHeaders.append(value)
+            }
+        }
+        if hostHeaders.count > 1 {
+            return nil
+        }
+
+        if let hostHeader = hostHeaders.first {
+            guard !hostHeader.isEmpty,
+                  let authorityComponents = URLComponents(string: "http://\(hostHeader)"),
+                  authorityComponents.user == nil,
+                  authorityComponents.password == nil,
+                  authorityComponents.path.isEmpty,
+                  let headerHost = authorityComponents.host,
+                  isAllowedLoopbackHost(headerHost) else {
+                return nil
+            }
+            if let expectedPort {
+                guard authorityComponents.port == expectedPort else {
+                    return nil
+                }
+            }
+        }
+
+        if target.hasPrefix("/") {
+            guard !target.hasPrefix("//"),
+                  let targetComponents = URLComponents(string: target),
+                  targetComponents.scheme == nil,
+                  targetComponents.host == nil,
+                  targetComponents.path == callbackPath else {
+                return nil
+            }
+            var resolved = URLComponents()
+            resolved.scheme = expectedRedirectURL.scheme ?? "http"
+            resolved.host = expectedRedirectURL.host ?? "127.0.0.1"
+            resolved.port = expectedPort
+            resolved.path = targetComponents.path
+            resolved.percentEncodedQuery = targetComponents.percentEncodedQuery
+            return resolved.url
+        }
+
+        guard let absoluteComponents = URLComponents(string: target),
+              absoluteComponents.scheme?.lowercased() == "http",
+              absoluteComponents.user == nil,
+              absoluteComponents.password == nil,
+              let targetHost = absoluteComponents.host,
+              isAllowedLoopbackHost(targetHost),
+              absoluteComponents.path == callbackPath else {
+            return nil
+        }
+        if let expectedPort, absoluteComponents.port != expectedPort {
+            return nil
+        }
+        return absoluteComponents.url
+    }
+
+    nonisolated static func extractRequestURL(from request: String) -> URL? {
+        guard let defaultRedirect = URL(string: "http://127.0.0.1\(callbackPath)") else { return nil }
+        return parseCallbackRequest(request, expectedRedirectURL: defaultRedirect)
+    }
+
+    nonisolated static func isSuccessfulCallbackURL(_ url: URL, expectedRedirectURL: URL? = nil) -> Bool {
+        guard url.scheme?.lowercased() == "http",
+              let host = url.host,
+              isAllowedLoopbackHost(host),
+              url.path == callbackPath else {
+            return false
+        }
+        if let expectedPort = expectedRedirectURL?.port,
+           let actualPort = url.port,
+           actualPort != expectedPort {
+            return false
+        }
+        return true
     }
 
     // MARK: - HTML Templates

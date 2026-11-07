@@ -8,6 +8,8 @@
 
 /* Begin PBXBuildFile section */
 		9BEFE5B01F5DF04F8E29C1EE /* TokenSaverReleaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */; };
+		C1AG00012FD2000100B26789 /* AntigravityAccountSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */; };
+		C1AG00032FD2000200B26789 /* AntigravityManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */; };
         C1CS00010000000000000001 /* ClaudeSubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00010000000000000002 /* ClaudeSubscriptionManager.swift */; };
         C1CS00020000000000000001 /* ClaudeSubscriptionConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00020000000000000002 /* ClaudeSubscriptionConnectionView.swift */; };
         C1CS00030000000000000001 /* ClaudeSubscriptionAccountActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00030000000000000002 /* ClaudeSubscriptionAccountActions.swift */; };
@@ -245,6 +247,8 @@
 
 /* Begin PBXFileReference section */
 		FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenSaverReleaseManager.swift; sourceTree = "<group>"; };
+		C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityAccountSwitcher.swift; sourceTree = "<group>"; };
+		C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityManagementView.swift; sourceTree = "<group>"; };
         C1CS00010000000000000002 /* ClaudeSubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionManager.swift; sourceTree = "<group>"; };
         C1CS00020000000000000002 /* ClaudeSubscriptionConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionConnectionView.swift; sourceTree = "<group>"; };
         C1CS00030000000000000002 /* ClaudeSubscriptionAccountActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionAccountActions.swift; sourceTree = "<group>"; };
@@ -603,6 +607,7 @@
 			isa = PBXGroup;
 			children = (
 				FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */,
+				C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */,
                 C1CS00010000000000000002 /* ClaudeSubscriptionManager.swift */,
 				C1CPA0022FD0002000B26789 /* CLIProxyPaths.swift */,
 				C1CPA0042FD0003000B26789 /* CLIProxyReleaseClient.swift */,
@@ -671,6 +676,7 @@
 				C1PM00072FB0000300B26789 /* ProxyManagementView+Card.swift */,
 				F9DC4A1479C740ED996962FC /* ProxyStatsView.swift */,
 				C1CX00022FB0000200B26789 /* CodexProxyManagementView.swift */,
+				C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */,
 				B1GP00302F97002000A15674 /* CodexGlobalProxySection.swift */,
 				B1GP00502F97002000A15674 /* ClaudeGlobalProxySection.swift */,
 				B1GP00602F97002000A15674 /* OpenCodeGlobalProxySection.swift */,
@@ -924,6 +930,8 @@
 			buildActionMask = 2147483647;
 			files = (
 				9BEFE5B01F5DF04F8E29C1EE /* TokenSaverReleaseManager.swift in Sources */,
+				C1AG00012FD2000100B26789 /* AntigravityAccountSwitcher.swift in Sources */,
+				C1AG00032FD2000200B26789 /* AntigravityManagementView.swift in Sources */,
                 C1CS00010000000000000001 /* ClaudeSubscriptionManager.swift in Sources */,
                 C1CS00020000000000000001 /* ClaudeSubscriptionConnectionView.swift in Sources */,
                 C1CS00030000000000000001 /* ClaudeSubscriptionAccountActions.swift in Sources */,

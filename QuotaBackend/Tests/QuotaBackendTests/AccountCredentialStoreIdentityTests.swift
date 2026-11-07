@@ -1,3 +1,4 @@
+import Foundation
 import XCTest
 @testable import QuotaBackend
 
@@ -477,5 +478,117 @@ final class AccountCredentialStoreIdentityTests: XCTestCase {
                 isValidFor: [first, changedSecond]
             )
         )
+    }
+
+    func testDeleteCredentialPreservesCacheAndStorageWhenWriteFails() throws {
+        var persistedData: Data?
+        var shouldFailWrite = false
+        let makeStore: () -> AccountCredentialStore = {
+            AccountCredentialStore(
+                readVaultData: { persistedData },
+                writeVaultData: { data in
+                    if shouldFailWrite {
+                        throw CredentialStoreError.keychainWriteFailed(-25291)
+                    }
+                    persistedData = data
+                }
+            )
+        }
+
+        let store = makeStore()
+        let credA = credential(
+            id: "codex-a",
+            providerId: "codex",
+            path: "/tmp/codex-a/auth.json",
+            metadata: ["accountId": "acct-a", "workspaceUserId": "user-a"]
+        )
+        let credB = credential(
+            id: "gravity-b",
+            providerId: "antigravity",
+            path: "/tmp/gravity-b/auth.json",
+            metadata: ["projectId": "proj-b", "accountEmail": "b@example.com"]
+        )
+
+        try store.saveCredential(credA)
+        try store.saveCredential(credB)
+
+        shouldFailWrite = true
+        XCTAssertThrowsError(try store.deleteCredential(credA))
+        XCTAssertNotNil(store.loadCredential(providerId: "codex", credentialId: "codex-a"))
+        XCTAssertEqual(store.loadAllCredentials().map(\.id), ["gravity-b", "codex-a"])
+
+        let reloadedAfterFailure = makeStore()
+        XCTAssertNotNil(reloadedAfterFailure.loadCredential(providerId: "codex", credentialId: "codex-a"))
+        XCTAssertNotNil(reloadedAfterFailure.loadCredential(providerId: "antigravity", credentialId: "gravity-b"))
+
+        shouldFailWrite = false
+        try store.deleteCredential(credA)
+        XCTAssertNil(store.loadCredential(providerId: "codex", credentialId: "codex-a"))
+        XCTAssertNotNil(store.loadCredential(providerId: "antigravity", credentialId: "gravity-b"))
+
+        let reloadedAfterSuccess = makeStore()
+        XCTAssertNil(reloadedAfterSuccess.loadCredential(providerId: "codex", credentialId: "codex-a"))
+        XCTAssertNotNil(reloadedAfterSuccess.loadCredential(providerId: "antigravity", credentialId: "gravity-b"))
+    }
+
+    func testDeleteCredentialsForProviderPreservesCacheOnFailureAndIsolatesProviders() throws {
+        var persistedData: Data?
+        var shouldFailWrite = false
+        let makeStore: () -> AccountCredentialStore = {
+            AccountCredentialStore(
+                readVaultData: { persistedData },
+                writeVaultData: { data in
+                    if shouldFailWrite {
+                        throw CredentialStoreError.keychainWriteFailed(-25291)
+                    }
+                    persistedData = data
+                }
+            )
+        }
+
+        let store = makeStore()
+        let codex1 = credential(
+            id: "codex-1",
+            providerId: "codex",
+            path: "/tmp/codex-1/auth.json",
+            metadata: ["accountId": "acct-1", "workspaceUserId": "user-1"]
+        )
+        let codex2 = credential(
+            id: "codex-2",
+            providerId: "codex",
+            path: "/tmp/codex-2/auth.json",
+            metadata: ["accountId": "acct-2", "workspaceUserId": "user-2"]
+        )
+        let agy = credential(
+            id: "gravity-1",
+            providerId: "antigravity",
+            path: "/tmp/gravity-1/auth.json",
+            metadata: ["projectId": "proj-1", "accountEmail": "agy@example.com"]
+        )
+
+        try store.saveCredential(codex1)
+        try store.saveCredential(codex2)
+        try store.saveCredential(agy)
+
+        shouldFailWrite = true
+        XCTAssertThrowsError(try store.deleteCredentials([codex1, codex2]))
+        XCTAssertEqual(store.loadCredentials(for: "codex").count, 2)
+        XCTAssertEqual(makeStore().loadCredentials(for: "codex").count, 2)
+
+        XCTAssertThrowsError(try store.deleteCredentials(for: "CODEX"))
+        XCTAssertEqual(store.loadCredentials(for: "codex").count, 2)
+        XCTAssertEqual(store.loadCredentials(for: "antigravity").count, 1)
+
+        shouldFailWrite = false
+        try store.deleteCredentials([codex1, codex2])
+        XCTAssertTrue(store.loadCredentials(for: "codex").isEmpty)
+        try store.saveCredential(codex1)
+        try store.deleteCredentials(for: "CODEX")
+        XCTAssertTrue(store.loadCredentials(for: "codex").isEmpty)
+        XCTAssertEqual(store.loadCredentials(for: "antigravity").map(\.id), ["gravity-1"])
+
+        let reloaded = makeStore()
+        XCTAssertTrue(reloaded.loadCredentials(for: "codex").isEmpty)
+        XCTAssertEqual(reloaded.loadCredentials(for: "antigravity").map(\.id), ["gravity-1"])
     }
 }

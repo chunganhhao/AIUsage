@@ -19,6 +19,9 @@ swiftc -parse-as-library -swift-version 5 \
   "$PROJECT_DIR/AIUsage/Models/AccountStore+Matching.swift" \
   "$PROJECT_DIR/AIUsage/Services/ProviderAuth/ProviderAuthTypes.swift" \
   "$PROJECT_DIR/AIUsage/Services/ProviderAuth/ProviderAuthParsing.swift" \
+  "$PROJECT_DIR/AIUsage/Services/ProviderAuth/LoginPhase.swift" \
+  "$PROJECT_DIR/AIUsage/Services/ProviderAuth/AntigravityLoginCoordinator.swift" \
+  "$PROJECT_DIR/AIUsage/Services/AntigravityAccountSwitcher.swift" \
   "$PROJECT_DIR/scripts/AccountIdentityRegressionSupport.swift" \
   "$PROJECT_DIR/scripts/AccountIdentityRegression.swift" \
   -o "$REGRESSION_DIR/account-identity-regression"

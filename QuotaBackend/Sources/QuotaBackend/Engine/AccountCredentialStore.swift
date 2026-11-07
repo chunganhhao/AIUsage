@@ -63,8 +63,37 @@ public final class AccountCredentialStore: @unchecked Sendable {
     /// `errSecItemNotFound`). Permission / decode failures must stay `false`
     /// so we never persist an empty stand-in vault over real credentials.
     private var vaultIsAuthoritative = false
+    private let readVaultHandler: (() -> KeychainVaultRead)?
+    private let writeVaultHandler: ((Data) throws -> Void)?
 
-    private init() {}
+    private init() {
+        self.readVaultHandler = nil
+        self.writeVaultHandler = nil
+    }
+
+    public init(
+        readVaultData: @escaping () throws -> Data?,
+        writeVaultData: @escaping (Data) throws -> Void
+    ) {
+        self.readVaultHandler = {
+            do {
+                guard let data = try readVaultData() else {
+                    return .notFound
+                }
+                do {
+                    return .found(try JSONDecoder().decode(CredentialVault.self, from: data))
+                } catch {
+                    return .failed(.vaultDecodeFailed)
+                }
+            } catch let error as CredentialStoreError {
+                return .failed(error)
+            } catch {
+                return .failed(.keychainReadFailed(errSecIO))
+            }
+        }
+        self.writeVaultHandler = writeVaultData
+        self.cachedAuxiliary[LegacyKeychainCutover.sentinelAuxiliaryKey] = Data([1])
+    }
 
     private struct CredentialVault: Codable {
         let credentials: [AccountCredential]
@@ -118,27 +147,35 @@ public final class AccountCredentialStore: @unchecked Sendable {
         return loadCredentialVaultUnsafe()[storageKey(providerId: providerId, credentialId: credentialId)]
     }
 
-    public func deleteCredential(_ credential: AccountCredential) {
+    public func deleteCredential(_ credential: AccountCredential) throws {
+        try deleteCredentials([credential])
+    }
+
+    public func deleteCredentials(_ credentials: [AccountCredential]) throws {
+        guard !credentials.isEmpty else { return }
         lock.lock()
         defer { lock.unlock() }
 
-        let key = storageKey(credential)
         var vault = loadCredentialVaultUnsafe()
-        vault.removeValue(forKey: key)
+        for credential in credentials {
+            vault.removeValue(forKey: storageKey(credential))
+        }
         do {
             try saveCredentialVaultUnsafe(vault)
         } catch {
             credentialLog.error("Keychain write failed: \(error.localizedDescription, privacy: .public)")
+            throw error
         }
         cachedCredentialsByStorageKey = vault
     }
 
-    public func deleteCredentials(for providerId: String) {
+    public func deleteCredentials(for providerId: String) throws {
         lock.lock()
         defer { lock.unlock() }
 
         var vault = loadCredentialVaultUnsafe()
-        let keysToRemove = vault.keys.filter { $0.hasPrefix(providerId.lowercased() + ":") }
+        let prefix = providerId.lowercased() + ":"
+        let keysToRemove = vault.keys.filter { $0.lowercased().hasPrefix(prefix) }
         if !keysToRemove.isEmpty {
             for key in keysToRemove {
                 vault.removeValue(forKey: key)
@@ -147,6 +184,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
                 try saveCredentialVaultUnsafe(vault)
             } catch {
                 credentialLog.error("Keychain write failed: \(error.localizedDescription, privacy: .public)")
+                throw error
             }
             cachedCredentialsByStorageKey = vault
         }
@@ -466,6 +504,9 @@ public final class AccountCredentialStore: @unchecked Sendable {
     }
 
     private func readVaultFromKeychainUnsafe() -> KeychainVaultRead {
+        if let readVaultHandler {
+            return readVaultHandler()
+        }
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,
@@ -503,6 +544,10 @@ public final class AccountCredentialStore: @unchecked Sendable {
     }
 
     private func writeVaultUnsafe(_ data: Data) throws {
+        if let writeVaultHandler {
+            try writeVaultHandler(data)
+            return
+        }
         let baseQuery: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: Self.service,

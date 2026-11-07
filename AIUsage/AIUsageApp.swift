@@ -399,6 +399,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         DispatchQueue.main.async {
             ProviderActivationManager.shared.detectActiveCodexAccount()
             ProviderActivationManager.shared.detectActiveGeminiAccount()
+            ProviderActivationManager.shared.detectActiveAntigravityAccount()
         }
     }
 
