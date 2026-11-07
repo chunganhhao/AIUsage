@@ -362,16 +362,16 @@ final class TokenSaverReleaseTests: XCTestCase {
         for ignoreTERM in [false, true] {
             try? FileManager.default.removeItem(at: pidURL)
             let body = ignoreTERM
-                ? "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1\"\nexec /bin/sleep 30\n"
-                : "#!/bin/sh\necho $$ > \"$1\"\nexec /bin/sleep 30\n"
-            try Data(body.utf8).write(to: scriptURL)
+                ? "#!/bin/sh\ntrap '' TERM\necho $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\nexec /bin/sleep 30\n"
+                : "#!/bin/sh\necho $$ > \"$1.tmp\" && mv \"$1.tmp\" \"$1\"\nexec /bin/sleep 30\n"
+            try Data(body.utf8).write(to: scriptURL, options: .atomic)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
 
             let task = Task {
                 try await TokenSaverReleaseRTK.runValidatedProcess(scriptURL, arguments: [pidURL.path])
             }
             var pid: pid_t = 0
-            for _ in 0..<50 {
+            for _ in 0..<150 {
                 if let text = try? String(contentsOf: pidURL, encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines),
                    let parsed = Int32(text), parsed > 0 {
                     pid = parsed

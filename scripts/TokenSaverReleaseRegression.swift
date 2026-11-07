@@ -20,6 +20,7 @@ class XCTestCase {
 
 @main struct TokenSaverReleaseRegression {
 static func main() async throws {
+setbuf(stdout, nil)
 do { let test = TokenSaverReleaseTests(); test.testRepositoriesAndInstallCapabilities(); try test.tearDown(); print("PASS testRepositoriesAndInstallCapabilities") }
 do { let test = TokenSaverReleaseTests(); try await test.testStableReleaseResolvesImmutableCommitForEveryTool(); try test.tearDown(); print("PASS testStableReleaseResolvesImmutableCommitForEveryTool") }
 do { let test = TokenSaverReleaseTests(); try await test.testMissingReleaseUsesClearlyLabelledCommit(); try test.tearDown(); print("PASS testMissingReleaseUsesClearlyLabelledCommit") }

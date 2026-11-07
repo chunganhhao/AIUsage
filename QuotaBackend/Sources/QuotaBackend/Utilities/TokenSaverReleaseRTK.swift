@@ -83,19 +83,16 @@ public struct TokenSaverReleaseRTK: Sendable {
         guard process.isRunning else { return }
         let pid = process.processIdentifier
         process.terminate()
-        for _ in 0..<8 {
-            if !process.isRunning { break }
+        for _ in 0..<10 {
+            if !process.isRunning { return }
             Darwin.usleep(20_000)
         }
         if process.isRunning, pid > 0 {
             _ = kill(pid, SIGKILL)
-            for _ in 0..<8 {
-                if !process.isRunning { break }
+            for _ in 0..<25 {
+                if !process.isRunning { return }
                 Darwin.usleep(20_000)
             }
-        }
-        if !process.isRunning {
-            process.waitUntilExit()
         }
     }
 
@@ -109,6 +106,8 @@ public struct TokenSaverReleaseRTK: Sendable {
                                    "HOMEBREW_NO_AUTO_UPDATE": "1", "HOMEBREW_NO_INSTALL_CLEANUP": "1", "HOMEBREW_NO_ANALYTICS": "1"]
             process.standardOutput = pipe
             process.standardError = pipe
+            // Avoid NSConcreteTask queuing CFRunLoopPerformBlock onto a Swift cooperative pool thread's inert CFRunLoop.
+            process.terminationHandler = { _ in }
             try process.run()
             defer { try? pipe.fileHandleForReading.close() }
             let handle = pipe.fileHandleForReading.fileDescriptor
@@ -142,7 +141,6 @@ public struct TokenSaverReleaseRTK: Sendable {
                     throw Failure.limit
                 }
             }
-            process.waitUntilExit()
             if process.terminationReason == .uncaughtSignal { throw Failure.limit }
             return Output(status: process.terminationStatus, text: String(decoding: data, as: UTF8.self))
         }
