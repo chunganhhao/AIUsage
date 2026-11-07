@@ -53,8 +53,9 @@ struct AntigravityManagementView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     @StateObject private var tokenSaver = TokenSaverSettingsController()
-    @State private var envSummary = AntigravityAccountSwitcher.inspectEnvironment()
-    @State private var poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
+    @State private var envSummary = AntigravityEnvironmentSummary.empty
+    @State private var environmentRefreshTask: Task<Void, Never>?
+    @State private var poolProtectionEnabled = false
     @State private var poolProtectionResidual = false
     @State private var poolProtectionError: String?
 
@@ -91,8 +92,12 @@ struct AntigravityManagementView: View {
                 AntigravitySubscriptionSection(
                     entries: antigravityEntries,
                     isAppInstalled: envSummary.isAppInstalled,
+                    storageDisplayPath: envSummary.activeStoragePath,
                     onAddAccount: { showingAddAccount = true },
                     onRestartApp: { restartAntigravity() },
+                    onAccountSwitched: {
+                        refreshEnvironment()
+                    },
                     onShowStatus: { message, isError in
                         withAnimation(.easeInOut(duration: 0.2)) {
                             statusBannerMessage = message
@@ -117,7 +122,20 @@ struct AntigravityManagementView: View {
         }
         .sheet(item: $editingConfigFile) { file in
             AntigravityConfigFileEditorSheet(file: file) {
-                envSummary = AntigravityAccountSwitcher.inspectEnvironment()
+                refreshEnvironment()
+            }
+        }
+    }
+
+    private func refreshEnvironment() {
+        environmentRefreshTask?.cancel()
+        environmentRefreshTask = Task {
+            let summary = await AntigravityAccountSwitcher.inspectEnvironmentAsync()
+            guard !Task.isCancelled else { return }
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                envSummary = summary
+                activation.applyDetectedAntigravityEmail(summary.activeAccountEmail)
             }
         }
     }
@@ -126,8 +144,7 @@ struct AntigravityManagementView: View {
         if tokenSaver.harness != .antigravity {
             tokenSaver.selectHarness(.antigravity)
         }
-        envSummary = AntigravityAccountSwitcher.inspectEnvironment()
-        activation.detectActiveAntigravityAccount()
+        refreshEnvironment()
         poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
         do {
             poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection()
@@ -249,7 +266,7 @@ struct AntigravityManagementView: View {
         Task { @MainActor in
             let ok = await AntigravityAccountSwitcher.restartAntigravityApp()
             isRestartingAGY = false
-            envSummary = AntigravityAccountSwitcher.inspectEnvironment()
+            refreshEnvironment()
             withAnimation(.easeInOut(duration: 0.2)) {
                 statusBannerIsError = !ok
                 statusBannerMessage = ok
@@ -403,7 +420,7 @@ struct AntigravityManagementView: View {
             let label = active.accountPrimaryLabel
             return label.components(separatedBy: "@").first ?? label
         }
-        if let detected = AntigravityAccountSwitcher.detectActiveAccount()?.email {
+        if let detected = envSummary.activeAccountEmail {
             return detected.components(separatedBy: "@").first ?? detected
         }
         return L("None", "未激活")
@@ -609,7 +626,7 @@ struct AntigravityManagementView: View {
 
                 Button(L("Reapply Rules", "重新写入规则")) {
                     tokenSaver.reapply()
-                    envSummary = AntigravityAccountSwitcher.inspectEnvironment()
+                    refreshEnvironment()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
@@ -727,8 +744,10 @@ struct AntigravityManagementView: View {
 struct AntigravitySubscriptionSection: View {
     let entries: [ProviderAccountEntry]
     let isAppInstalled: Bool
+    let storageDisplayPath: String
     let onAddAccount: () -> Void
     let onRestartApp: () -> Void
+    let onAccountSwitched: () -> Void
     let onShowStatus: (String, Bool) -> Void
 
     @EnvironmentObject private var appState: AppState
@@ -767,7 +786,7 @@ struct AntigravitySubscriptionSection: View {
                         .background(Capsule().fill(Color.primary.opacity(0.06)))
                 }
                 Spacer()
-                Text(AntigravityAccountSwitcher.activeStorageDisplayPath())
+                Text(storageDisplayPath)
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
@@ -1088,6 +1107,7 @@ struct AntigravitySubscriptionSection: View {
                         if newValue {
                             do {
                                 try activation.activateAccount(entry: entry)
+                                onAccountSwitched()
                                 onShowStatus(
                                     L(
                                         "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
@@ -1100,14 +1120,15 @@ struct AntigravitySubscriptionSection: View {
                             }
                         } else {
                             activation.deactivateAccount(entry: entry)
+                            onAccountSwitched()
                         }
                     }
                 ))
                 .labelsHidden()
                 .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.antigravityBrand, isBusy: false))
                 .help(L(
-                    "Switch Antigravity account in state.vscdb without signing in via browser.",
-                    "直接写入 state.vscdb 切换 Antigravity 账号，无需再次打开浏览器登录。"
+                    "Switch Antigravity account in Keychain / state.vscdb without signing in via browser.",
+                    "直接写入 Keychain / state.vscdb 切换 Antigravity 账号，无需再次打开浏览器登录。"
                 ))
             }
         }
@@ -1126,6 +1147,7 @@ struct AntigravitySubscriptionSection: View {
                 Button {
                     do {
                         try activation.activateAccount(entry: entry)
+                        onAccountSwitched()
                         onShowStatus(
                             L(
                                 "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
@@ -1144,6 +1166,7 @@ struct AntigravitySubscriptionSection: View {
                     Button {
                         do {
                             try activation.activateAccount(entry: entry)
+                            onAccountSwitched()
                             onRestartApp()
                         } catch {
                             onShowStatus(error.localizedDescription, true)

@@ -76,10 +76,29 @@ struct AntigravityEnvironmentSummary: Equatable {
     let brainSessionCount: Int
     let geminiRulesPath: String
     let mcpConfigPath: String
+    let activeAccountEmail: String?
+    let activeStoragePath: String
+
+    static let empty = AntigravityEnvironmentSummary(
+        isAppInstalled: false,
+        isAppRunning: false,
+        appVersion: nil,
+        mcpServerCount: 0,
+        skillCount: 0,
+        brainSessionCount: 0,
+        geminiRulesPath: "",
+        mcpConfigPath: "",
+        activeAccountEmail: nil,
+        activeStoragePath: "Keychain (gemini/antigravity)"
+    )
 }
 
 enum AntigravityAccountSwitcher {
     static let bundleIdentifier = "com.google.antigravity"
+    static let keyringService = "gemini"
+    static let keyringAccount = "antigravity"
+    static let keyringBase64Prefix = "go-keyring-base64:"
+    static let keyringHexPrefix = "go-keyring-encoded:"
 
     private static let stateKeysToSnapshot = [
         "antigravityAuthStatus",
@@ -87,6 +106,11 @@ enum AntigravityAccountSwitcher {
         "antigravityUnifiedStateSync.oauthToken",
         "antigravityUnifiedStateSync.userStatus"
     ]
+    private static let snapshotStoredTokenRefreshKey = "storedTokenRefreshToken"
+
+    private static let keyringCacheLock = NSLock()
+    private static var cachedLiveKeyringEntry: (secret: String, modifiedAt: Date?)?
+    private static var cachedLiveKeyringTimestamp: Date = .distantPast
 
     // MARK: - Paths
 
@@ -111,15 +135,24 @@ enum AntigravityAccountSwitcher {
         "\(homeDirectory)/.gemini/jetski-standalone-oauth-token"
     }
 
+    static func testKeyringFilePath(homeDirectory: String) -> String {
+        "\(homeDirectory)/.gemini/.keychain-gemini-antigravity"
+    }
+
+    private static func isRealUserHomeDirectory(_ homeDirectory: String) -> Bool {
+        let lhs = URL(fileURLWithPath: homeDirectory).standardizedFileURL.path
+        let rhs = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path).standardizedFileURL.path
+        return lhs == rhs
+    }
+
     static func activeStorageDisplayPath(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> String {
-        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
-        let appStorage = appStoragePath(homeDirectory: homeDirectory)
-        let dbDate = fileModificationDate(atPath: dbPath)
-        let appStorageDate = fileModificationDate(atPath: appStorage)
-        if let appStorageDate, dbDate == nil || appStorageDate > dbDate! {
-            return "~/Library/Application Support/Antigravity/app_storage.json"
+        if let best = resolveActiveStorageCandidates(homeDirectory: homeDirectory).first {
+            return best.displayPath
+        }
+        if FileManager.default.fileExists(atPath: appStoragePath(homeDirectory: homeDirectory)) {
+            return "Keychain (gemini/antigravity)"
         }
         return "~/Library/Application Support/Antigravity/.../state.vscdb"
     }
@@ -129,38 +162,299 @@ enum AntigravityAccountSwitcher {
             .appendingPathComponent(".config/aiusage/antigravity-switch/snapshots", isDirectory: true)
     }
 
+    // MARK: - Keyring (zalando/go-keyring service="gemini", account="antigravity")
+
+    static func encodeKeyringSecret(_ jsonData: Data) -> String {
+        keyringBase64Prefix + jsonData.base64EncodedString()
+    }
+
+    static func decodeKeyringSecret(_ rawSecret: String) -> Data? {
+        let trimmed = rawSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix(keyringBase64Prefix) {
+            let b64 = String(trimmed.dropFirst(keyringBase64Prefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            return Data(base64Encoded: b64)
+        }
+        if trimmed.hasPrefix(keyringHexPrefix) {
+            let hex = String(trimmed.dropFirst(keyringHexPrefix.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            guard hex.count % 2 == 0 else { return nil }
+            var data = Data(capacity: hex.count / 2)
+            var index = hex.startIndex
+            while index < hex.endIndex {
+                let nextIndex = hex.index(index, offsetBy: 2)
+                guard let byte = UInt8(hex[index..<nextIndex], radix: 16) else { return nil }
+                data.append(byte)
+                index = nextIndex
+            }
+            return data
+        }
+        if trimmed.hasPrefix("{") {
+            return Data(trimmed.utf8)
+        }
+        return nil
+    }
+
+    static func parseKeychainAttributesModificationDate(_ output: String) -> Date? {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = TimeZone(secondsFromGMT: 0)
+        formatter.dateFormat = "yyyyMMddHHmmss"
+
+        for tag in ["\"mdat\"<timedate>=", "\"cdat\"<timedate>="] {
+            guard let tagRange = output.range(of: tag) else { continue }
+            let tail = output[tagRange.upperBound...]
+            let line = tail.prefix { $0 != "\n" && $0 != "\r" }
+            guard let quoteStart = line.firstIndex(of: "\"") else { continue }
+            let afterQuote = line[line.index(after: quoteStart)...]
+            let digits = afterQuote.prefix(14)
+            if digits.count == 14, digits.allSatisfy(\.isNumber),
+               let parsed = formatter.date(from: String(digits)) {
+                return parsed
+            }
+        }
+        return nil
+    }
+
+    static func generateWriterID() -> String {
+        var bytes = [UInt8](repeating: 0, count: 16)
+        for index in 0..<16 {
+            bytes[index] = UInt8.random(in: 0...255)
+        }
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    private static func runSecurityCommand(
+        arguments: [String],
+        stdinString: String? = nil,
+        timeoutSeconds: TimeInterval = 2.0
+    ) -> (exitCode: Int32, stdout: String)? {
+        let securityPath = "/usr/bin/security"
+        guard FileManager.default.isExecutableFile(atPath: securityPath) else { return nil }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: securityPath)
+        process.arguments = arguments
+        // Install a non-nil terminationHandler so Foundation uses the GCD Mach port waiter
+        // rather than blocking CFRunLoopRunInMode on Swift Concurrency cooperative threads.
+        process.terminationHandler = { _ in }
+
+        let stdoutPipe = Pipe()
+        process.standardOutput = stdoutPipe
+        process.standardError = FileHandle.nullDevice
+
+        var stdinPipe: Pipe?
+        if stdinString != nil {
+            let pipe = Pipe()
+            process.standardInput = pipe
+            stdinPipe = pipe
+        } else {
+            process.standardInput = FileHandle.nullDevice
+        }
+
+        do {
+            try process.run()
+        } catch {
+            return nil
+        }
+
+        if let stdinString, let writer = stdinPipe?.fileHandleForWriting {
+            try? writer.write(contentsOf: Data(stdinString.utf8))
+            try? writer.close()
+        }
+
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        while process.isRunning && Date() < deadline {
+            Darwin.usleep(10_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            let killDeadline = Date().addingTimeInterval(0.1)
+            while process.isRunning && Date() < killDeadline {
+                Darwin.usleep(10_000)
+            }
+            if process.isRunning {
+                Darwin.kill(process.processIdentifier, SIGKILL)
+            }
+            return nil
+        }
+
+        let data = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        let output = String(data: data, encoding: .utf8) ?? ""
+        return (process.terminationStatus, output)
+    }
+
+    static func readKeyringRawEntry(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> (secret: String, modifiedAt: Date?)? {
+        if !isRealUserHomeDirectory(homeDirectory) {
+            let path = testKeyringFilePath(homeDirectory: homeDirectory)
+            guard let data = FileManager.default.contents(atPath: path),
+                  let secret = String(data: data, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !secret.isEmpty else {
+                return nil
+            }
+            return (secret, fileModificationDate(atPath: path))
+        }
+
+        keyringCacheLock.lock()
+        if Date().timeIntervalSince(cachedLiveKeyringTimestamp) < 1.0 {
+            let cached = cachedLiveKeyringEntry
+            keyringCacheLock.unlock()
+            return cached
+        }
+        keyringCacheLock.unlock()
+
+        guard let secretRes = runSecurityCommand(arguments: [
+            "find-generic-password", "-s", keyringService, "-wa", keyringAccount
+        ]), secretRes.exitCode == 0 else {
+            keyringCacheLock.lock()
+            cachedLiveKeyringEntry = nil
+            cachedLiveKeyringTimestamp = Date()
+            keyringCacheLock.unlock()
+            return nil
+        }
+
+        let secret = secretRes.stdout.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !secret.isEmpty else { return nil }
+
+        var modifiedAt: Date?
+        if let metaRes = runSecurityCommand(arguments: [
+            "find-generic-password", "-s", keyringService, "-a", keyringAccount
+        ]), metaRes.exitCode == 0 {
+            modifiedAt = parseKeychainAttributesModificationDate(metaRes.stdout)
+        }
+
+        let entry = (secret: secret, modifiedAt: modifiedAt)
+        keyringCacheLock.lock()
+        cachedLiveKeyringEntry = entry
+        cachedLiveKeyringTimestamp = Date()
+        keyringCacheLock.unlock()
+        return entry
+    }
+
+    static func writeKeyringRawSecret(
+        _ encodedSecret: String,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) throws {
+        let clean = encodedSecret.trimmingCharacters(in: .whitespacesAndNewlines)
+        // zalando/go-keyring macOSXKeychain.Set enforces a 4096-byte command buffer for `/usr/bin/security -i`.
+        guard !clean.isEmpty, clean.utf8.count <= 3800,
+              !clean.contains("\"") && !clean.contains("\n") && !clean.contains("\r") else {
+            throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
+        }
+
+        if !isRealUserHomeDirectory(homeDirectory) {
+            let path = testKeyringFilePath(homeDirectory: homeDirectory)
+            let url = URL(fileURLWithPath: path)
+            try FileManager.default.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try Data(clean.utf8).write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            return
+        }
+
+        let command = "add-generic-password -U -s \"\(keyringService)\" -a \"\(keyringAccount)\" -w \"\(clean)\"\n"
+        guard let result = runSecurityCommand(arguments: ["-i"], stdinString: command),
+              result.exitCode == 0 else {
+            throw AntigravitySwitchError.databaseWriteFailed("Could not update macOS Keychain item (\(keyringService)/\(keyringAccount)).")
+        }
+
+        keyringCacheLock.lock()
+        cachedLiveKeyringEntry = (secret: clean, modifiedAt: Date())
+        cachedLiveKeyringTimestamp = Date()
+        keyringCacheLock.unlock()
+    }
+
     // MARK: - Detection
+
+    private struct StorageCandidate {
+        let account: AntigravityDetectedAccount
+        let accessToken: String
+        let refreshToken: String
+        let tier: Int
+        let modifiedAt: Date
+        let priority: Int
+        let displayPath: String
+        let sourcePath: String
+    }
+
+    // Authoritative storage resolution shared across detection, IDE import, and default refresh extraction:
+    //   - Tier 2 (Antigravity 2.0 CompositeTokenStorage): Keyring (gemini/antigravity) and ~/.gemini/jetski-standalone-oauth-token.
+    //     Within Tier 2, the more recently modified authenticated StoredToken wins (tie-breaker: Keyring > standalone).
+    //   - Tier 1 (Legacy Antigravity 1.x): state.vscdb. Used only when Tier 2 has no authenticated StoredToken,
+    //     so non-auth SQLite writes (e.g. window.layout) never override an active Antigravity 2.0 Keyring/standalone session.
+    private static func resolveActiveStorageCandidates(
+        homeDirectory: String
+    ) -> [StorageCandidate] {
+        var candidates: [StorageCandidate] = []
+
+        if let keyring = detectAccountFromKeyring(homeDirectory: homeDirectory),
+           !keyring.accessToken.isEmpty {
+            candidates.append(StorageCandidate(
+                account: keyring.account,
+                accessToken: keyring.accessToken,
+                refreshToken: keyring.refreshToken,
+                tier: 2,
+                modifiedAt: keyring.modifiedAt ?? .distantPast,
+                priority: 3,
+                displayPath: "Keychain (gemini/antigravity)",
+                sourcePath: "Keychain (gemini/antigravity)"
+            ))
+        }
+
+        let standalonePath = standaloneTokenPath(homeDirectory: homeDirectory)
+        if let standalone = detectAccountFromStandaloneFile(at: standalonePath),
+           !standalone.accessToken.isEmpty {
+            let mtime = fileModificationDate(atPath: standalonePath) ?? .distantPast
+            candidates.append(StorageCandidate(
+                account: standalone.account,
+                accessToken: standalone.accessToken,
+                refreshToken: standalone.refreshToken,
+                tier: 2,
+                modifiedAt: mtime,
+                priority: 2,
+                displayPath: "~/.gemini/jetski-standalone-oauth-token",
+                sourcePath: standalonePath
+            ))
+        }
+
+        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
+        if FileManager.default.fileExists(atPath: dbPath),
+           let detectedDB = detectAccountFromDB(at: dbPath) {
+            let mtime = sqliteModificationDate(atPath: dbPath) ?? .distantPast
+            candidates.append(StorageCandidate(
+                account: detectedDB.account,
+                accessToken: detectedDB.accessToken,
+                refreshToken: detectedDB.refreshToken,
+                tier: 1,
+                modifiedAt: mtime,
+                priority: 1,
+                displayPath: "~/Library/Application Support/Antigravity/.../state.vscdb",
+                sourcePath: dbPath
+            ))
+        }
+
+        return candidates.sorted { lhs, rhs in
+            if lhs.tier != rhs.tier {
+                return lhs.tier > rhs.tier
+            }
+            if lhs.modifiedAt != rhs.modifiedAt {
+                return lhs.modifiedAt > rhs.modifiedAt
+            }
+            return lhs.priority > rhs.priority
+        }
+    }
 
     static func detectActiveAccount(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> AntigravityDetectedAccount? {
-        var candidates: [(account: AntigravityDetectedAccount, modifiedAt: Date, priority: Int)] = []
-
-        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
-        if FileManager.default.fileExists(atPath: dbPath),
-           let detected = detectAccountFromDB(at: dbPath) {
-            let mtime = fileModificationDate(atPath: dbPath) ?? .distantPast
-            candidates.append((detected, mtime, 3))
-        }
-
-        let standalonePath = standaloneTokenPath(homeDirectory: homeDirectory)
-        if let detected = detectAccountFromStandaloneFile(at: standalonePath) {
-            let mtime = fileModificationDate(atPath: standalonePath) ?? .distantPast
-            candidates.append((detected, mtime, 2))
-        }
-
-        let appStorage = appStoragePath(homeDirectory: homeDirectory)
-        if let detected = detectAccountFromAppStorage(at: appStorage, homeDirectory: homeDirectory) {
-            let mtime = fileModificationDate(atPath: appStorage) ?? .distantPast
-            candidates.append((detected, mtime, 1))
-        }
-
-        return candidates.max { lhs, rhs in
-            if lhs.modifiedAt != rhs.modifiedAt {
-                return lhs.modifiedAt < rhs.modifiedAt
-            }
-            return lhs.priority < rhs.priority
-        }?.account
+        resolveActiveStorageCandidates(homeDirectory: homeDirectory).first?.account
     }
 
     private static func fileModificationDate(atPath path: String) -> Date? {
@@ -170,74 +464,107 @@ enum AntigravityAccountSwitcher {
         return attrs[.modificationDate] as? Date
     }
 
-    private static func detectAccountFromStandaloneFile(at path: String) -> AntigravityDetectedAccount? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+    private static func sqliteModificationDate(atPath dbPath: String) -> Date? {
+        let mainDate = fileModificationDate(atPath: dbPath)
+        let walDate = fileModificationDate(atPath: dbPath + "-wal")
+        switch (mainDate, walDate) {
+        case let (m?, w?): return max(m, w)
+        case let (m?, nil): return m
+        case let (nil, w?): return w
+        case (nil, nil): return nil
+        }
+    }
+
+    private static func parseStoredTokenJSON(
+        _ data: Data
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, expiryDate: Date?)? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
         let token = (json["token"] as? [String: Any]) ?? json
-        let access = (token["access_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let refresh = (token["refresh_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let rawEmail = ((json["id_token_email"] as? String)
+        let access = ((token["access_token"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let refresh = ((token["refresh_token"] as? String) ?? "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let hasAccess = !access.isEmpty
+        let hasRefresh = !refresh.isEmpty
+        guard hasAccess || hasRefresh else {
+            return nil
+        }
+
+        // Identity must be bound directly to the StoredToken payload itself;
+        // never substitute agy.onboarding.lastLoginUsername from app_storage.json.
+        let explicitEmail = ((json["id_token_email"] as? String)
             ?? (json["email"] as? String)
             ?? (token["email"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = (rawEmail?.isEmpty == false) ? rawEmail : nil
-        guard email != nil || (access?.isEmpty == false) || (refresh?.isEmpty == false) else {
+        guard let email = explicitEmail, !email.isEmpty else {
             return nil
         }
-        return AntigravityDetectedAccount(
-            email: email,
-            name: email,
-            hasAccessToken: access?.isEmpty == false,
-            hasRefreshToken: refresh?.isEmpty == false
-        )
-    }
 
-    private static func detectAccountFromAppStorage(
-        at path: String,
-        homeDirectory: String
-    ) -> AntigravityDetectedAccount? {
-        guard let data = FileManager.default.contents(atPath: path),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let rawEmail = (json["agy.onboarding.lastLoginUsername"] as? String)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-              !rawEmail.isEmpty else {
-            return nil
-        }
-        let hasRefresh = extractRefreshToken(forEmail: rawEmail, homeDirectory: homeDirectory) != nil
-        return AntigravityDetectedAccount(
-            email: rawEmail,
-            name: rawEmail.components(separatedBy: "@").first ?? rawEmail,
-            hasAccessToken: hasRefresh,
+        let expiryStr = (token["expiry"] as? String) ?? (token["expired"] as? String)
+        let expiryDate = expiryStr.flatMap { parseISO8601($0) }
+        let name = email.components(separatedBy: "@").first ?? email
+        let detected = AntigravityDetectedAccount(
+            email: email,
+            name: name,
+            hasAccessToken: hasAccess,
             hasRefreshToken: hasRefresh
         )
+        return (detected, access, refresh, expiryDate)
+    }
+
+    private static func detectAccountFromKeyring(
+        homeDirectory: String
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, modifiedAt: Date?)? {
+        guard let entry = readKeyringRawEntry(homeDirectory: homeDirectory),
+              let jsonData = decodeKeyringSecret(entry.secret),
+              let parsed = parseStoredTokenJSON(jsonData) else {
+            return nil
+        }
+        let effectiveDate = entry.modifiedAt ?? parsed.expiryDate?.addingTimeInterval(-3600)
+        return (parsed.account, parsed.accessToken, parsed.refreshToken, effectiveDate)
+    }
+
+    private static func detectAccountFromStandaloneFile(
+        at path: String
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String)? {
+        guard let data = FileManager.default.contents(atPath: path),
+              let parsed = parseStoredTokenJSON(data) else {
+            return nil
+        }
+        return (parsed.account, parsed.accessToken, parsed.refreshToken)
     }
 
     static func extractRefreshToken(
         forEmail expectedEmail: String? = nil,
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> String? {
-        let normalizedExpected: String?
+        let targetEmail: String
         if let expectedEmail {
             guard let clean = normalizeEmail(expectedEmail) else { return nil }
-            normalizedExpected = clean
+            targetEmail = clean
         } else {
-            normalizedExpected = nil
+            // Use the exact same active storage resolution policy as detectActiveAccount & discoverIDECandidatePayload.
+            guard let active = resolveActiveStorageCandidates(homeDirectory: homeDirectory).first else {
+                return nil
+            }
+            if !active.refreshToken.isEmpty {
+                return active.refreshToken
+            }
+            guard let activeEmail = normalizeEmail(active.account.email) else {
+                return nil
+            }
+            targetEmail = activeEmail
         }
 
         let fm = FileManager.default
-        let primaryPath = primaryDBPath(homeDirectory: homeDirectory)
-        var targetEmail = normalizedExpected
 
-        if targetEmail == nil, fm.fileExists(atPath: primaryPath), let db = openSQLite(at: primaryPath, readonly: true) {
-            defer { sqlite3_close(db) }
-            let primaryDBEmail = normalizeEmail(readEmailFromOpenDB(db))
-            if let direct = extractRefreshTokenFromOpenDB(db) {
-                return direct
-            }
-            // Primary DB exists without a refresh token: fallback sources must match the primary DB's account email.
-            guard let primaryDBEmail else { return nil }
-            targetEmail = primaryDBEmail
+        if let keyringEntry = readKeyringRawEntry(homeDirectory: homeDirectory),
+           let keyringData = decodeKeyringSecret(keyringEntry.secret),
+           let parsedKeyring = parseStoredTokenJSON(keyringData),
+           !parsedKeyring.refreshToken.isEmpty,
+           normalizeEmail(parsedKeyring.account.email) == targetEmail {
+            return parsedKeyring.refreshToken
         }
 
         for dbPath in candidateDBPaths(homeDirectory: homeDirectory) where fm.fileExists(atPath: dbPath) {
@@ -246,8 +573,12 @@ enum AntigravityAccountSwitcher {
             }
         }
 
-        if let targetEmail,
-           let snapshot = loadAccountSnapshot(forEmail: targetEmail, homeDirectory: homeDirectory) {
+        if let snapshot = loadAccountSnapshot(forEmail: targetEmail, homeDirectory: homeDirectory) {
+            if let storedTokenRefresh = snapshot[snapshotStoredTokenRefreshKey]?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+               !storedTokenRefresh.isEmpty {
+                return storedTokenRefresh
+            }
             for key in ["antigravityUnifiedStateSync.oauthToken", "jetskiStateSync.agentManagerInitState"] {
                 if let b64 = snapshot[key],
                    let token = extractRefreshTokenFromBase64Protobuf(b64) {
@@ -262,20 +593,10 @@ enum AntigravityAccountSwitcher {
         ]
         for path in standaloneCandidates {
             if let data = fm.contents(atPath: path),
-               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
-                let tokenObj = (json["token"] as? [String: Any]) ?? json
-                let fileEmail = normalizeEmail(
-                    (json["id_token_email"] as? String)
-                        ?? (json["email"] as? String)
-                        ?? (tokenObj["email"] as? String)
-                )
-                if let targetEmail, fileEmail != targetEmail {
-                    continue
-                }
-                if let refresh = (tokenObj["refresh_token"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !refresh.isEmpty {
-                    return refresh
-                }
+               let parsed = parseStoredTokenJSON(data),
+               !parsed.refreshToken.isEmpty,
+               normalizeEmail(parsed.account.email) == targetEmail {
+                return parsed.refreshToken
             }
         }
         return nil
@@ -284,28 +605,15 @@ enum AntigravityAccountSwitcher {
     static func discoverIDECandidatePayload(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> AntigravityIDECandidatePayload? {
-        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
-        guard FileManager.default.fileExists(atPath: dbPath),
-              let db = openSQLite(at: dbPath, readonly: true) else {
+        guard let active = resolveActiveStorageCandidates(homeDirectory: homeDirectory)
+            .first(where: { !$0.accessToken.isEmpty }) else {
             return nil
         }
-        defer { sqlite3_close(db) }
 
-        guard let authStatus = readAuthStatusJSON(db: db),
-              let rawApiKey = authStatus["apiKey"] as? String else {
-            return nil
-        }
-        let accessToken = rawApiKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !accessToken.isEmpty else { return nil }
-
-        let rawEmail = (authStatus["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let email = (rawEmail?.isEmpty == false) ? rawEmail : nil
-        let rawName = (authStatus["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
-        let name = (rawName?.isEmpty == false) ? rawName : nil
-
+        let email = active.account.email
         let refreshToken: String?
-        if let direct = extractRefreshTokenFromOpenDB(db) {
-            refreshToken = direct
+        if !active.refreshToken.isEmpty {
+            refreshToken = active.refreshToken
         } else if let email {
             refreshToken = extractRefreshToken(forEmail: email, homeDirectory: homeDirectory)
         } else {
@@ -314,10 +622,10 @@ enum AntigravityAccountSwitcher {
 
         return AntigravityIDECandidatePayload(
             email: email,
-            name: name,
-            accessToken: accessToken,
+            name: active.account.name,
+            accessToken: active.accessToken,
             refreshToken: refreshToken,
-            databasePath: dbPath
+            databasePath: active.sourcePath
         )
     }
 
@@ -342,32 +650,37 @@ enum AntigravityAccountSwitcher {
         readAuthStatusJSON(db: db)?["email"] as? String
     }
 
-    private static func detectAccountFromDB(at dbPath: String) -> AntigravityDetectedAccount? {
+    private static func detectAccountFromDB(
+        at dbPath: String
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String)? {
         guard let db = openSQLite(at: dbPath, readonly: true) else { return nil }
         defer { sqlite3_close(db) }
 
         var email: String?
         var name: String?
-        var hasAccess = false
+        var accessToken = ""
 
         if let json = readAuthStatusJSON(db: db) {
             email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             name = (json["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines)
             if let apiKey = (json["apiKey"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines), !apiKey.isEmpty {
-                hasAccess = true
+                accessToken = apiKey
             }
         }
 
-        let hasRefresh = extractRefreshTokenFromOpenDB(db) != nil
-        if email == nil && !hasAccess && !hasRefresh {
+        let refreshToken = extractRefreshTokenFromOpenDB(db) ?? ""
+        let hasAccess = !accessToken.isEmpty
+        let hasRefresh = !refreshToken.isEmpty
+        guard hasAccess || hasRefresh else {
             return nil
         }
-        return AntigravityDetectedAccount(
+        let detected = AntigravityDetectedAccount(
             email: email?.isEmpty == false ? email : nil,
             name: name?.isEmpty == false ? name : nil,
             hasAccessToken: hasAccess,
             hasRefreshToken: hasRefresh
         )
+        return (detected, accessToken, refreshToken)
     }
 
     static func extractRefreshTokenFromDB(at dbPath: String, expectedEmail: String? = nil) -> String? {
@@ -540,21 +853,18 @@ enum AntigravityAccountSwitcher {
         }
         let appStorage = appStoragePath(homeDirectory: homeDirectory)
         let hasAppStorage = FileManager.default.fileExists(atPath: appStorage)
-        guard !existingDBPaths.isEmpty || hasAppStorage else {
+        let standalonePath = standaloneTokenPath(homeDirectory: homeDirectory)
+        let hasStandaloneToken = FileManager.default.fileExists(atPath: standalonePath)
+        let existingKeyringEntry = readKeyringRawEntry(homeDirectory: homeDirectory)
+        let hasKeyringToken = existingKeyringEntry != nil
+
+        guard !existingDBPaths.isEmpty || hasAppStorage || hasStandaloneToken || hasKeyringToken else {
             throw AntigravitySwitchError.databaseNotFound(primaryDBPath(homeDirectory: homeDirectory))
         }
 
-        // Snapshot all existing databases BEFORE attempting refresh token recovery or writing,
-        // so activating a refreshless credential for the currently active account preserves its live refresh token.
-        for dbPath in existingDBPaths {
-            if let db = openSQLite(at: dbPath, readonly: true) {
-                saveCurrentAccountSnapshot(db: db, homeDirectory: homeDirectory)
-                sqlite3_close(db)
-            }
-        }
-
         // If the stored auth file came from IDE import without a refresh_token, try recovering
-        // the refresh_token from a verified same-email current DB, snapshot, or standalone file.
+        // the refresh_token from a verified same-email current DB, Keyring, snapshot, or standalone file.
+        var recoveredRefreshToken: String?
         if parsed.refreshToken.isEmpty {
             if let recovered = extractRefreshToken(forEmail: parsed.email, homeDirectory: homeDirectory) {
                 parsed = ParsedCredential(
@@ -566,7 +876,7 @@ enum AntigravityAccountSwitcher {
                     idToken: parsed.idToken,
                     projectId: parsed.projectId
                 )
-                backfillRefreshTokenInAuthFile(at: authFileURL, refreshToken: recovered)
+                recoveredRefreshToken = recovered
             }
         }
 
@@ -574,27 +884,114 @@ enum AntigravityAccountSwitcher {
             throw AntigravitySwitchError.missingRefreshToken
         }
 
-        for dbPath in existingDBPaths {
-            try injectCredentialIntoDatabase(
-                at: dbPath,
+        let writerID = generateWriterID()
+        let requiresKeyringUpdate = hasAppStorage || hasKeyringToken
+
+        // Preflight Keyring StoredToken encoding and size limit BEFORE mutating any database, snapshot, or file,
+        // so oversized or invalid tokens fail atomically without leaving side effects or divergent stores.
+        let preflightKeyringSecret: String?
+        if requiresKeyringUpdate {
+            preflightKeyringSecret = try encodeValidatedKeyringStoredToken(
                 credential: parsed,
-                homeDirectory: homeDirectory,
-                saveSnapshotBeforeWrite: false
+                writerID: writerID
             )
-            let backupDBPath = dbPath + ".backup"
-            if FileManager.default.fileExists(atPath: backupDBPath) {
-                try? injectCredentialIntoDatabase(
-                    at: backupDBPath,
+        } else {
+            preflightKeyringSecret = nil
+        }
+
+        // Snapshot all existing databases and StoredToken stores right before writing,
+        // so activating a refreshless credential for the currently active account preserves its live refresh token.
+        for dbPath in existingDBPaths {
+            if let db = openSQLite(at: dbPath, readonly: true) {
+                saveCurrentAccountSnapshot(db: db, homeDirectory: homeDirectory)
+                sqlite3_close(db)
+            }
+        }
+        if let existingKeyringEntry,
+           let keyringData = decodeKeyringSecret(existingKeyringEntry.secret) {
+            saveCurrentStoredTokenSnapshot(from: keyringData, homeDirectory: homeDirectory)
+        }
+        if let standaloneData = FileManager.default.contents(atPath: standalonePath) {
+            saveCurrentStoredTokenSnapshot(from: standaloneData, homeDirectory: homeDirectory)
+        }
+
+        if let recoveredRefreshToken {
+            backfillRefreshTokenInAuthFile(at: authFileURL, refreshToken: recoveredRefreshToken)
+        }
+
+        var fileBackups: [(path: String, data: Data?)] = []
+        let candidateRollbackPaths = existingDBPaths.flatMap { [$0, $0 + "-wal", $0 + "-shm"] } + [
+            "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
+            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
+        ]
+        for path in candidateRollbackPaths {
+            if FileManager.default.fileExists(atPath: path) {
+                fileBackups.append((path: path, data: FileManager.default.contents(atPath: path)))
+            } else {
+                fileBackups.append((path: path, data: nil))
+            }
+        }
+        let previousKeyringSecret = existingKeyringEntry?.secret
+        let testKeyringPath = testKeyringFilePath(homeDirectory: homeDirectory)
+        let hadTestKeyringFile = !isRealUserHomeDirectory(homeDirectory)
+            && FileManager.default.fileExists(atPath: testKeyringPath)
+
+        var updatedAnyAuthStore = false
+
+        do {
+            // 1. Update legacy SQLite databases first if present.
+            for dbPath in existingDBPaths {
+                try injectCredentialIntoDatabase(
+                    at: dbPath,
                     credential: parsed,
                     homeDirectory: homeDirectory,
                     saveSnapshotBeforeWrite: false
                 )
+                updatedAnyAuthStore = true
+                let backupDBPath = dbPath + ".backup"
+                if FileManager.default.fileExists(atPath: backupDBPath) {
+                    try? injectCredentialIntoDatabase(
+                        at: backupDBPath,
+                        credential: parsed,
+                        homeDirectory: homeDirectory,
+                        saveSnapshotBeforeWrite: false
+                    )
+                }
             }
+
+            // 2. Sync standalone/CLI fallback files if present on disk; surface write errors if present.
+            if try syncStandaloneFallbackFiles(credential: parsed, writerID: writerID, homeDirectory: homeDirectory) {
+                updatedAnyAuthStore = true
+            }
+
+            // 3. Commit authoritative Antigravity 2.0 KeyringTokenStorage last so a SQLite/fallback failure
+            // never leaves Keyring holding the new account while local stores fail.
+            if let preflightKeyringSecret {
+                try writeKeyringRawSecret(preflightKeyringSecret, homeDirectory: homeDirectory)
+                updatedAnyAuthStore = true
+            }
+
+            guard updatedAnyAuthStore else {
+                throw AntigravitySwitchError.databaseWriteFailed("No Antigravity credential store could be updated.")
+            }
+        } catch {
+            for backup in fileBackups {
+                if let data = backup.data {
+                    try? data.write(to: URL(fileURLWithPath: backup.path), options: .atomic)
+                } else if FileManager.default.fileExists(atPath: backup.path) {
+                    try? FileManager.default.removeItem(atPath: backup.path)
+                }
+            }
+            if let previousKeyringSecret {
+                try? writeKeyringRawSecret(previousKeyringSecret, homeDirectory: homeDirectory)
+            } else if !isRealUserHomeDirectory(homeDirectory) && !hadTestKeyringFile {
+                try? FileManager.default.removeItem(atPath: testKeyringPath)
+            }
+            throw error
         }
 
-        // Sync Antigravity 2.0 Hub app_storage.json and standalone/CLI fallback files if present on disk
-        syncAppStorageFile(credential: parsed, homeDirectory: homeDirectory)
-        syncStandaloneFallbackFiles(credential: parsed, homeDirectory: homeDirectory)
+        // 4. Sync Antigravity 2.0 Hub onboarding username hint in app_storage.json last.
+        syncAppStorageFile(email: parsed.email, homeDirectory: homeDirectory)
 
         return AntigravitySwitchedIdentity(
             email: parsed.email,
@@ -717,7 +1114,62 @@ enum AntigravityAccountSwitcher {
         }
     }
 
-    private static func syncAppStorageFile(credential: ParsedCredential, homeDirectory: String) {
+    private static func buildStoredTokenPayload(
+        credential: ParsedCredential,
+        writerID: String,
+        includeExtendedFields: Bool
+    ) -> [String: Any] {
+        let expiryISO = ISO8601DateFormatter().string(
+            from: Date(timeIntervalSince1970: TimeInterval(credential.expirySeconds))
+        )
+        var payload: [String: Any] = [
+            "token": [
+                "access_token": credential.accessToken,
+                "token_type": "Bearer",
+                "refresh_token": credential.refreshToken,
+                "expiry": expiryISO
+            ],
+            "auth_method": "consumer",
+            "id_token_email": credential.email,
+            "writer_id": writerID
+        ]
+        if let projectId = credential.projectId {
+            payload["project_id"] = projectId
+        }
+        if includeExtendedFields {
+            payload["email"] = credential.email
+            if let idToken = credential.idToken {
+                payload["id_token"] = idToken
+            }
+        }
+        return payload
+    }
+
+    private static func encodeValidatedKeyringStoredToken(
+        credential: ParsedCredential,
+        writerID: String
+    ) throws -> String {
+        // Keychain StoredToken JSON must be compact (no .prettyPrinted and no raw id_token JWT)
+        // so the go-keyring `security -i` command remains well below 4096 bytes.
+        let payload = buildStoredTokenPayload(
+            credential: credential,
+            writerID: writerID,
+            includeExtendedFields: false
+        )
+        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+            throw AntigravitySwitchError.databaseWriteFailed("Could not encode Keychain StoredToken JSON.")
+        }
+        let encodedSecret = encodeKeyringSecret(jsonData).trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !encodedSecret.isEmpty, encodedSecret.utf8.count <= 3800,
+              !encodedSecret.contains("\"") && !encodedSecret.contains("\n") && !encodedSecret.contains("\r") else {
+            throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
+        }
+        return encodedSecret
+    }
+
+    static func syncAppStorageFile(email: String, homeDirectory: String) {
+        let trimmed = email.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
         let path = appStoragePath(homeDirectory: homeDirectory)
         let fm = FileManager.default
         guard fm.fileExists(atPath: path) else { return }
@@ -727,7 +1179,7 @@ enum AntigravityAccountSwitcher {
            let json = try? JSONSerialization.jsonObject(with: existingData) as? [String: Any] {
             storageDict = json
         }
-        storageDict["agy.onboarding.lastLoginUsername"] = credential.email
+        storageDict["agy.onboarding.lastLoginUsername"] = trimmed
         if storageDict["agy.onboarding.lastLoginIsGcpTos"] == nil {
             storageDict["agy.onboarding.lastLoginIsGcpTos"] = "false"
         }
@@ -737,28 +1189,19 @@ enum AntigravityAccountSwitcher {
         try? encoded.write(to: URL(fileURLWithPath: path), options: .atomic)
     }
 
-    private static func syncStandaloneFallbackFiles(credential: ParsedCredential, homeDirectory: String) {
-        let expiryISO = ISO8601DateFormatter().string(from: Date(timeIntervalSince1970: TimeInterval(credential.expirySeconds)))
-        var payload: [String: Any] = [
-            "token": [
-                "access_token": credential.accessToken,
-                "token_type": "Bearer",
-                "refresh_token": credential.refreshToken,
-                "expiry": expiryISO
-            ],
-            "auth_method": "consumer",
-            "email": credential.email,
-            "id_token_email": credential.email,
-            "writer_id": UUID().uuidString.lowercased()
-        ]
-        if let idToken = credential.idToken {
-            payload["id_token"] = idToken
-        }
-        if let projectId = credential.projectId {
-            payload["project_id"] = projectId
-        }
+    @discardableResult
+    private static func syncStandaloneFallbackFiles(
+        credential: ParsedCredential,
+        writerID: String,
+        homeDirectory: String
+    ) throws -> Bool {
+        let payload = buildStoredTokenPayload(
+            credential: credential,
+            writerID: writerID,
+            includeExtendedFields: true
+        )
         guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else {
-            return
+            throw AntigravitySwitchError.databaseWriteFailed("Could not encode standalone StoredToken JSON.")
         }
 
         let fm = FileManager.default
@@ -766,14 +1209,32 @@ enum AntigravityAccountSwitcher {
             "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
             "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
         ]
+        var wroteAny = false
         for path in candidatePaths where fm.fileExists(atPath: path) {
             let url = URL(fileURLWithPath: path)
-            try? data.write(to: url, options: .atomic)
-            try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+            do {
+                try data.write(to: url, options: .atomic)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path)
+                wroteAny = true
+            } catch {
+                throw AntigravitySwitchError.databaseWriteFailed("Could not update standalone token file at \(path).")
+            }
         }
+        return wroteAny
     }
 
-    // MARK: - Per-Account SQLite Snapshots
+    // MARK: - Per-Account SQLite & StoredToken Snapshots
+
+    private static func saveCurrentStoredTokenSnapshot(from jsonData: Data, homeDirectory: String) {
+        guard let parsed = parseStoredTokenJSON(jsonData),
+              !parsed.refreshToken.isEmpty,
+              let email = normalizeEmail(parsed.account.email) else {
+            return
+        }
+        var snapshot = loadAccountSnapshot(forEmail: email, homeDirectory: homeDirectory) ?? [:]
+        snapshot[snapshotStoredTokenRefreshKey] = parsed.refreshToken
+        writeAccountSnapshot(snapshot, forEmail: email, homeDirectory: homeDirectory)
+    }
 
     private static func saveCurrentAccountSnapshot(db: OpaquePointer?, homeDirectory: String) {
         guard let statusJSON = readAuthStatusJSON(db: db),
@@ -795,7 +1256,10 @@ enum AntigravityAccountSwitcher {
             }
         }
         guard !snapshot.isEmpty else { return }
+        writeAccountSnapshot(snapshot, forEmail: email, homeDirectory: homeDirectory)
+    }
 
+    private static func writeAccountSnapshot(_ snapshot: [String: String], forEmail email: String, homeDirectory: String) {
         let dir = snapshotsDirectory(homeDirectory: homeDirectory)
         let fm = FileManager.default
         try? fm.createDirectory(at: dir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
@@ -1215,6 +1679,13 @@ enum AntigravityAccountSwitcher {
             }
         }
 
+        let activeCandidates = resolveActiveStorageCandidates(homeDirectory: homeDirectory)
+        let activeAccountEmail = activeCandidates.first?.account.email
+        let activeStoragePath = activeCandidates.first?.displayPath
+            ?? (fm.fileExists(atPath: appStoragePath(homeDirectory: homeDirectory))
+                ? "Keychain (gemini/antigravity)"
+                : "~/Library/Application Support/Antigravity/.../state.vscdb")
+
         return AntigravityEnvironmentSummary(
             isAppInstalled: installedAppPath != nil,
             isAppRunning: isRunning,
@@ -1223,8 +1694,18 @@ enum AntigravityAccountSwitcher {
             skillCount: skillNames.count,
             brainSessionCount: brainSessionCount,
             geminiRulesPath: "\(homeDirectory)/.gemini/GEMINI.md",
-            mcpConfigPath: mcpConfigPath
+            mcpConfigPath: mcpConfigPath,
+            activeAccountEmail: activeAccountEmail,
+            activeStoragePath: activeStoragePath
         )
+    }
+
+    static func inspectEnvironmentAsync(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) async -> AntigravityEnvironmentSummary {
+        await Task.detached(priority: .userInitiated) {
+            inspectEnvironment(homeDirectory: homeDirectory)
+        }.value
     }
 
     #if canImport(AppKit)
@@ -1293,6 +1774,12 @@ enum AntigravityAccountSwitcher {
             guard !checkRunning() else {
                 return false
             }
+        }
+
+        // Re-sync app_storage.json after the old Electron process has exited and before relaunching,
+        // so quit-time windowState writes cannot clobber agy.onboarding.lastLoginUsername.
+        if let activeEmail = detectActiveAccount(homeDirectory: homeDirectory)?.email {
+            syncAppStorageFile(email: activeEmail, homeDirectory: homeDirectory)
         }
 
         return await relaunch(URL(fileURLWithPath: appPath))

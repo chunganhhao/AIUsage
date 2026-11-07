@@ -52,6 +52,8 @@ final class ProviderActivationManager: ObservableObject {
     @Published var activationResult: ActivationResult?
     @Published var codexActivationResult: CodexActivationResult?
 
+    private var antigravityDetectionTask: Task<Void, Never>?
+
     let accountStore = AccountStore.shared
     let settings = AppSettings.shared
 
@@ -332,6 +334,7 @@ final class ProviderActivationManager: ObservableObject {
                 ?? resolved
             let activeKey = AccountCredentialStore.normalizedAuthFilePath(entryPath).nilIfBlank
                 ?? switched.email.lowercased()
+            antigravityDetectionTask?.cancel()
             activeProviderAccountIds["antigravity"] = activeKey
             persistActiveIds()
 
@@ -511,10 +514,9 @@ final class ProviderActivationManager: ObservableObject {
         applyDetectedActiveId(active, for: "gemini", reason: "google_accounts.json has no active account")
     }
 
-    func detectActiveAntigravityAccount() {
-        guard let detected = AntigravityAccountSwitcher.detectActiveAccount(),
-              let email = detected.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank else {
-            applyDetectedActiveId(nil, for: "antigravity", reason: "Antigravity state.vscdb has no active account")
+    func applyDetectedAntigravityEmail(_ rawEmail: String?) {
+        guard let email = rawEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank else {
+            applyDetectedActiveId(nil, for: "antigravity", reason: "Antigravity credential store has no active account")
             return
         }
 
@@ -535,9 +537,24 @@ final class ProviderActivationManager: ObservableObject {
 
         if let matchedPath = matches.first?.sourceFilePath,
            let normalizedPath = AccountCredentialStore.normalizedAuthFilePath(matchedPath).nilIfBlank {
-            applyDetectedActiveId(normalizedPath, for: "antigravity", reason: "matched Antigravity state.vscdb email to stored sourceFilePath")
+            applyDetectedActiveId(normalizedPath, for: "antigravity", reason: "matched Antigravity credential store email to stored sourceFilePath")
         } else {
-            applyDetectedActiveId(email, for: "antigravity", reason: "matched Antigravity state.vscdb email")
+            applyDetectedActiveId(email, for: "antigravity", reason: "matched Antigravity credential store email")
+        }
+    }
+
+    func detectActiveAntigravityAccount() {
+        antigravityDetectionTask?.cancel()
+        antigravityDetectionTask = Task.detached(priority: .utility) { [weak self] in
+            let detected = AntigravityAccountSwitcher.detectActiveAccount()
+            guard !Task.isCancelled else { return }
+            let validEmail = (detected != nil && (detected?.hasAccessToken == true || detected?.hasRefreshToken == true))
+                ? detected?.email
+                : nil
+            await MainActor.run {
+                guard !Task.isCancelled else { return }
+                self?.applyDetectedAntigravityEmail(validEmail)
+            }
         }
     }
 

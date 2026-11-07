@@ -881,10 +881,53 @@ struct AccountIdentityRegression {
         check(normalRestartResult && relaunchCount == 1 && relaunchedURL?.path == "\(tempHome.path)/Applications/Antigravity.app",
               "AGY P2 Restart: returns true and relaunches app only after old process terminates")
 
-        // 8. Antigravity 2.0 (v2.29.0) app_storage.json active account detection & switching
-        let agy2Home = fm.temporaryDirectory.appendingPathComponent("agy2-app-storage-\(UUID().uuidString)", isDirectory: true)
+        // 8. Antigravity 2.0 (v2.29.0) KeyringTokenStorage (service="gemini", account="antigravity") & StoredToken switching
+        let agy2Home = fm.temporaryDirectory.appendingPathComponent("agy2-keyring-storage-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: agy2Home) }
 
+        // 8a. Verify go-keyring-base64: and go-keyring-encoded: codec and security mdat/cdat parser
+        let samplePayload = Data(#"{"auth_method":"consumer","id_token_email":"chungduccc@gmail.com","token":{"access_token":"ya29.live","refresh_token":"1//live_refresh"}}"#.utf8)
+        let encodedB64Secret = AntigravityAccountSwitcher.encodeKeyringSecret(samplePayload)
+        check(encodedB64Secret.hasPrefix("go-keyring-base64:"),
+              "AGY 2.0 Keyring: encodeKeyringSecret prefixes payload with go-keyring-base64:")
+        check(AntigravityAccountSwitcher.decodeKeyringSecret(encodedB64Secret) == samplePayload,
+              "AGY 2.0 Keyring: decodeKeyringSecret round-trips go-keyring-base64: payload")
+        let hexEncodedSecret = "go-keyring-encoded:" + samplePayload.map { String(format: "%02x", $0) }.joined()
+        check(AntigravityAccountSwitcher.decodeKeyringSecret(hexEncodedSecret) == samplePayload,
+              "AGY 2.0 Keyring: decodeKeyringSecret decodes legacy go-keyring-encoded: hex payload")
+
+        let mockSecurityOutput = """
+        keychain: "/Users/apple/Library/Keychains/login.keychain-db"
+        class: "genp"
+        attributes:
+            "acct"<blob>="antigravity"
+            "cdat"<timedate>=0x32303236313130373037343032345A00  "20261107074024Z\\000"
+            "mdat"<timedate>=0x32303236313130373130323532345A00  "20261107102524Z\\000"
+            "svce"<blob>="gemini"
+        """
+        let parsedMdat = AntigravityAccountSwitcher.parseKeychainAttributesModificationDate(mockSecurityOutput)
+        check(parsedMdat != nil && Int(parsedMdat!.timeIntervalSince1970) == 1_794_047_124,
+              "AGY 2.0 Keyring: parseKeychainAttributesModificationDate parses UTC mdat timestamp from security output")
+
+        let writerID = AntigravityAccountSwitcher.generateWriterID()
+        check(writerID.count == 22 && !writerID.contains("=") && !writerID.contains("+") && !writerID.contains("/"),
+              "AGY 2.0 Keyring: generateWriterID produces 22-char base64url string matching language_server")
+
+        // 8b. app_storage.json alone (without any backing token in Keyring/standalone/state.vscdb) must NOT report an active account
+        let appStoragePath = AntigravityAccountSwitcher.appStoragePath(homeDirectory: agy2Home.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: appStoragePath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        let initialAppStorage: [String: Any] = [
+            "agy.onboarding.lastLoginUsername": "chungduccc@gmail.com",
+            "agy.onboarding.lastLoginIsGcpTos": "false",
+            "lastCreatedProjectId": "keep-this-project-id"
+        ]
+        try! JSONSerialization.data(withJSONObject: initialAppStorage).write(to: URL(fileURLWithPath: appStoragePath))
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_794_038_000)], ofItemAtPath: appStoragePath)
+
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path) == nil,
+              "AGY 2.0: app_storage.json without a backing token never reports a false-positive active account")
+
+        // 8c. Stale state.vscdb vs newer Keyring StoredToken, and immunity to app_storage.json windowState mtime changes
         let staleDBPath = AntigravityAccountSwitcher.primaryDBPath(homeDirectory: agy2Home.path)
         try! fm.createDirectory(at: URL(fileURLWithPath: staleDBPath).deletingLastPathComponent(), withIntermediateDirectories: true)
         var staleDB: OpaquePointer?
@@ -894,27 +937,45 @@ struct AccountIdentityRegression {
         sqlite3_close(staleDB)
         try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_770_117_163)], ofItemAtPath: staleDBPath)
 
-        let appStoragePath = AntigravityAccountSwitcher.appStoragePath(homeDirectory: agy2Home.path)
-        let initialAppStorage: [String: Any] = [
-            "agy.onboarding.lastLoginUsername": "chungduccc@gmail.com",
-            "agy.onboarding.lastLoginIsGcpTos": "false",
-            "lastCreatedProjectId": "keep-this-project-id"
-        ]
-        try! JSONSerialization.data(withJSONObject: initialAppStorage).write(to: URL(fileURLWithPath: appStoragePath))
-        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_794_038_000)], ofItemAtPath: appStoragePath)
+        // Seed Keyring (service="gemini", account="antigravity") with newer StoredToken for chungduccc@gmail.com
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(encodedB64Secret, homeDirectory: agy2Home.path)
+        let keyringFile = AntigravityAccountSwitcher.testKeyringFilePath(homeDirectory: agy2Home.path)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_794_047_124)], ofItemAtPath: keyringFile)
 
         let detectedAGY2 = AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)
-        check(detectedAGY2?.email == "chungduccc@gmail.com",
-              "AGY 2.0: detectActiveAccount prefers newer app_storage.json over stale legacy state.vscdb")
-        check(AntigravityAccountSwitcher.activeStorageDisplayPath(homeDirectory: agy2Home.path) == "~/Library/Application Support/Antigravity/app_storage.json",
-              "AGY 2.0: activeStorageDisplayPath reports app_storage.json when newer than state.vscdb")
+        check(detectedAGY2?.email == "chungduccc@gmail.com" && detectedAGY2?.hasAccessToken == true && detectedAGY2?.hasRefreshToken == true,
+              "AGY 2.0: detectActiveAccount prefers newer Keyring StoredToken over stale legacy state.vscdb")
+        check(AntigravityAccountSwitcher.activeStorageDisplayPath(homeDirectory: agy2Home.path) == "Keychain (gemini/antigravity)",
+              "AGY 2.0: activeStorageDisplayPath reports Keychain (gemini/antigravity) when Keyring is the active store")
 
-        // Switch account in Antigravity 2.0 environment without state.vscdb (only app_storage.json + standalone token)
+        // Simulate window move updating app_storage.json with a stale username and newer mtime: must NOT flip active account
+        try! JSONSerialization.data(withJSONObject: [
+            "agy.onboarding.lastLoginUsername": "stale-window-move@gmail.com",
+            "windowState": ["x": 100, "y": 200]
+        ]).write(to: URL(fileURLWithPath: appStoragePath))
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_900_000_000)], ofItemAtPath: appStoragePath)
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)?.email == "chungduccc@gmail.com",
+              "AGY 2.0: windowState mtime updates on app_storage.json never override authenticated Keyring active account")
+
+        // Verify non-auth SQLite/WAL writes on legacy state.vscdb NEVER override authoritative Antigravity 2.0 Keyring account
+        var nonAuthDB: OpaquePointer?
+        _ = sqlite3_open(staleDBPath, &nonAuthDB)
+        _ = sqlite3_exec(nonAuthDB, "INSERT INTO ItemTable VALUES ('window.layout', 'changed');", nil, nil, nil)
+        sqlite3_close(nonAuthDB)
+        let walPath = staleDBPath + "-wal"
+        try! Data("wal-update".utf8).write(to: URL(fileURLWithPath: walPath))
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_950_000_000)], ofItemAtPath: staleDBPath)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_950_000_000)], ofItemAtPath: walPath)
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)?.email == "chungduccc@gmail.com",
+              "AGY 2.0 P2: non-auth SQLite/WAL writes on legacy state.vscdb never override authoritative Keyring active account")
+        try! fm.removeItem(atPath: walPath)
         try! fm.removeItem(atPath: staleDBPath)
+
+        // Restore app_storage.json and standalone token file for pure Antigravity 2.0 switching test
+        try! JSONSerialization.data(withJSONObject: initialAppStorage).write(to: URL(fileURLWithPath: appStoragePath))
         let agy2StandalonePath = AntigravityAccountSwitcher.standaloneTokenPath(homeDirectory: agy2Home.path)
         try! fm.createDirectory(at: URL(fileURLWithPath: agy2StandalonePath).deletingLastPathComponent(), withIntermediateDirectories: true)
-        try! Data(#"{"token":{"access_token":"ya29.old","refresh_token":"1//old"},"id_token_email":"chungduccc@gmail.com"}"#.utf8)
-            .write(to: URL(fileURLWithPath: agy2StandalonePath))
+        try! samplePayload.write(to: URL(fileURLWithPath: agy2StandalonePath))
 
         let switchedAGY2Auth = agy2Home.appendingPathComponent("next_account.json")
         try! JSONSerialization.data(withJSONObject: [
@@ -929,9 +990,24 @@ struct AccountIdentityRegression {
             homeDirectory: agy2Home.path
         )
         check(switchedAGY2.email == "chunganhduc123@gmail.com",
-              "AGY 2.0: switchAccount succeeds when only app_storage.json exists without legacy state.vscdb")
+              "AGY 2.0: switchAccount succeeds when only Keyring / app_storage.json exist without legacy state.vscdb")
         check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: agy2Home.path)?.email == "chunganhduc123@gmail.com",
-              "AGY 2.0: detectActiveAccount returns newly switched account from app_storage.json / standalone token")
+              "AGY 2.0: detectActiveAccount returns newly switched account from Keyring StoredToken")
+
+        // Verify Keyring was updated with go-keyring-base64: StoredToken and 22-char base64url writer_id
+        let rawKeyringAfter = AntigravityAccountSwitcher.readKeyringRawEntry(homeDirectory: agy2Home.path)
+        let decodedKeyringAfter = rawKeyringAfter.flatMap { AntigravityAccountSwitcher.decodeKeyringSecret($0.secret) }
+        let keyringJSONAfter = decodedKeyringAfter.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        let keyringTokenAfter = keyringJSONAfter?["token"] as? [String: Any]
+        let keyringWriterID = keyringJSONAfter?["writer_id"] as? String ?? ""
+        check(rawKeyringAfter?.secret.hasPrefix("go-keyring-base64:") == true
+                && keyringJSONAfter?["id_token_email"] as? String == "chunganhduc123@gmail.com"
+                && keyringJSONAfter?["auth_method"] as? String == "consumer"
+                && keyringJSONAfter?["project_id"] as? String == "proj-123"
+                && keyringTokenAfter?["access_token"] as? String == "ya29.next_token"
+                && keyringTokenAfter?["refresh_token"] as? String == "1//next_refresh_token"
+                && keyringWriterID.count == 22,
+              "AGY 2.0: switchAccount writes compact go-keyring-base64: StoredToken with 22-char writer_id to Keyring")
 
         let updatedAppStorage = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: appStoragePath)))) as? [String: Any]
         check(updatedAppStorage?["agy.onboarding.lastLoginUsername"] as? String == "chunganhduc123@gmail.com"
@@ -942,5 +1018,180 @@ struct AccountIdentityRegression {
         check(updatedStandalone?["id_token_email"] as? String == "chunganhduc123@gmail.com"
                 && updatedStandalone?["project_id"] as? String == "proj-123",
               "AGY 2.0: switchAccount writes StoredToken schema (id_token_email & project_id) to jetski-standalone-oauth-token")
+
+        // 8d. Switching back to chungduccc@gmail.com with a refreshless credential recovers refresh_token from pre-switch Keyring snapshot
+        let refreshlessPrevAuth = agy2Home.appendingPathComponent("refreshless_prev.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "access_token": "ya29.prev_new_access",
+            "email": "chungduccc@gmail.com"
+        ]).write(to: refreshlessPrevAuth)
+        _ = try! AntigravityAccountSwitcher.switchAccount(
+            authFileURL: refreshlessPrevAuth,
+            homeDirectory: agy2Home.path
+        )
+        check(AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: agy2Home.path) == "1//live_refresh",
+              "AGY 2.0: switching back to previous Keyring account with refreshless file recovers refresh_token from snapshot")
+
+        // 8e. restartAntigravityApp re-syncs app_storage.json after old Electron process exits (if Electron clobbered it on quit)
+        var agy2Running = true
+        let restartResynced = await AntigravityAccountSwitcher.restartAntigravityApp(
+            homeDirectory: agy2Home.path,
+            timeoutSeconds: 0.1,
+            pollIntervalMilliseconds: 10,
+            appExists: { $0 == "/Applications/Antigravity.app" },
+            isTargetRunning: { agy2Running },
+            requestTerminate: {
+                // Simulate Electron writing stale username to app_storage.json on quit
+                try? JSONSerialization.data(withJSONObject: [
+                    "agy.onboarding.lastLoginUsername": "clobbered-on-quit@gmail.com",
+                    "lastCreatedProjectId": "keep-this-project-id"
+                ]).write(to: URL(fileURLWithPath: appStoragePath))
+                agy2Running = false
+                return true
+            },
+            relaunchApp: { _ in true }
+        )
+        let resyncedAppStorage = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: appStoragePath)))) as? [String: Any]
+        check(restartResynced && resyncedAppStorage?["agy.onboarding.lastLoginUsername"] as? String == "chungduccc@gmail.com",
+              "AGY 2.0: restartAntigravityApp re-syncs app_storage.json from authoritative Keyring active account after process exit")
+
+        // 8f. [P1] Failed Keyring write (e.g. oversized token exceeding 3800-byte go-keyring limit) must fail closed
+        // and leave Keyring, standalone, state.vscdb, and app_storage.json untouched on the previous account.
+        let r5NegativeHome = fm.temporaryDirectory.appendingPathComponent("agy2-r5-negative-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: r5NegativeHome) }
+        let r5Standalone = AntigravityAccountSwitcher.standaloneTokenPath(homeDirectory: r5NegativeHome.path)
+        let r5AppStorage = AntigravityAccountSwitcher.appStoragePath(homeDirectory: r5NegativeHome.path)
+        let r5DBPath = AntigravityAccountSwitcher.primaryDBPath(homeDirectory: r5NegativeHome.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: r5Standalone).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! fm.createDirectory(at: URL(fileURLWithPath: r5AppStorage).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! fm.createDirectory(at: URL(fileURLWithPath: r5DBPath).deletingLastPathComponent(), withIntermediateDirectories: true)
+
+        let storedA = try! JSONSerialization.data(withJSONObject: [
+            "id_token_email": "a@example.com",
+            "token": ["access_token": "access-a", "refresh_token": "1//refresh-a"]
+        ])
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(storedA),
+            homeDirectory: r5NegativeHome.path
+        )
+        try! storedA.write(to: URL(fileURLWithPath: r5Standalone))
+        try! JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "a@example.com"])
+            .write(to: URL(fileURLWithPath: r5AppStorage))
+        var r5DB: OpaquePointer?
+        _ = sqlite3_open(r5DBPath, &r5DB)
+        _ = sqlite3_exec(r5DB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(r5DB, #"INSERT INTO ItemTable VALUES ('antigravityAuthStatus', '{"email":"a@example.com","apiKey":"access-a"}');"#, nil, nil, nil)
+        sqlite3_close(r5DB)
+
+        let oversizedAuthFile = r5NegativeHome.appendingPathComponent("oversized_b.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "b@example.com",
+            "access_token": String(repeating: "x", count: 3000),
+            "refresh_token": "1//refresh-b"
+        ]).write(to: oversizedAuthFile)
+
+        var didFailOversizedKeyring = false
+        do {
+            _ = try AntigravityAccountSwitcher.switchAccount(authFileURL: oversizedAuthFile, homeDirectory: r5NegativeHome.path)
+        } catch AntigravitySwitchError.databaseWriteFailed {
+            didFailOversizedKeyring = true
+        } catch {}
+        check(didFailOversizedKeyring,
+              "AGY 2.0 R5 P1: switchAccount throws databaseWriteFailed when Keyring StoredToken fails preflight/write")
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)?.email == "a@example.com",
+              "AGY 2.0 R5 P1: failed Keyring switch leaves active account and fallback stores untouched on a@example.com")
+        let standaloneAfterFailedSwitch = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: r5Standalone)))) as? [String: Any]
+        check(standaloneAfterFailedSwitch?["id_token_email"] as? String == "a@example.com",
+              "AGY 2.0 R5 P1: failed Keyring switch does not overwrite standalone fallback file")
+
+        // 8g. [P1] Unidentified StoredToken (missing email in Keyring & standalone) must NEVER inherit app_storage.json username
+        try! fm.removeItem(atPath: r5DBPath)
+        let unidentifiedToken = try! JSONSerialization.data(withJSONObject: [
+            "token": ["access_token": "access-b", "refresh_token": "1//refresh-b"]
+        ])
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(unidentifiedToken),
+            homeDirectory: r5NegativeHome.path
+        )
+        try! unidentifiedToken.write(to: URL(fileURLWithPath: r5Standalone))
+        try! JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "a@example.com"])
+            .write(to: URL(fileURLWithPath: r5AppStorage))
+
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path) == nil,
+              "AGY 2.0 R5 P1: detectActiveAccount returns nil when StoredToken lacks credential-bound email")
+        check(AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path) == nil,
+              "AGY 2.0 R5 P1: discoverIDECandidatePayload rejects unidentified StoredToken instead of labeling with onboarding hint")
+        check(AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: r5NegativeHome.path) == nil
+                && AntigravityAccountSwitcher.extractRefreshToken(forEmail: "a@example.com", homeDirectory: r5NegativeHome.path) == nil,
+              "AGY 2.0 R5 P1: extractRefreshToken rejects unidentified StoredToken even when app_storage.json has a@example.com")
+
+        // 8h. [P2] Unified resolution across detectActiveAccount, discoverIDECandidatePayload, and extractRefreshToken
+        // when standalone is newer than Keyring and an existing-but-authless state.vscdb is present.
+        var authlessDB: OpaquePointer?
+        _ = sqlite3_open(r5DBPath, &authlessDB)
+        _ = sqlite3_exec(authlessDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(authlessDB, "INSERT INTO ItemTable VALUES ('window.layout', 'only-layout');", nil, nil, nil)
+        sqlite3_close(authlessDB)
+
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(storedA),
+            homeDirectory: r5NegativeHome.path
+        )
+        let r5KeyringFile = AntigravityAccountSwitcher.testKeyringFilePath(homeDirectory: r5NegativeHome.path)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000)], ofItemAtPath: r5KeyringFile)
+
+        let storedB = try! JSONSerialization.data(withJSONObject: [
+            "id_token_email": "b@example.com",
+            "token": ["access_token": "access-b", "refresh_token": "1//refresh-b"]
+        ])
+        try! storedB.write(to: URL(fileURLWithPath: r5Standalone))
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2_000)], ofItemAtPath: r5Standalone)
+
+        let unifiedDetected = AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)
+        let unifiedImported = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path)
+        let unifiedRefresh = AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: r5NegativeHome.path)
+        check(unifiedDetected?.email == "b@example.com"
+                && unifiedImported?.email == "b@example.com"
+                && unifiedImported?.accessToken == "access-b"
+                && unifiedImported?.refreshToken == "1//refresh-b"
+                && unifiedRefresh == "1//refresh-b",
+              "AGY 2.0 R5 P2: detectActiveAccount, discoverIDECandidatePayload, and extractRefreshToken all agree on newer standalone over older Keyring and authless DB")
+
+        // 8i. [P2] AntigravityEnvironmentSummary.empty is zero-I/O and inspectEnvironmentAsync resolves off main actor
+        check(AntigravityEnvironmentSummary.empty.activeAccountEmail == nil
+                && AntigravityEnvironmentSummary.empty.activeStoragePath == "Keychain (gemini/antigravity)",
+              "AGY 2.0 R5 P2: AntigravityEnvironmentSummary.empty provides zero-I/O initial state")
+        let asyncSummary = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r5NegativeHome.path)
+        check(asyncSummary.activeAccountEmail == "b@example.com"
+                && asyncSummary.activeStoragePath == "~/.gemini/jetski-standalone-oauth-token",
+              "AGY 2.0 R5 P2: inspectEnvironmentAsync resolves active account and storage path off main actor")
+
+        // 8j. Atomic multi-store rollback: if SQLite write fails, Keyring and standalone remain on Account A
+        try! Data("corrupted-sqlite-file".utf8).write(to: URL(fileURLWithPath: r5DBPath))
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(storedA),
+            homeDirectory: r5NegativeHome.path
+        )
+        try! storedA.write(to: URL(fileURLWithPath: r5Standalone))
+        let normalAuthBURL = r5NegativeHome.appendingPathComponent("normal-b.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "b@example.com",
+            "access_token": "normal-access-b",
+            "refresh_token": "1//normal-refresh-b",
+            "expiry_date": 4_102_444_800_000
+        ]).write(to: normalAuthBURL)
+        var corruptDBThrew = false
+        do {
+            _ = try AntigravityAccountSwitcher.switchAccount(
+                authFileURL: normalAuthBURL,
+                homeDirectory: r5NegativeHome.path
+            )
+        } catch {
+            corruptDBThrew = true
+        }
+        check(corruptDBThrew,
+              "AGY 2.0 R6 atomic write: switchAccount throws when SQLite store write fails")
+        check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)?.email == "a@example.com",
+              "AGY 2.0 R6 atomic write: Keyring and standalone remain on a@example.com when SQLite write fails")
     }
 }
