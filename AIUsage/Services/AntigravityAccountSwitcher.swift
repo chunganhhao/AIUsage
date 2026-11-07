@@ -1152,34 +1152,39 @@ enum AntigravityAccountSwitcher {
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
         timeoutSeconds: TimeInterval = 6.0,
         pollIntervalMilliseconds: Int = 150,
-        appExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) },
-        isTargetRunning: () -> Bool = { defaultIsAntigravityRunning() },
-        requestTerminate: () -> Bool = { defaultTerminateAntigravity() },
-        relaunchApp: (URL) async -> Bool = { await defaultRelaunchAntigravity(at: $0) }
+        appExists: ((String) -> Bool)? = nil,
+        isTargetRunning: (() -> Bool)? = nil,
+        requestTerminate: (() -> Bool)? = nil,
+        relaunchApp: ((URL) async -> Bool)? = nil
     ) async -> Bool {
+        let checkAppExists = appExists ?? { FileManager.default.fileExists(atPath: $0) }
+        let checkRunning = isTargetRunning ?? { defaultIsAntigravityRunning() }
+        let terminateRunning = requestTerminate ?? { defaultTerminateAntigravity() }
+        let relaunch = relaunchApp ?? { await defaultRelaunchAntigravity(at: $0) }
+
         let appCandidates = [
             "/Applications/Antigravity.app",
             "\(homeDirectory)/Applications/Antigravity.app"
         ]
-        guard let appPath = appCandidates.first(where: { appExists($0) }) else {
+        guard let appPath = appCandidates.first(where: { checkAppExists($0) }) else {
             return false
         }
 
-        if isTargetRunning() {
-            guard requestTerminate() else {
+        if checkRunning() {
+            guard terminateRunning() else {
                 return false
             }
             let deadline = Date().addingTimeInterval(timeoutSeconds)
-            while Date() < deadline && isTargetRunning() {
+            while Date() < deadline && checkRunning() {
                 try? await Task.sleep(for: .milliseconds(pollIntervalMilliseconds))
             }
             // Do not report restart success or call openApplication while the old process still runs.
-            guard !isTargetRunning() else {
+            guard !checkRunning() else {
                 return false
             }
         }
 
-        return await relaunchApp(URL(fileURLWithPath: appPath))
+        return await relaunch(URL(fileURLWithPath: appPath))
     }
     #endif
 

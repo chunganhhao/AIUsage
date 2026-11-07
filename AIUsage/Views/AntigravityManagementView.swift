@@ -1025,7 +1025,7 @@ struct AntigravitySubscriptionSection: View {
         let depleted = windows.filter { ($0.remainingPercent ?? 100) <= 0 }
         let available = windows.filter { ($0.remainingPercent ?? 0) > 0 }
         guard let firstDepleted = depleted.first, !available.isEmpty else { return nil }
-        return shortPoolLabel(firstDepleted.label)
+        return firstDepleted.label.replacingOccurrences(of: " Window", with: "")
     }
 
     @ViewBuilder
