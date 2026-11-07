@@ -776,7 +776,7 @@ struct AccountIdentityRegression {
         check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: firstSwitchHome.path)?.email == "a@example.com",
               "AGY P2: rejecting unrecoverable refreshless switch leaves active DB account untouched")
 
-        // 5. [P1] Cross-account fallback isolation (primary DB is a@example.com without refresh token; standalone & secondary DB are b@example.com)
+        // 5. [P1] Cross-account fallback isolation (active store is a@example.com without refresh token; older standalone, CLI fallback & secondary DB are b@example.com)
         let crossHome = fm.temporaryDirectory.appendingPathComponent("agy-cross-account-\(UUID().uuidString)", isDirectory: true)
         defer { try? fm.removeItem(at: crossHome) }
         let crossPrimaryPath = AntigravityAccountSwitcher.primaryDBPath(homeDirectory: crossHome.path)
@@ -786,6 +786,17 @@ struct AccountIdentityRegression {
         _ = sqlite3_exec(crossDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
         _ = sqlite3_exec(crossDB, #"INSERT INTO ItemTable VALUES ('antigravityAuthStatus', '{"email":"a@example.com","apiKey":"ya29.a_only"}');"#, nil, nil, nil)
         sqlite3_close(crossDB)
+
+        let crossKeyringData = try! JSONSerialization.data(withJSONObject: [
+            "id_token_email": "a@example.com",
+            "token": ["access_token": "ya29.a_only", "refresh_token": ""]
+        ])
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(crossKeyringData),
+            homeDirectory: crossHome.path
+        )
+        let crossKeyringFile = AntigravityAccountSwitcher.testKeyringFilePath(homeDirectory: crossHome.path)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2_000)], ofItemAtPath: crossKeyringFile)
 
         let secondaryDBPath = "\(crossHome.path)/Library/Application Support/Antigravity IDE/User/globalStorage/state.vscdb"
         try! fm.createDirectory(at: URL(fileURLWithPath: secondaryDBPath).deletingLastPathComponent(), withIntermediateDirectories: true)
@@ -808,20 +819,22 @@ struct AccountIdentityRegression {
             "email": "b@example.com",
             "token": ["refresh_token": "1//account_b_standalone_refresh"]
         ]).write(to: standaloneFile)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000)], ofItemAtPath: standaloneFile.path)
 
         check(AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: crossHome.path) == nil,
               "AGY P1: extractRefreshToken rejects secondary DB and standalone refresh tokens belonging to a different account")
         let candidatePayload = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: crossHome.path)
         check(candidatePayload?.email == "a@example.com" && candidatePayload?.refreshToken == nil,
-              "AGY P1: discoverIDECandidatePayload binds identity to primary DB and omits mismatched fallback refresh token")
+              "AGY P1: discoverIDECandidatePayload binds identity to active store and omits mismatched fallback refresh token")
 
-        // When standalone file matches primary account a@example.com, fallback is accepted
+        // When older standalone file matches active account a@example.com, fallback is accepted
         try! JSONSerialization.data(withJSONObject: [
             "email": "a@example.com",
             "token": ["refresh_token": "1//account_a_matching_standalone_refresh"]
         ]).write(to: standaloneFile)
+        try! fm.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000)], ofItemAtPath: standaloneFile.path)
         check(AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: crossHome.path) == "1//account_a_matching_standalone_refresh",
-              "AGY P1: extractRefreshToken accepts standalone fallback when email matches primary account")
+              "AGY P1: extractRefreshToken accepts standalone fallback when email matches active account")
 
         // 6. [P2] Malformed Protobuf lengths, varint overflow, and out-of-range field numbers
         let maxLenBytes = Data([0x0a] + Array(repeating: UInt8(0xff), count: 9) + [0x01])
@@ -1193,5 +1206,48 @@ struct AccountIdentityRegression {
               "AGY 2.0 R6 atomic write: switchAccount throws when SQLite store write fails")
         check(AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)?.email == "a@example.com",
               "AGY 2.0 R6 atomic write: Keyring and standalone remain on a@example.com when SQLite write fails")
+
+        // 8k. [P2] Retain refresh-only Keyring and standalone credentials in resolveActiveStorageCandidates
+        // even when a conflicting legacy SQLite DB has an authenticated account.
+        try? fm.removeItem(atPath: r5DBPath)
+        var conflictingDB: OpaquePointer?
+        _ = sqlite3_open(r5DBPath, &conflictingDB)
+        _ = sqlite3_exec(conflictingDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(conflictingDB, "INSERT INTO ItemTable VALUES ('antigravityAuthStatus', '{\"email\":\"legacy@example.com\",\"name\":\"Legacy\",\"apiKey\":\"legacy-access\"}');", nil, nil, nil)
+        sqlite3_close(conflictingDB)
+        try? fm.setAttributes([.modificationDate: Date(timeIntervalSinceNow: 600)], ofItemAtPath: r5DBPath)
+
+        try? fm.removeItem(atPath: r5Standalone)
+        let refreshOnlyKeyringA = try! JSONSerialization.data(withJSONObject: [
+            "id_token_email": "a@example.com",
+            "token": ["access_token": "", "refresh_token": "1//refresh-a-only"]
+        ])
+        try! AntigravityAccountSwitcher.writeKeyringRawSecret(
+            AntigravityAccountSwitcher.encodeKeyringSecret(refreshOnlyKeyringA),
+            homeDirectory: r5NegativeHome.path
+        )
+        let detectedRefreshOnlyKeyring = AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)
+        check(detectedRefreshOnlyKeyring?.email == "a@example.com"
+                && detectedRefreshOnlyKeyring?.hasAccessToken == false
+                && detectedRefreshOnlyKeyring?.hasRefreshToken == true
+                && AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: r5NegativeHome.path) == "1//refresh-a-only"
+                && AntigravityAccountSwitcher.extractRefreshToken(forEmail: "a@example.com", homeDirectory: r5NegativeHome.path) == "1//refresh-a-only"
+                && AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path) == nil,
+              "AGY 2.0 R6 P2: refresh-only Keyring is retained in resolveActiveStorageCandidates over conflicting legacy DB and returns default + explicit refresh token")
+
+        try? fm.removeItem(atPath: r5KeyringFile)
+        let refreshOnlyStandaloneB = try! JSONSerialization.data(withJSONObject: [
+            "id_token_email": "b@example.com",
+            "token": ["access_token": "", "refresh_token": "1//refresh-b-only"]
+        ])
+        try! refreshOnlyStandaloneB.write(to: URL(fileURLWithPath: r5Standalone))
+        let detectedRefreshOnlyStandalone = AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: r5NegativeHome.path)
+        check(detectedRefreshOnlyStandalone?.email == "b@example.com"
+                && detectedRefreshOnlyStandalone?.hasAccessToken == false
+                && detectedRefreshOnlyStandalone?.hasRefreshToken == true
+                && AntigravityAccountSwitcher.extractRefreshToken(homeDirectory: r5NegativeHome.path) == "1//refresh-b-only"
+                && AntigravityAccountSwitcher.extractRefreshToken(forEmail: "b@example.com", homeDirectory: r5NegativeHome.path) == "1//refresh-b-only"
+                && AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path) == nil,
+              "AGY 2.0 R6 P2: refresh-only standalone is retained in resolveActiveStorageCandidates over conflicting legacy DB and returns default + explicit refresh token")
     }
 }

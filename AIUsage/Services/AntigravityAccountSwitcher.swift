@@ -394,8 +394,7 @@ enum AntigravityAccountSwitcher {
     ) -> [StorageCandidate] {
         var candidates: [StorageCandidate] = []
 
-        if let keyring = detectAccountFromKeyring(homeDirectory: homeDirectory),
-           !keyring.accessToken.isEmpty {
+        if let keyring = detectAccountFromKeyring(homeDirectory: homeDirectory) {
             candidates.append(StorageCandidate(
                 account: keyring.account,
                 accessToken: keyring.accessToken,
@@ -409,8 +408,7 @@ enum AntigravityAccountSwitcher {
         }
 
         let standalonePath = standaloneTokenPath(homeDirectory: homeDirectory)
-        if let standalone = detectAccountFromStandaloneFile(at: standalonePath),
-           !standalone.accessToken.isEmpty {
+        if let standalone = detectAccountFromStandaloneFile(at: standalonePath) {
             let mtime = fileModificationDate(atPath: standalonePath) ?? .distantPast
             candidates.append(StorageCandidate(
                 account: standalone.account,
@@ -497,7 +495,7 @@ enum AntigravityAccountSwitcher {
         let explicitEmail = ((json["id_token_email"] as? String)
             ?? (json["email"] as? String)
             ?? (token["email"] as? String))?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let email = explicitEmail, !email.isEmpty else {
+        guard let email = explicitEmail, !email.isEmpty, email.contains("@") else {
             return nil
         }
 
@@ -605,8 +603,8 @@ enum AntigravityAccountSwitcher {
     static func discoverIDECandidatePayload(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> AntigravityIDECandidatePayload? {
-        guard let active = resolveActiveStorageCandidates(homeDirectory: homeDirectory)
-            .first(where: { !$0.accessToken.isEmpty }) else {
+        guard let active = resolveActiveStorageCandidates(homeDirectory: homeDirectory).first,
+              !active.accessToken.isEmpty else {
             return nil
         }
 
@@ -915,12 +913,10 @@ enum AntigravityAccountSwitcher {
             saveCurrentStoredTokenSnapshot(from: standaloneData, homeDirectory: homeDirectory)
         }
 
-        if let recoveredRefreshToken {
-            backfillRefreshTokenInAuthFile(at: authFileURL, refreshToken: recoveredRefreshToken)
-        }
-
         var fileBackups: [(path: String, data: Data?)] = []
-        let candidateRollbackPaths = existingDBPaths.flatMap { [$0, $0 + "-wal", $0 + "-shm"] } + [
+        let candidateRollbackPaths = existingDBPaths.flatMap {
+            [$0, $0 + "-wal", $0 + "-shm", $0 + ".backup", $0 + ".backup-wal", $0 + ".backup-shm"]
+        } + [
             "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
             "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
         ]
@@ -988,6 +984,10 @@ enum AntigravityAccountSwitcher {
                 try? FileManager.default.removeItem(atPath: testKeyringPath)
             }
             throw error
+        }
+
+        if let recoveredRefreshToken {
+            backfillRefreshTokenInAuthFile(at: authFileURL, refreshToken: recoveredRefreshToken)
         }
 
         // 4. Sync Antigravity 2.0 Hub onboarding username hint in app_storage.json last.
