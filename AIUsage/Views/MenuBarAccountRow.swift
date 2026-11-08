@@ -17,6 +17,7 @@ struct MenuBarAccountRow: View {
     let codexGlobalProxyManaged: Bool
     @Binding var activationMessage: String?
     @Binding var activationSuccess: Bool
+    var onRequestRestartConfirmation: ((ProviderAccountEntry) -> Void)? = nil
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var activationManager: ProviderActivationManager
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
@@ -306,9 +307,13 @@ struct MenuBarAccountRow: View {
     private func performActivation() {
         do {
             try activationManager.activateAccount(entry: entry)
-            withAnimation(.easeInOut(duration: 0.3)) {
-                activationSuccess = true
-                activationMessage = L("Switched to ", "已切换至 ") + primaryLabel
+            if (providerId == "codex" || providerId == "antigravity"), let onRequestRestartConfirmation {
+                onRequestRestartConfirmation(entry)
+            } else {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    activationSuccess = true
+                    activationMessage = L("Switched to ", "已切换至 ") + primaryLabel
+                }
             }
         } catch {
             withAnimation(.easeInOut(duration: 0.3)) {

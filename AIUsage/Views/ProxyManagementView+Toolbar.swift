@@ -14,6 +14,7 @@ extension ProxyManagementView {
             HStack(spacing: 10) {
                 ccSwitchImportButton
                 if showsClaudeProductConfiguration || family.isCodex { liveConfigFileButton }
+                if family.isCodex { restartCodexButton }
 
                 Spacer(minLength: 16)
 
@@ -26,6 +27,7 @@ extension ProxyManagementView {
                 HStack(spacing: 10) {
                     ccSwitchImportButton
                     if showsClaudeProductConfiguration || family.isCodex { liveConfigFileButton }
+                    if family.isCodex { restartCodexButton }
                     Spacer(minLength: 0)
                 }
 
@@ -70,6 +72,82 @@ extension ProxyManagementView {
         ) {
             showingSettingsEditor = true
         }
+    }
+
+    private var restartCodexButton: some View {
+        let busy = isRestartingCodex || activation.isCodexRestarting
+        return actionBarButton(
+            title: busy
+                ? L("Restarting…", "正在重启…")
+                : L("Restart Codex", "重启 Codex"),
+            icon: busy ? nil : "arrow.clockwise.circle.fill",
+            role: .secondary,
+            help: L(
+                "Gracefully quit and reopen Codex Desktop to load the newly switched account.",
+                "平滑退出并重新打开 Codex 客户端以加载新切换的账号。"
+            )
+        ) {
+            restartCodex()
+        }
+        .disabled(busy || !activation.isCodexAppInstalled)
+    }
+
+    func restartCodex() {
+        guard !isRestartingCodex, !activation.isCodexRestarting else { return }
+        isRestartingCodex = true
+        Task { @MainActor in
+            let fallbackEntry = self.activeCodexSubscriptionEntry
+            let ok = await activation.restartCodexApp(fallbackEntry: fallbackEntry)
+            isRestartingCodex = false
+            withAnimation(.easeInOut(duration: 0.2)) {
+                codexStatusBannerIsError = !ok
+                codexStatusBannerMessage = ok
+                    ? L("Codex restarted with the active account.", "Codex 已使用当前激活账号重启。")
+                    : L("Could not restart Codex automatically. Please reopen it manually.", "无法自动重启 Codex，请手动重新打开。")
+            }
+        }
+    }
+
+    @ViewBuilder
+    func codexStatusBanner(_ message: String, isError: Bool) -> some View {
+        let tint: Color = isError ? .red : .green
+        let busy = isRestartingCodex || activation.isCodexRestarting
+        HStack(spacing: 10) {
+            Image(systemName: isError ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
+                .foregroundStyle(tint)
+            Text(message)
+                .font(.caption.weight(.medium))
+                .foregroundStyle(.primary)
+            Spacer()
+            if !isError && activation.isCodexAppInstalled {
+                Button(busy ? L("Restarting…", "正在重启…") : L("Restart Codex Now", "立即重启 Codex")) {
+                    restartCodex()
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.mini)
+                .disabled(busy)
+            }
+            Button {
+                withAnimation(.easeInOut(duration: 0.15)) {
+                    codexStatusBannerMessage = nil
+                }
+            } label: {
+                Image(systemName: "xmark")
+                    .font(.system(size: 10, weight: .bold))
+                    .foregroundStyle(.secondary)
+            }
+            .buttonStyle(.plain)
+        }
+        .padding(.horizontal, 14)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(tint.opacity(colorScheme == .dark ? 0.14 : 0.08))
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .stroke(tint.opacity(0.28), lineWidth: 1)
+        )
     }
 
     private var importNodesButton: some View {

@@ -1,5 +1,7 @@
 import SwiftUI
 import Combine
+import AppKit
+import QuotaBackend
 
 // MARK: - Codex Subscription Order Store
 // 持久化 Codex 订阅账号的自定义展示顺序（账号 id 列表，存 UserDefaults）。
@@ -59,6 +61,11 @@ struct CodexProxyManagementView: View {
 
 struct CodexSubscriptionSection: View {
     let entries: [ProviderAccountEntry]
+    var isAppInstalled: Bool = false
+    var isRestarting: Bool = false
+    var onRestartApp: (() -> Void)? = nil
+    var onShowStatus: ((String, Bool) -> Void)? = nil
+
     @EnvironmentObject private var appState: AppState
     @ObservedObject private var activation = ProviderActivationManager.shared
     @ObservedObject private var proxyVM = ProxyViewModel.shared
@@ -92,6 +99,14 @@ struct CodexSubscriptionSection: View {
                 ProviderIconView("codex", size: 16)
                 Text(L("Account List", "账号列表"))
                     .font(.headline.weight(.bold))
+                if !ordered.isEmpty {
+                    Text("\(ordered.count)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
                 Spacer()
                 Text("~/.codex/auth.json")
                     .font(.system(size: 10, design: .monospaced))
@@ -304,6 +319,7 @@ struct CodexSubscriptionSection: View {
     @ViewBuilder
     private func subscriptionRow(_ entry: ProviderAccountEntry) -> some View {
         let isActive = !proxyActive && activation.isActiveAccount(entry)
+        let busy = isRestarting
         HStack(spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 13, weight: .semibold))
@@ -326,6 +342,14 @@ struct CodexSubscriptionSection: View {
                     if let plan = entry.liveProvider?.membershipLabel?.nilIfBlank {
                         planBadge(plan)
                     }
+                    if isActive {
+                        Text(L("IDE Active", "当前生效"))
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Self.codexBrand)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Self.codexBrand.opacity(0.14)))
+                    }
                 }
                 noteRow(entry)
                 usageWindowPills(entry)
@@ -346,19 +370,31 @@ struct CodexSubscriptionSection: View {
                     get: { isActive },
                     set: { newValue in
                         if newValue {
-                            try? activation.activateAccount(entry: entry)
+                            do {
+                                try activation.activateAccount(entry: entry)
+                                onShowStatus?(
+                                    L(
+                                        "Switched to \(entry.accountPrimaryLabel). Quit & reopen Codex to use this account.",
+                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Codex 即可生效。"
+                                    ),
+                                    false
+                                )
+                            } catch {
+                                onShowStatus?(error.localizedDescription, true)
+                            }
                         } else {
                             activation.deactivateAccount(entry: entry)
                         }
                     }
                 ))
                 .labelsHidden()
-                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
-                .disabled(globalProxy.isEnabled)
+                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: busy))
+                .disabled(globalProxy.isEnabled || busy)
                 .help(globalProxy.isEnabled
                       ? L("Global proxy is enabled; switch the active node in the global proxy card.",
                           "全局代理已启用，请在全局代理卡片切换激活节点。")
-                      : "")
+                      : L("Switch Codex account in ~/.codex/auth.json.",
+                          "直接写入 ~/.codex/auth.json 切换 Codex 账号。"))
             }
         }
         .padding(.horizontal, 12)
@@ -371,6 +407,55 @@ struct CodexSubscriptionSection: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(isActive ? Self.codexBrand.opacity(0.50) : Color.primary.opacity(0.06), lineWidth: 1)
         )
+        .contextMenu {
+            if !activation.isRemoteViewOnly(entry) {
+                Button {
+                    do {
+                        try activation.activateAccount(entry: entry)
+                        onShowStatus?(
+                            L(
+                                "Switched to \(entry.accountPrimaryLabel). Quit & reopen Codex to use this account.",
+                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Codex 即可生效。"
+                            ),
+                            false
+                        )
+                    } catch {
+                        onShowStatus?(error.localizedDescription, true)
+                    }
+                } label: {
+                    Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
+                }
+                .disabled(globalProxy.isEnabled || busy)
+
+                if isAppInstalled, let onRestartApp {
+                    Button {
+                        do {
+                            try activation.activateAccount(entry: entry)
+                            onRestartApp()
+                        } catch {
+                            onShowStatus?(error.localizedDescription, true)
+                        }
+                    } label: {
+                        Label(L("Switch & Restart Codex", "切换并重启 Codex"), systemImage: "arrow.clockwise.circle")
+                    }
+                    .disabled(globalProxy.isEnabled || busy)
+                }
+                Divider()
+            }
+
+            Button {
+                editingNoteEntry = entry
+            } label: {
+                Label(L("Edit Note", "编辑备注"), systemImage: "pencil")
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(entry.accountPrimaryLabel, forType: .string)
+            } label: {
+                Label(L("Copy Account Email", "复制账号邮箱"), systemImage: "doc.on.doc")
+            }
+        }
     }
 }
 

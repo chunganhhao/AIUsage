@@ -22,6 +22,7 @@ struct ProxyManagementView: View {
     @ObservedObject var desktopGatewayRuntime = GlobalProxyRuntime.desktop
     @ObservedObject var codexGatewayRuntime = GlobalProxyRuntime.codex
     @ObservedObject var scienceProxy = ScienceProxyManager.shared
+    @ObservedObject var activation = ProviderActivationManager.shared
     @State var showingNewConfigEditor = false
     @State var editingConfig: ProxyConfiguration?
     @State var editingProfile: NodeProfile?
@@ -37,6 +38,9 @@ struct ProxyManagementView: View {
     @State var exportSelectedIds: Set<String> = []
     @State var showingSettingsEditor = false
     @State var isSyncingCCSwitch = false
+    @State var isRestartingCodex = false
+    @State var codexStatusBannerMessage: String?
+    @State var codexStatusBannerIsError = false
 
     // MARK: - Family Filtering
 
@@ -46,9 +50,18 @@ struct ProxyManagementView: View {
     }
 
     /// Codex 订阅账号（OAuth，~/.codex/auth.json）。仅 Codex 家族用于统一切换器的「订阅账号」区。
-    private var codexSubscriptionEntries: [ProviderAccountEntry] {
+    var codexSubscriptionEntries: [ProviderAccountEntry] {
         guard family.isCodex else { return [] }
         return appState.providerAccountGroups.first { $0.providerId == "codex" }?.accounts ?? []
+    }
+
+    var activeCodexSubscriptionEntry: ProviderAccountEntry? {
+        guard family.isCodex,
+              viewModel.activatedId(isCodex: true) == nil,
+              !codexGateway.isEnabled else {
+            return nil
+        }
+        return codexSubscriptionEntries.first { activation.isActiveAccount($0) }
     }
 
     /// 是否有任何可展示内容：API 节点，或（Codex）订阅账号。决定显示空态还是列表。
@@ -96,6 +109,9 @@ struct ProxyManagementView: View {
                     LazyVStack(spacing: 16) {
                         proxyRuntimeDownBanner
                         actionBar
+                        if family.isCodex, let banner = codexStatusBannerMessage {
+                            codexStatusBanner(banner, isError: codexStatusBannerIsError)
+                        }
                         summaryStrip
                         if family.isCodex {
                             // Codex 通用配置只管理激活时合并进 config.toml 的片段；实时文件入口统一放在顶部工具栏。
@@ -104,7 +120,18 @@ struct ProxyManagementView: View {
                             CodexGlobalProxySection()
                             // 统一切换器（订阅账号 + API 节点，单一互斥激活）。
                             if !codexSubscriptionEntries.isEmpty {
-                                CodexSubscriptionSection(entries: codexSubscriptionEntries)
+                                CodexSubscriptionSection(
+                                    entries: codexSubscriptionEntries,
+                                    isAppInstalled: activation.isCodexAppInstalled,
+                                    isRestarting: isRestartingCodex || activation.isCodexRestarting,
+                                    onRestartApp: { restartCodex() },
+                                    onShowStatus: { message, isError in
+                                        withAnimation(.easeInOut(duration: 0.2)) {
+                                            codexStatusBannerMessage = message
+                                            codexStatusBannerIsError = isError
+                                        }
+                                    }
+                                )
                             }
                             // 订阅制不按 token 计费 → 不再设订阅定价，订阅用量仅在统计页按 token 呈现。
                         } else if showsClaudeProductConfiguration {

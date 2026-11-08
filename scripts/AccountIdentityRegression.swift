@@ -1644,5 +1644,131 @@ struct AccountIdentityRegression {
         let ownerAfterCancelledCheck = ((stateAfterCancelledCheck["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
         check(!cancelledDuringCheckOutcome && ownerAfterCancelledCheck == expectedNewOwner,
               "Codex Desktop R8 Re-review P2 #2: reconciliation cancelled inside isCodexRunning aborts without mutating owner to stale account")
+
+        // [Restart UI Review P2] reconcileSameIdentityAuthData preserves newer same-identity live refresh token and rejects foreign-identity live credentials
+        let reconcileDir = scopeHome.appendingPathComponent("codex-restart-reconcile", isDirectory: true)
+        try! fm.createDirectory(at: reconcileDir, withIntermediateDirectories: true)
+        let managedStaleAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "refresh_token": "rt-stale-2026-11-01"
+            ],
+            "last_refresh": "2026-11-01T00:00:00Z"
+        ]
+        let liveFresherAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "refresh_token": "rt-fresh-2026-11-08"
+            ],
+            "last_refresh": "2026-11-08T00:00:00Z"
+        ]
+        let managedStaleData = try! JSONSerialization.data(withJSONObject: managedStaleAuth)
+        let liveAuthFile = reconcileDir.appendingPathComponent("auth.json")
+        try! JSONSerialization.data(withJSONObject: liveFresherAuth).write(to: liveAuthFile)
+        let targetCodexIdentity = CodexAccountIdentity(authJSON: managedStaleAuth)
+
+        let sameIdentityReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let reconciledTokens = (sameIdentityReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        let healedManagedJSON = (sameIdentityReconciled.healedManagedData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
+        let healedManagedTokens = (healedManagedJSON["tokens"] as? [String: Any]) ?? [:]
+        check(sameIdentityReconciled.adoptedLiveCandidate
+                && (reconciledTokens["refresh_token"] as? String) == "rt-fresh-2026-11-08"
+                && (healedManagedTokens["refresh_token"] as? String) == "rt-fresh-2026-11-08",
+              "Codex Restart UI P2: reconcileSameIdentityAuthData preserves newer same-identity live refresh_token and heals managed copy")
+
+        let foreignPayload = try! JSONSerialization.data(withJSONObject: [
+            "email": "foreign@example.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_user_id": "user-foreign-999",
+                "chatgpt_account_id": "account-foreign-999"
+            ]
+        ]).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let foreignIDToken = "\(jwtHeader).\(foreignPayload).sig"
+        let liveForeignAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": foreignIDToken,
+                "access_token": foreignIDToken,
+                "account_id": "account-foreign-999",
+                "refresh_token": "rt-foreign-2026-11-09"
+            ],
+            "last_refresh": "2026-11-09T00:00:00Z"
+        ]
+        try! JSONSerialization.data(withJSONObject: liveForeignAuth).write(to: liveAuthFile)
+        let foreignRejectedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let foreignRejectedTokens = (foreignRejectedReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        check(!foreignRejectedReconciled.adoptedLiveCandidate
+                && (foreignRejectedTokens["refresh_token"] as? String) == "rt-stale-2026-11-01",
+              "Codex Restart UI P2: reconcileSameIdentityAuthData never preserves newer live credentials belonging to a different account")
+
+        let mixedNestedConflictAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "access_token": codexNewIDToken,
+            "id_token": codexNewIDToken,
+            "refresh_token": "rt-flat-2026-11-07",
+            "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+            "flat_last_refresh": "2026-11-07T00:00:00Z",
+            "tokens": [
+                "access_token": codexNewIDToken,
+                "id_token": foreignIDToken,
+                "refresh_token": "rt-nested-conflict-2026-11-08",
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "last_refresh": "2026-11-08T00:00:00Z"
+            ]
+        ]
+        try! JSONSerialization.data(withJSONObject: mixedNestedConflictAuth).write(to: liveAuthFile)
+        let mixedRejectedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let mixedRejectedTokens = (mixedRejectedReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        check(!mixedRejectedReconciled.adoptedLiveCandidate
+                && mixedRejectedReconciled.healedManagedData == nil
+                && (mixedRejectedTokens["id_token"] as? String) == codexNewIDToken
+                && (mixedRejectedTokens["refresh_token"] as? String) == "rt-stale-2026-11-01"
+                && CodexAccountIdentity(authJSON: mixedRejectedReconciled.nativeJSON).matches(targetCodexIdentity),
+              "Codex Restart UI P2 Re-review: reconcileSameIdentityAuthData rejects dual-group candidate when nested group has access/id conflict and preserves valid emitted identity")
+
+        try! JSONSerialization.data(withJSONObject: liveFresherAuth).write(to: liveAuthFile)
+        let mixedManagedConflictData = try! JSONSerialization.data(withJSONObject: mixedNestedConflictAuth)
+        let invalidManagedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: mixedManagedConflictData,
+            managedSourceData: mixedManagedConflictData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        check(!invalidManagedReconciled.isValidBaseline
+                && !invalidManagedReconciled.adoptedLiveCandidate
+                && invalidManagedReconciled.healedManagedData == nil
+                && invalidManagedReconciled.nativeData.isEmpty
+                && invalidManagedReconciled.nativeJSON.isEmpty
+                && invalidManagedReconciled.identity.accountId == nil
+                && !invalidManagedReconciled.identity.matches(targetCodexIdentity),
+              "Codex Restart UI Selected-Group P2: reconcileSameIdentityAuthData fails closed when managed baseline has dual-group access/id conflict")
     }
 }

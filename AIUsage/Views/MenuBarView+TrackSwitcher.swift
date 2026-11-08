@@ -150,11 +150,17 @@ extension MenuBarView {
                         let isActive = activeId == nil
                             && ProviderActivationManager.shared.isActiveAccount(entry)
                         let viewOnly = ProviderActivationManager.shared.isRemoteViewOnly(entry)
+                        let switchingDisabled = ProviderActivationManager.shared.isSwitchingDisabled(for: entry.providerId)
                         return MenuBarTrackPanelRow(id: entry.id, name: entry.accountPrimaryLabel,
                                                     subtitle: viewOnly ? ProviderActivationManager.remoteViewOnlyLabel : nil,
-                                                    isActive: isActive, isDisabled: viewOnly) {
-                            try? ProviderActivationManager.shared.activateAccount(entry: entry)
-                            closePanel()
+                                                    isActive: isActive, isDisabled: viewOnly || switchingDisabled) {
+                            do {
+                                try ProviderActivationManager.shared.activateAccount(entry: entry)
+                                closePanel()
+                                presentRestartConfirmation(for: entry)
+                            } catch {
+                                closePanel()
+                            }
                         }
                     }))
             }

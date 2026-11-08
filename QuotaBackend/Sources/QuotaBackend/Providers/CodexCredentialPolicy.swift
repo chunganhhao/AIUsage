@@ -750,7 +750,481 @@ public enum CodexGlobalStateSync {
     }
 }
 
-enum CodexCredentialPolicy {
+public enum CodexCredentialPolicy {
+    public struct ReconciledAuthPayload: @unchecked Sendable {
+        public let nativeData: Data
+        public let nativeJSON: [String: Any]
+        public let identity: CodexAccountIdentity
+        public let adoptedLiveCandidate: Bool
+        public let healedManagedData: Data?
+        public let isValidBaseline: Bool
+    }
+
+    private static func invalidReconciledPayload() -> ReconciledAuthPayload {
+        ReconciledAuthPayload(
+            nativeData: Data(),
+            nativeJSON: [:],
+            identity: CodexAccountIdentity(accountId: nil, userId: nil, email: nil),
+            adoptedLiveCandidate: false,
+            healedManagedData: nil,
+            isValidBaseline: false
+        )
+    }
+
+    private struct ValidatedTokenGroup {
+        let accessToken: String
+        let refreshToken: String?
+        let idToken: String?
+        let accountId: String
+        let email: String?
+        let identity: CodexAccountIdentity
+        let lastRefreshRaw: String?
+        let lastRefreshTime: TimeInterval?
+        let expiredRaw: String?
+        let expiredTime: TimeInterval?
+        let accessIssuedAt: Double
+    }
+
+    private struct ParsedAuthSnapshot {
+        let rawData: Data
+        let rawJSON: [String: Any]
+        let identity: CodexAccountIdentity
+        let accessToken: String
+        let refreshToken: String?
+        let idToken: String?
+        let accountId: String?
+        let email: String?
+        let lastRefreshRaw: String?
+        let lastRefreshTime: TimeInterval?
+        let expiredRaw: String?
+        let expiredTime: TimeInterval?
+        let accessIssuedAt: Double
+        let isAlreadyCleanNative: Bool
+    }
+
+    /// Reconciles the managed auth payload for `expectedIdentity` against live candidate files
+    /// (such as `~/.codex/auth.json` and `~/.codex/auth.json.bak`).
+    /// - Fails closed (`isValidBaseline == false`, empty payload/identity) if the managed baseline
+    ///   (or `managedSourceData` when provided) fails strict validation or does not match `expectedIdentity`.
+    /// - Preserves/selects a candidate ONLY when it is a valid OAuth credential belonging to the
+    ///   exact same `expectedIdentity` and is strictly newer than the managed copy.
+    /// - Never adopts a candidate belonging to a different account or workspace.
+    public static func reconcileSameIdentityAuthData(
+        managedNativeData: Data,
+        managedSourceData: Data? = nil,
+        expectedIdentity: CodexAccountIdentity,
+        candidatePaths: [String],
+        fm: FileManager = .default
+    ) -> ReconciledAuthPayload {
+        guard let nativeSnapshot = parseAuthSnapshot(from: managedNativeData),
+              expectedIdentity.matches(nativeSnapshot.identity) else {
+            return invalidReconciledPayload()
+        }
+        if let eKey = expectedIdentity.nativeKey,
+           let nKey = nativeSnapshot.identity.nativeKey,
+           eKey != nKey {
+            return invalidReconciledPayload()
+        }
+
+        var managedSnapshot = nativeSnapshot
+        if let managedSourceData {
+            guard let sourceSnapshot = parseAuthSnapshot(from: managedSourceData),
+                  expectedIdentity.matches(sourceSnapshot.identity),
+                  nativeSnapshot.identity.matches(sourceSnapshot.identity) else {
+                return invalidReconciledPayload()
+            }
+            if let sKey = sourceSnapshot.identity.nativeKey,
+               let nKey = nativeSnapshot.identity.nativeKey,
+               sKey != nKey {
+                return invalidReconciledPayload()
+            }
+            if isStrictlyNewer(sourceSnapshot, than: managedSnapshot) {
+                managedSnapshot = sourceSnapshot
+            }
+        }
+
+        var best = managedSnapshot
+        var adoptedLive = false
+
+        for path in candidatePaths {
+            guard let candData = fm.contents(atPath: path),
+                  let candSnapshot = parseAuthSnapshot(from: candData) else {
+                continue
+            }
+            guard expectedIdentity.matches(candSnapshot.identity),
+                  managedSnapshot.identity.matches(candSnapshot.identity) else {
+                continue
+            }
+            if let mKey = managedSnapshot.identity.nativeKey,
+               let cKey = candSnapshot.identity.nativeKey,
+               mKey != cKey {
+                continue
+            }
+            if isStrictlyNewer(candSnapshot, than: best) {
+                best = candSnapshot
+                adoptedLive = true
+            }
+        }
+
+        let (bestNativeData, bestNativeJSON) = buildCleanNativePayload(from: best)
+        let emittedIdentity = CodexAccountIdentity(authJSON: bestNativeJSON)
+        let tokensOnlyIdentity = CodexAccountIdentity(
+            authJSON: ["tokens": (bestNativeJSON["tokens"] as? [String: Any]) ?? [:]]
+        )
+        guard emittedIdentity.accountId != nil,
+              tokensOnlyIdentity.accountId != nil,
+              let verifiedEmittedSnapshot = parseAuthSnapshot(from: bestNativeData),
+              expectedIdentity.matches(emittedIdentity),
+              expectedIdentity.matches(tokensOnlyIdentity),
+              managedSnapshot.identity.matches(emittedIdentity),
+              best.identity.matches(emittedIdentity),
+              expectedIdentity.matches(verifiedEmittedSnapshot.identity) else {
+            return invalidReconciledPayload()
+        }
+
+        let healedManaged: Data? = adoptedLive
+            ? buildHealedManagedData(from: managedSourceData ?? managedNativeData, adopting: best)
+            : nil
+        return ReconciledAuthPayload(
+            nativeData: bestNativeData,
+            nativeJSON: bestNativeJSON,
+            identity: emittedIdentity,
+            adoptedLiveCandidate: adoptedLive,
+            healedManagedData: healedManaged,
+            isValidBaseline: true
+        )
+    }
+
+    private static func isStrictlyNewer(_ candidate: ParsedAuthSnapshot, than baseline: ParsedAuthSnapshot) -> Bool {
+        if baseline.refreshToken != nil && candidate.refreshToken == nil {
+            return false
+        }
+        if candidate.accessIssuedAt > 0 || baseline.accessIssuedAt > 0,
+           candidate.accessIssuedAt != baseline.accessIssuedAt {
+            return candidate.accessIssuedAt > baseline.accessIssuedAt
+        }
+        if let candLR = candidate.lastRefreshTime, let baseLR = baseline.lastRefreshTime {
+            if candLR != baseLR { return candLR > baseLR }
+        } else if candidate.lastRefreshTime != nil && baseline.lastRefreshTime == nil {
+            return true
+        } else if candidate.lastRefreshTime == nil && baseline.lastRefreshTime != nil {
+            return false
+        }
+        if let candExp = candidate.expiredTime, let baseExp = baseline.expiredTime, candExp != baseExp {
+            return candExp > baseExp
+        }
+        return false
+    }
+
+    private static func validateTokenGroup(
+        container: [String: Any],
+        root: [String: Any],
+        isFlat: Bool,
+        hasOtherGroup: Bool
+    ) -> ValidatedTokenGroup? {
+        let snakeAccess = nonEmptyString(container["access_token"])
+        let camelAccess = nonEmptyString(container["accessToken"])
+        if let s = snakeAccess, let c = camelAccess, s != c { return nil }
+        if container["access_token"] is String && snakeAccess == nil && camelAccess != nil { return nil }
+        guard let accessToken = snakeAccess ?? camelAccess else { return nil }
+
+        let snakeRefresh = nonEmptyString(container["refresh_token"])
+        let camelRefresh = nonEmptyString(container["refreshToken"])
+        if let s = snakeRefresh, let c = camelRefresh, s != c { return nil }
+        let refreshToken = snakeRefresh ?? camelRefresh
+
+        let snakeId = nonEmptyString(container["id_token"])
+        let camelId = nonEmptyString(container["idToken"])
+        if let s = snakeId, let c = camelId, s != c { return nil }
+        if container["id_token"] is String && snakeId == nil && camelId != nil { return nil }
+        let idToken = snakeId ?? camelId
+
+        let pair = CodexAccountIdentity.tokenPairIdentities(accessToken, idToken)
+        if idToken != nil && pair.access.conflicts(with: pair.id) {
+            return nil
+        }
+
+        let containerAcct = nonEmptyString(container["account_id"])
+            ?? nonEmptyString(container["accountId"])
+            ?? nonEmptyString(container["chatgpt_account_id"])
+        let rootAcct = nonEmptyString(root["account_id"])
+            ?? nonEmptyString(root["accountId"])
+            ?? nonEmptyString(root["chatgpt_account_id"])
+        if let cAcct = containerAcct, let rAcct = rootAcct, cAcct.lowercased() != rAcct.lowercased() {
+            return nil
+        }
+
+        var isolatedTokens: [String: Any] = ["access_token": accessToken]
+        if let refreshToken { isolatedTokens["refresh_token"] = refreshToken }
+        if let idToken { isolatedTokens["id_token"] = idToken }
+        if let acct = containerAcct ?? rootAcct {
+            isolatedTokens["account_id"] = acct
+        }
+        var isolatedJSON: [String: Any] = [
+            "auth_mode": (root["auth_mode"] as? String) ?? "chatgpt",
+            "tokens": isolatedTokens
+        ]
+        if !hasOtherGroup {
+            if let rootUser = nonEmptyString(root["chatgpt_user_id"]) ?? nonEmptyString(root["user_id"]) {
+                isolatedJSON["chatgpt_user_id"] = rootUser
+            }
+            if let rootEmail = nonEmptyString(root["email"]) {
+                isolatedJSON["email"] = rootEmail
+            }
+        }
+
+        let groupIdentity = CodexAccountIdentity(authJSON: isolatedJSON)
+        guard let resolvedAccountId = groupIdentity.accountId,
+              groupIdentity.key != nil else {
+            return nil
+        }
+
+        if let cAcct = containerAcct, cAcct.lowercased() != resolvedAccountId.lowercased() {
+            return nil
+        }
+        if let rAcct = rootAcct, rAcct.lowercased() != resolvedAccountId.lowercased() {
+            return nil
+        }
+
+        let explicitContainerIdentity = CodexAccountIdentity(
+            accountId: containerAcct,
+            userId: nonEmptyString(container["chatgpt_user_id"]) ?? nonEmptyString(container["user_id"]),
+            email: nonEmptyString(container["email"])
+        )
+        let explicitRootIdentity = CodexAccountIdentity(
+            accountId: rootAcct,
+            userId: nonEmptyString(root["chatgpt_user_id"]) ?? nonEmptyString(root["user_id"]),
+            email: nonEmptyString(root["email"])
+        )
+        if groupIdentity.conflicts(with: explicitContainerIdentity)
+            || groupIdentity.conflicts(with: explicitRootIdentity)
+            || pair.access.conflicts(with: groupIdentity)
+            || pair.id.conflicts(with: groupIdentity) {
+            return nil
+        }
+
+        if let idToken {
+            let fullId = CodexAccountIdentity.tokenIdentity(idToken, includeSubjectFallback: true)
+            let idHasIdentity = fullId.accountId != nil || fullId.userId != nil || fullId.email != nil
+            guard idHasIdentity else { return nil }
+        }
+
+        let lastRefreshRaw: String? = isFlat
+            ? (nonEmptyString(root["flat_last_refresh"]) ?? nonEmptyString(root["last_refresh"]))
+            : (nonEmptyString(container["last_refresh"]) ?? nonEmptyString(root["last_refresh"]))
+        let lastRefreshTime = lastRefreshRaw.flatMap(SharedFormatters.parseISO8601)?.timeIntervalSince1970
+        let expiredRaw: String? = isFlat
+            ? nonEmptyString(root["expired"])
+            : (nonEmptyString(container["expired"]) ?? nonEmptyString(root["expired"]))
+        let expiredTime = expiredRaw.flatMap(SharedFormatters.parseISO8601)?.timeIntervalSince1970
+        let accessIssued = jwtIssuedAt(accessToken)
+        let accessIssuedAt = accessIssued > 0 ? accessIssued : jwtIssuedAt(idToken)
+        let email = nonEmptyString(container["email"]) ?? nonEmptyString(root["email"]) ?? groupIdentity.email
+
+        return ValidatedTokenGroup(
+            accessToken: accessToken,
+            refreshToken: refreshToken,
+            idToken: idToken,
+            accountId: resolvedAccountId,
+            email: email,
+            identity: groupIdentity,
+            lastRefreshRaw: lastRefreshRaw,
+            lastRefreshTime: lastRefreshTime,
+            expiredRaw: expiredRaw,
+            expiredTime: expiredTime,
+            accessIssuedAt: accessIssuedAt
+        )
+    }
+
+    private static func parseAuthSnapshot(from data: Data) -> ParsedAuthSnapshot? {
+        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        if nonEmptyString(json["OPENAI_API_KEY"]) != nil,
+           json["tokens"] == nil,
+           nonEmptyString(json["access_token"]) == nil,
+           nonEmptyString(json["accessToken"]) == nil {
+            return nil
+        }
+
+        let tokens = json["tokens"] as? [String: Any] ?? [:]
+        let hasFlat = nonEmptyString(json["access_token"]) != nil
+            || nonEmptyString(json["accessToken"]) != nil
+            || nonEmptyString(json["id_token"]) != nil
+            || nonEmptyString(json["idToken"]) != nil
+        let hasNested = nonEmptyString(tokens["access_token"]) != nil
+            || nonEmptyString(tokens["accessToken"]) != nil
+            || nonEmptyString(tokens["id_token"]) != nil
+            || nonEmptyString(tokens["idToken"]) != nil
+        guard hasFlat || hasNested else { return nil }
+
+        let selectedGroup: ValidatedTokenGroup
+        if hasFlat && hasNested {
+            guard let flatGroup = validateTokenGroup(container: json, root: json, isFlat: true, hasOtherGroup: true),
+                  let nestedGroup = validateTokenGroup(container: tokens, root: json, isFlat: false, hasOtherGroup: true),
+                  !flatGroup.identity.conflicts(with: nestedGroup.identity),
+                  flatGroup.identity.matches(nestedGroup.identity) else {
+                return nil
+            }
+            if let fKey = flatGroup.identity.nativeKey,
+               let nKey = nestedGroup.identity.nativeKey,
+               fKey != nKey {
+                return nil
+            }
+            let preferFlat: Bool
+            if flatGroup.accessIssuedAt != nestedGroup.accessIssuedAt {
+                preferFlat = flatGroup.accessIssuedAt > nestedGroup.accessIssuedAt
+            } else if let fLR = flatGroup.lastRefreshTime, let nLR = nestedGroup.lastRefreshTime, fLR != nLR {
+                preferFlat = fLR > nLR
+            } else {
+                preferFlat = true
+            }
+            selectedGroup = preferFlat ? flatGroup : nestedGroup
+        } else if hasFlat {
+            guard let flatGroup = validateTokenGroup(container: json, root: json, isFlat: true, hasOtherGroup: false) else {
+                return nil
+            }
+            selectedGroup = flatGroup
+        } else {
+            guard let nestedGroup = validateTokenGroup(container: tokens, root: json, isFlat: false, hasOtherGroup: false) else {
+                return nil
+            }
+            selectedGroup = nestedGroup
+        }
+
+        let aggregateIdentity = CodexAccountIdentity(authJSON: json)
+        guard aggregateIdentity.accountId != nil,
+              !selectedGroup.identity.conflicts(with: aggregateIdentity),
+              selectedGroup.identity.matches(aggregateIdentity) else {
+            return nil
+        }
+
+        let hasCamelNested = tokens["accessToken"] != nil
+            || tokens["refreshToken"] != nil
+            || tokens["idToken"] != nil
+            || tokens["accountId"] != nil
+        let isAlreadyCleanNative = (json["tokens"] is [String: Any])
+            && (json["auth_mode"] != nil)
+            && !hasFlat
+            && !hasCamelNested
+
+        return ParsedAuthSnapshot(
+            rawData: data,
+            rawJSON: json,
+            identity: selectedGroup.identity,
+            accessToken: selectedGroup.accessToken,
+            refreshToken: selectedGroup.refreshToken,
+            idToken: selectedGroup.idToken,
+            accountId: selectedGroup.accountId,
+            email: selectedGroup.email,
+            lastRefreshRaw: selectedGroup.lastRefreshRaw,
+            lastRefreshTime: selectedGroup.lastRefreshTime,
+            expiredRaw: selectedGroup.expiredRaw,
+            expiredTime: selectedGroup.expiredTime,
+            accessIssuedAt: selectedGroup.accessIssuedAt,
+            isAlreadyCleanNative: isAlreadyCleanNative
+        )
+    }
+
+    private static func buildCleanNativePayload(from snapshot: ParsedAuthSnapshot) -> (Data, [String: Any]) {
+        if snapshot.isAlreadyCleanNative {
+            return (snapshot.rawData, snapshot.rawJSON)
+        }
+        var native: [String: Any] = [
+            "auth_mode": (snapshot.rawJSON["auth_mode"] as? String) ?? "chatgpt",
+            "tokens": [
+                "access_token": snapshot.accessToken,
+                "refresh_token": snapshot.refreshToken ?? "",
+                "account_id": snapshot.accountId ?? "",
+                "id_token": snapshot.idToken ?? ""
+            ] as [String: Any],
+            "last_refresh": snapshot.lastRefreshRaw ?? SharedFormatters.iso8601String(from: Date())
+        ]
+        if let email = snapshot.email, !email.isEmpty {
+            native["email"] = email
+        }
+        native["OPENAI_API_KEY"] = NSNull()
+        let data = (try? JSONSerialization.data(withJSONObject: native, options: [.prettyPrinted, .sortedKeys])) ?? snapshot.rawData
+        return (data, native)
+    }
+
+    private static func buildHealedManagedData(from originalData: Data, adopting best: ParsedAuthSnapshot) -> Data? {
+        guard var json = (try? JSONSerialization.jsonObject(with: originalData)) as? [String: Any] else {
+            return nil
+        }
+        let hadNested = json["tokens"] is [String: Any]
+        if var tokens = json["tokens"] as? [String: Any] {
+            tokens["access_token"] = best.accessToken
+            tokens.removeValue(forKey: "accessToken")
+            if let rt = best.refreshToken { tokens["refresh_token"] = rt }
+            tokens.removeValue(forKey: "refreshToken")
+            if let it = best.idToken {
+                tokens["id_token"] = it
+            } else {
+                tokens.removeValue(forKey: "id_token")
+            }
+            tokens.removeValue(forKey: "idToken")
+            if let acct = best.accountId { tokens["account_id"] = acct }
+            tokens.removeValue(forKey: "accountId")
+            tokens.removeValue(forKey: "last_refresh")
+            json["tokens"] = tokens
+        }
+        let hasFlatTokens = !hadNested
+            || json["access_token"] != nil
+            || json["accessToken"] != nil
+            || json["id_token"] != nil
+            || json["idToken"] != nil
+        if hasFlatTokens {
+            json["access_token"] = best.accessToken
+            json.removeValue(forKey: "accessToken")
+            if let rt = best.refreshToken { json["refresh_token"] = rt }
+            json.removeValue(forKey: "refreshToken")
+            if let it = best.idToken {
+                json["id_token"] = it
+            } else {
+                json.removeValue(forKey: "id_token")
+            }
+            json.removeValue(forKey: "idToken")
+            if let acct = best.accountId, json["account_id"] != nil || json["accountId"] != nil {
+                json["account_id"] = acct
+                json.removeValue(forKey: "accountId")
+            }
+        }
+        json.removeValue(forKey: "flat_last_refresh")
+        if let lr = best.lastRefreshRaw {
+            json["last_refresh"] = lr
+        }
+        if let exp = best.expiredRaw, json["expired"] != nil {
+            json["expired"] = exp
+        }
+        guard let healedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
+              let healedSnapshot = parseAuthSnapshot(from: healedData),
+              healedSnapshot.identity.matches(best.identity),
+              CodexAccountIdentity(authJSON: json).matches(best.identity) else {
+            return nil
+        }
+        return healedData
+    }
+
+    private static func nonEmptyString(_ value: Any?) -> String? {
+        guard let str = value as? String else { return nil }
+        let trimmed = str.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    private static func jwtIssuedAt(_ token: String?) -> Double {
+        guard let pieces = token?.split(separator: "."), pieces.count >= 2 else { return 0 }
+        var payload = String(pieces[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
+        guard let data = Data(base64Encoded: payload),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return 0
+        }
+        if let iat = (json["iat"] as? NSNumber)?.doubleValue { return iat }
+        if let exp = (json["exp"] as? NSNumber)?.doubleValue { return exp }
+        return 0
+    }
+
     static func belongsToSameWorkspace(
         lhsAccountID: String?,
         lhsUserID: String?,
