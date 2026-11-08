@@ -28,6 +28,10 @@ public struct SessionEnvironment: Sendable {
         resolveOpenCodeDataDirectory(homeDirectory: homeDirectory, environment: variables)
     }
 
+    var antigravityRoot: String {
+        override("ANTIGRAVITY_HOME") ?? (homeDirectory as NSString).appendingPathComponent(".gemini/antigravity")
+    }
+
     private func override(_ key: String) -> String? {
         guard let value = variables[key]?.trimmingCharacters(in: .whitespacesAndNewlines), !value.isEmpty else {
             return nil
@@ -222,9 +226,9 @@ struct TranscriptBuilder {
     }
 }
 
-/// 按工具名与入参归类步骤（Claude / OpenCode 的工具调用共用）。
+/// 按工具名与入参归类步骤（Claude / OpenCode / Antigravity 的工具调用共用）。
 enum ToolStepFactory {
-    private static let pathKeys = ["file_path", "filePath", "notebook_path", "path", "filename"]
+    private static let pathKeys = ["file_path", "filePath", "notebook_path", "path", "Path", "filename"]
 
     static func make(name rawName: String, input: [String: Any], base: String?, home: String) -> ToolStep {
         let name = rawName.trimmingCharacters(in: .whitespaces)
@@ -232,11 +236,20 @@ enum ToolStepFactory {
         let paths = pathKeys.compactMap { input[$0] as? String }.filter { !$0.isEmpty }
         let shownPath = paths.first.map { SessionText.displayPath($0, base: base, home: home) }
 
-        if key.hasPrefix("mcp__") {
-            let parts = name.dropFirst(5).components(separatedBy: "__")
+        if key.hasPrefix("mcp__") || key.hasPrefix("mcp_") {
+            let prefixCount = key.hasPrefix("mcp__") ? 5 : 4
+            let separator = key.hasPrefix("mcp__") ? "__" : "_"
+            let parts = name.dropFirst(prefixCount).components(separatedBy: separator)
             let server = parts.first ?? ""
-            let tool = parts.dropFirst().joined(separator: "__")
+            let tool = parts.dropFirst().joined(separator: separator)
             let label = tool.isEmpty ? server : "\(server) · \(tool)"
+            return ToolStep(name: "MCP", detail: label, kind: .mcp, failed: false, failureNote: nil, paths: [])
+        }
+
+        if key == "call_mcp_tool" || key == "list_resources" || key == "read_resource" {
+            let server = (input["ServerName"] ?? input["server"]) as? String ?? ""
+            let tool = (input["ToolName"] ?? input["tool"] ?? input["Uri"]) as? String ?? (key == "call_mcp_tool" ? "" : name)
+            let label = [server, tool].filter { !$0.isEmpty }.joined(separator: " · ")
             return ToolStep(name: "MCP", detail: label, kind: .mcp, failed: false, failureNote: nil, paths: [])
         }
 
@@ -246,29 +259,40 @@ enum ToolStepFactory {
         case "read", "view", "read_file", "notebookread":
             kind = .read
             detail = shownPath
-        case "edit", "multiedit", "write", "notebookedit", "patch", "apply_patch", "str_replace_editor", "create":
+        case "edit", "edit_file", "multiedit", "write", "write_file", "notebookedit", "patch", "apply_patch", "str_replace_editor", "create":
             kind = .edit
             detail = shownPath
-        case "bash", "shell", "exec_command", "local_shell", "command", "run":
+        case "bash", "shell", "exec_command", "local_shell", "command", "run", "run_command":
             kind = .command
-            detail = commandText(input["command"] ?? input["cmd"])
-        case "grep", "glob", "search", "list", "ls", "find", "codesearch", "toolsearch":
+            detail = commandText(input["command"] ?? input["cmd"] ?? input["CommandLine"] ?? input["toolSummary"])
+        case "grep", "glob", "search", "list", "ls", "find", "codesearch", "toolsearch", "search_marketplace":
             kind = .search
-            let pattern = (input["pattern"] ?? input["query"]) as? String
+            let pattern = (input["pattern"] ?? input["query"]) as? String ?? (input["queries"] as? [String])?.joined(separator: ", ")
             detail = [pattern, shownPath].compactMap { $0 }.joined(separator: "  ")
-        case "webfetch", "websearch", "web_search", "fetch":
+        case "webfetch", "websearch", "web_search", "search_web", "fetch":
             kind = .web
             detail = (input["url"] ?? input["query"]) as? String
-        case "task", "agent", "subagent":
+        case "task", "agent", "subagent", "invoke_subagent", "define_subagent", "manage_subagents", "send_message":
             kind = .agent
-            detail = (input["description"] ?? input["subagent_type"] ?? input["prompt"]) as? String
+            detail = (input["description"] ?? input["Role"] ?? input["subagent_type"] ?? input["TypeName"] ?? input["prompt"] ?? input["Prompt"] ?? input["Name"] ?? input["Action"]) as? String
         default:
             kind = .other
             detail = shownPath ?? firstString(in: input)
         }
+        let displayToolName: String = {
+            switch key {
+            case "run_command": return "Shell"
+            case "read_file": return "Read"
+            case "edit_file": return "Edit"
+            case "write_file": return "Write"
+            case "invoke_subagent", "define_subagent", "manage_subagents", "send_message": return "Subagent"
+            case "search_web": return "Web Search"
+            default: return name.isEmpty ? "Tool" : name
+            }
+        }()
         let line = SessionText.oneLine(detail ?? "", limit: 160)
         return ToolStep(
-            name: name.isEmpty ? "Tool" : name,
+            name: displayToolName,
             detail: line,
             kind: kind,
             failed: false,

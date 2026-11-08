@@ -316,12 +316,24 @@ private struct SessionTranscriptView: View {
                         .frame(maxWidth: 920, alignment: .leading)
                         .frame(maxWidth: .infinity)
                     }
+                    .defaultScrollAnchor(focus == nil ? .bottom : .top)
                     if geometry.size.width > 860 {
                         Divider().opacity(0.6)
                         outlineColumn(proxy: proxy)
                             .frame(width: 236)
                     }
                 }
+            }
+            .task(id: session.id) {
+                guard focus == nil, !transcript.items.isEmpty else { return }
+                // 打开会话时默认定位到最新消息底部；LazyVStack 首轮估算高度后再校正一次，确保长回复完全滚到底。
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                try? await Task.sleep(nanoseconds: 60_000_000)
+                guard !Task.isCancelled, focus == nil else { return }
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
+                try? await Task.sleep(nanoseconds: 140_000_000)
+                guard !Task.isCancelled, focus == nil else { return }
+                proxy.scrollTo(Self.bottomID, anchor: .bottom)
             }
             .task(id: focus) {
                 guard let focus, let item = transcript.items.first(where: { $0.id == focus.itemID }) else { return }
@@ -835,16 +847,19 @@ struct SessionResumeButton: View {
     let compact: Bool
     @Environment(\.colorScheme) private var colorScheme
     @Environment(\.isEnabled) private var isEnabled
+    @State private var menuTriggerID = 0
 
     var body: some View {
         HStack(spacing: 0) {
             Button {
                 Task { await store.resume(session) }
             } label: {
-                Label(compact
-                      ? L("Resume", "继续", key: "sessions.action.resume_short")
-                      : L("Resume in \(store.terminal.displayName)", "在 \(store.terminal.displayName) 中继续"),
-                      systemImage: "terminal")
+                Label(
+                    compact
+                        ? L("Resume", "继续", key: "sessions.action.resume_short")
+                        : L("Resume in \(store.terminal.displayName)", "在 \(store.terminal.displayName) 中继续"),
+                    systemImage: "terminal"
+                )
                     .labelStyle(SessionCompactLabelStyle(spacing: 6))
                     .padding(.leading, 11)
                     .padding(.trailing, 9)
@@ -858,33 +873,27 @@ struct SessionResumeButton: View {
                 .fill(Color.white.opacity(0.28))
                 .frame(width: 1, height: 16)
 
-            Menu {
-                Section(L("Resume in", "在哪个终端继续", key: "sessions.terminal.menu_title")) {
-                    ForEach(store.availableTerminals) { terminal in
-                        Button {
-                            store.setTerminal(terminal)
-                        } label: {
-                            if terminal == store.terminal {
-                                Label(terminal.displayName, systemImage: "checkmark")
-                            } else {
-                                Text(terminal.displayName)
-                            }
-                        }
-                    }
-                }
-                if let note = store.terminal.confirmationNote {
-                    Text(note)
-                }
+            Button {
+                menuTriggerID &+= 1
             } label: {
-                Image(systemName: "chevron.down")
-                    .font(.system(size: 9.5, weight: .bold))
-                    .frame(width: 26)
+                ZStack {
+                    Color.white.opacity(0.001)
+                    Image(systemName: "chevron.down")
+                        .font(.system(size: 10, weight: .bold))
+                }
+                .frame(width: 28, height: 28)
+                .contentShape(Rectangle())
             }
-            .menuStyle(.button)
             .buttonStyle(SessionPrimarySegmentStyle())
-            .menuIndicator(.hidden)
-            .fixedSize()
-            .help(L("Choose terminal", "选择终端", key: "sessions.terminal.choose"))
+            .frame(width: 28, height: 28)
+            .background(
+                SessionDropdownMenuAnchor(
+                    store: store,
+                    session: session,
+                    triggerID: menuTriggerID
+                )
+            )
+            .help(L("Choose terminal or open in app", "选择终端或在应用中打开", key: "sessions.terminal.choose"))
         }
         .font(.system(size: 12.5, weight: .semibold))
         .foregroundStyle(.white)
@@ -894,6 +903,104 @@ struct SessionResumeButton: View {
         .shadow(color: AppAccent.control(colorScheme).opacity(colorScheme == .dark ? 0 : 0.25), radius: 3, y: 1)
         .opacity(isEnabled ? 1 : 0.45)
         .fixedSize()
+    }
+}
+
+private struct SessionDropdownMenuAnchor: NSViewRepresentable {
+    let store: SessionCenterStore
+    let session: SessionSummary
+    let triggerID: Int
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(store: store, session: session)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        context.coordinator.lastTriggerID = triggerID
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.store = store
+        context.coordinator.session = session
+        guard context.coordinator.lastTriggerID != triggerID else { return }
+        context.coordinator.lastTriggerID = triggerID
+        DispatchQueue.main.async {
+            context.coordinator.popUpMenu(from: nsView)
+        }
+    }
+
+    @MainActor
+    final class Coordinator: NSObject {
+        var store: SessionCenterStore
+        var session: SessionSummary
+        var lastTriggerID = 0
+
+        init(store: SessionCenterStore, session: SessionSummary) {
+            self.store = store
+            self.session = session
+        }
+
+        func popUpMenu(from view: NSView) {
+            guard view.window != nil else { return }
+            let menu = NSMenu()
+            menu.autoenablesItems = false
+
+            let app = store.desktopAppInfo(for: session.tool)
+            let openAppItem = NSMenuItem(
+                title: L("Open in \(app.name)", "在 \(app.name) 中打开"),
+                action: #selector(handleOpenInDesktopApp(_:)),
+                keyEquivalent: ""
+            )
+            openAppItem.target = self
+            openAppItem.image = NSImage(systemSymbolName: "macwindow", accessibilityDescription: nil)
+            openAppItem.isEnabled = session.resumeBlocker == nil
+            menu.addItem(openAppItem)
+
+            menu.addItem(.separator())
+
+            let headerItem = NSMenuItem.sectionHeader(
+                title: L("Resume in", "在哪个终端继续", key: "sessions.terminal.menu_title")
+            )
+            menu.addItem(headerItem)
+
+            for terminal in store.availableTerminals {
+                let item = NSMenuItem(
+                    title: terminal.displayName,
+                    action: #selector(handleSelectTerminal(_:)),
+                    keyEquivalent: ""
+                )
+                item.target = self
+                item.representedObject = terminal.rawValue
+                item.state = (terminal == store.terminal) ? .on : .off
+                menu.addItem(item)
+            }
+
+            if let note = store.terminal.confirmationNote {
+                menu.addItem(.separator())
+                let noteItem = NSMenuItem(title: note, action: nil, keyEquivalent: "")
+                noteItem.isEnabled = false
+                menu.addItem(noteItem)
+            }
+
+            let yOffset: CGFloat = view.isFlipped ? view.bounds.height + 4 : -4
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: yOffset), in: view)
+        }
+
+        @objc private func handleOpenInDesktopApp(_ sender: NSMenuItem) {
+            let currentSession = session
+            let currentStore = store
+            Task { @MainActor in
+                await currentStore.openInDesktopApp(currentSession)
+            }
+        }
+
+        @objc private func handleSelectTerminal(_ sender: NSMenuItem) {
+            guard let raw = sender.representedObject as? String,
+                  let selected = SessionTerminal(rawValue: raw) else { return }
+            store.setTerminal(selected)
+        }
     }
 }
 
@@ -910,7 +1017,7 @@ struct SessionPrimarySegmentStyle: ButtonStyle {
         var body: some View {
             configuration.label
                 .frame(maxHeight: .infinity)
-                .background(configuration.isPressed ? Color.black.opacity(0.14) : hovering ? Color.white.opacity(0.12) : .clear)
+                .background(configuration.isPressed ? Color.black.opacity(0.14) : hovering ? Color.white.opacity(0.12) : Color.white.opacity(0.001))
                 .contentShape(Rectangle())
                 .onHover { hovering = $0 }
         }

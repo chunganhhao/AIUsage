@@ -115,7 +115,7 @@ final class GlobalProxyRuntime: ObservableObject {
     /// 跨轨仲裁聚合用：本轨全局代理运行时占用的端口所有者（仅在确实运行时上报）。
     func runningPortOwners() -> [ProxyPortArbiter.Owner] {
         guard isProcessRunning else { return [] }
-        let ports = [listenPort] + (httpsListenPort.map { [$0] } ?? [])
+        let ports: [Int] = [listenPort] + (httpsListenPort.map { [$0] } ?? [])
         return [ProxyPortArbiter.Owner(id: ownerId, ports: ports, track: trackLabel, label: activeNodeName ?? "")]
     }
 
@@ -138,7 +138,7 @@ final class GlobalProxyRuntime: ObservableObject {
         guard generation == startGeneration else { throw CancellationError() }
         claudeDesktopObservedTrafficCount = 0
 
-        let requestedPorts = [port] + (httpsPort.map { [$0] } ?? [])
+        let requestedPorts: [Int] = [port] + (httpsPort.map { [$0] } ?? [])
         if Set(requestedPorts).count != requestedPorts.count {
             throw GlobalProxyRuntimeError.portInUse(port)
         }

@@ -45,7 +45,13 @@ enum AgentKind: String, CaseIterable {
 enum AgentVisibility {
     /// 该 agent 是否被用户在侧边栏隐藏。
     static func isHidden(_ agent: AgentKind, hidden: Set<String>) -> Bool {
-        hidden.contains(agent.section.rawValue)
+        switch agent {
+        case .codex:
+            return hidden.contains(AppSection.codexProxyManagement.rawValue)
+                && hidden.contains(AppSection.codexLocalManagement.rawValue)
+        case .claude, .opencode:
+            return hidden.contains(agent.section.rawValue)
+        }
     }
 
     static func isVisible(_ agent: AgentKind, hidden: Set<String>) -> Bool {

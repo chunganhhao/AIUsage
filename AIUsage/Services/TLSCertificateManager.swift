@@ -22,8 +22,8 @@ final class TLSCertificateManager {
     private let identityPath: URL
     private let versionPath: URL
 
-    private static let identityPassword = "aiusage-proxy-tls"
-    private static let currentVersion = "ca-v5"
+    private nonisolated static let identityPassword = "aiusage-proxy-tls"
+    private nonisolated static let currentVersion = "ca-v5"
     private let log = Logger(subsystem: "com.aiusage.desktop", category: "TLS")
 
     init() {
@@ -99,7 +99,7 @@ final class TLSCertificateManager {
 
     // MARK: Step 1 - CA Root Certificate
 
-    private static func generateCACert(dir: URL, keyPath: URL, certPath: URL) throws {
+    private nonisolated static func generateCACert(dir: URL, keyPath: URL, certPath: URL) throws {
         let configPath = dir.appendingPathComponent("ca.cnf")
         try """
         [req]
@@ -127,8 +127,8 @@ final class TLSCertificateManager {
 
     // MARK: Step 2 - Server Certificate signed by CA
 
-    private static func generateServerCert(dir: URL, caKey: URL, caCert: URL,
-                                           serverKey: URL, serverCert: URL) throws {
+    private nonisolated static func generateServerCert(dir: URL, caKey: URL, caCert: URL,
+                                                       serverKey: URL, serverCert: URL) throws {
         let csrPath = dir.appendingPathComponent("server.csr")
         let serverConfig = dir.appendingPathComponent("server.cnf")
         let extConfig = dir.appendingPathComponent("server-ext.cnf")
@@ -176,8 +176,8 @@ final class TLSCertificateManager {
 
     // MARK: Step 3 - PKCS12 Identity (server key + cert chain)
 
-    private static func exportPKCS12(identity: URL, serverKey: URL,
-                                     serverCert: URL, caCert: URL, password: String) throws {
+    private nonisolated static func exportPKCS12(identity: URL, serverKey: URL,
+                                                 serverCert: URL, caCert: URL, password: String) throws {
         try runOpenSSL([
             "pkcs12", "-export",
             "-out", identity.path,
@@ -270,7 +270,7 @@ final class TLSCertificateManager {
 
     // MARK: - Process Helpers
 
-    private static func runOpenSSL(_ arguments: [String], errorContext: String) throws {
+    private nonisolated static func runOpenSSL(_ arguments: [String], errorContext: String) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
         process.arguments = arguments

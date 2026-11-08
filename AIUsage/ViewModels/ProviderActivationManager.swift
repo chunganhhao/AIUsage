@@ -356,7 +356,7 @@ final class ProviderActivationManager: ObservableObject {
         codexActivationResult = .success(msg)
     }
 
-    static let codexBundleIdentifier = "com.openai.codex"
+    nonisolated static let codexBundleIdentifier = "com.openai.codex"
 
     var isCodexAppInstalled: Bool {
         Self.resolveInstalledCodexAppURL() != nil
@@ -461,7 +461,7 @@ final class ProviderActivationManager: ObservableObject {
                     lastActivated: self.lastActivatedCodexTarget,
                     currentActiveKey: self.activeProviderAccountIds["codex"],
                     fallback: fallbackCandidate,
-                    fileExists: { fm.fileExists(atPath: $0) }
+                    fileExists: { FileManager.default.fileExists(atPath: $0) }
                 )
                 return (self.codexSwitchGeneration, candidate)
             }
@@ -890,7 +890,7 @@ final class ProviderActivationManager: ObservableObject {
                         lastActivated: self.lastActivatedAntigravityTarget,
                         currentActiveKey: self.activeProviderAccountIds["antigravity"],
                         fallback: fallbackCandidate,
-                        fileExists: { fm.fileExists(atPath: $0) }
+                        fileExists: { FileManager.default.fileExists(atPath: $0) }
                     )
                     return (self.antigravitySwitchGeneration, selected)
                 }
@@ -1116,16 +1116,15 @@ final class ProviderActivationManager: ObservableObject {
 
     func detectActiveAntigravityAccount() {
         antigravityDetectionTask?.cancel()
-        antigravityDetectionTask = Task.detached(priority: .utility) { [weak self] in
-            let detected = AntigravityAccountSwitcher.detectActiveAccount()
-            guard !Task.isCancelled else { return }
+        antigravityDetectionTask = Task { [weak self] in
+            let detected = await Task.detached(priority: .utility) {
+                AntigravityAccountSwitcher.detectActiveAccount()
+            }.value
+            guard let self, !Task.isCancelled else { return }
             let validEmail = (detected != nil && (detected?.hasAccessToken == true || detected?.hasRefreshToken == true))
                 ? detected?.email
                 : nil
-            await MainActor.run {
-                guard !Task.isCancelled else { return }
-                self?.applyDetectedAntigravityEmail(validEmail)
-            }
+            self.applyDetectedAntigravityEmail(validEmail)
         }
     }
 

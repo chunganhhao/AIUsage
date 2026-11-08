@@ -8,6 +8,7 @@ public enum SessionTool: String, CaseIterable, Codable, Sendable, Identifiable {
     case claude
     case codex
     case opencode
+    case antigravity
 
     public var id: String { rawValue }
 
@@ -16,6 +17,7 @@ public enum SessionTool: String, CaseIterable, Codable, Sendable, Identifiable {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
+        case .antigravity: return "Antigravity"
         }
     }
 }
@@ -80,6 +82,7 @@ enum SessionLocator: Hashable, Sendable {
     case codexThread(historyDatabase: String?)
     case openCodeJSON(storageRoot: String)
     case openCodeDatabase(path: String, layout: OpenCodeSessionLayout)
+    case antigravityBrain(transcriptPath: String)
 }
 
 enum OpenCodeSessionLayout: String, Hashable, Sendable {

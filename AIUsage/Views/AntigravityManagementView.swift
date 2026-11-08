@@ -564,6 +564,53 @@ struct AntigravityManagementView: View {
                     .font(.caption2)
                     .foregroundStyle(.red)
             }
+
+            Divider()
+
+            ScrollView(.horizontal, showsIndicators: false) {
+                HStack(spacing: 8) {
+                    metricTag(
+                        icon: "cpu",
+                        label: L("Model", "模型"),
+                        value: envSummary.activeModel ?? "—",
+                        tint: Self.brand
+                    )
+                    metricTag(
+                        icon: "brain",
+                        label: L("Thinking", "推理强度"),
+                        value: envSummary.thinkingEffort?.uppercased() ?? "—",
+                        tint: .purple
+                    )
+                    metricTag(
+                        icon: "terminal",
+                        label: L("Execution", "命令执行"),
+                        value: envSummary.executionPolicy ?? "—",
+                        tint: envSummary.executionPolicy == nil
+                            ? .secondary
+                            : (envSummary.executionPolicy == "always-proceed" ? .orange : .green)
+                    )
+                    metricTag(
+                        icon: "doc.badge.gearshape",
+                        label: L("Artifact Review", "产物审核"),
+                        value: envSummary.artifactReviewPolicy ?? "—",
+                        tint: .teal
+                    )
+                    metricTag(
+                        icon: "lock.shield",
+                        label: L("Security", "安全模式"),
+                        value: envSummary.securityMode ?? "—",
+                        tint: envSummary.securityMode == nil
+                            ? .secondary
+                            : (envSummary.securityMode == "secure-sandbox" ? .green : .blue)
+                    )
+                    metricTag(
+                        icon: "folder.badge.gearshape",
+                        label: L("Workspaces", "活跃项目"),
+                        value: "\(envSummary.workspaceCount)",
+                        tint: .indigo
+                    )
+                }
+            }
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
@@ -575,6 +622,24 @@ struct AntigravityManagementView: View {
             RoundedRectangle(cornerRadius: 14)
                 .stroke(AppStroke.card(colorScheme), lineWidth: 1)
         )
+    }
+
+    private func metricTag(icon: String, label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(tint)
+            Text("\(label):")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(tint)
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
+        .background(Capsule().fill(tint.opacity(0.11)))
+        .overlay(Capsule().stroke(tint.opacity(0.24), lineWidth: 0.5))
     }
 
     @ViewBuilder
@@ -632,12 +697,21 @@ struct AntigravityManagementView: View {
 
                 Spacer()
 
+                if tokenSaver.lastSaveSucceeded, tokenSaver.error == nil {
+                    TokenSaverStatusBadge(
+                        text: L("Saved — new session required", "已保存 — 需开启新会话"),
+                        tone: .active,
+                        id: "agy-token-saver-saved-badge"
+                    )
+                }
+
                 Button(L("Reapply Rules", "重新写入规则")) {
                     tokenSaver.reapply()
                     refreshEnvironment()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .accessibilityIdentifier("agy-token-saver-reapply")
             }
 
             Divider()
@@ -708,6 +782,21 @@ struct AntigravityManagementView: View {
                         : L("Antigravity.app Not Found", "未检测到 Antigravity.app")
                 )
                 Spacer()
+            }
+
+            if let notice = tokenSaver.notice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("agy-token-saver-notice")
+            }
+
+            if let error = tokenSaver.localizedError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("agy-token-saver-error")
             }
         }
         .padding(.horizontal, 16)

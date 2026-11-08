@@ -16,7 +16,7 @@ struct SessionCenterView: View {
     var body: some View {
         HStack(spacing: 0) {
             SessionListColumn(store: store)
-                .frame(width: 340)
+                .frame(width: 360)
                 .background(AppSurface.sidebar(colorScheme))
             Divider()
             Group {
@@ -238,10 +238,11 @@ private struct SessionListColumn: View {
                 }
                 Text(title)
                     .lineLimit(1)
+                    .minimumScaleFactor(0.88)
             }
             .font(.system(size: 11.5, weight: selected ? .semibold : .medium))
             .foregroundStyle(selected ? AppContent.primary(colorScheme) : AppContent.secondary(colorScheme))
-            .padding(.horizontal, 8)
+            .padding(.horizontal, 6)
             .frame(maxWidth: .infinity)
             .frame(height: 26)
             .background {
@@ -511,6 +512,11 @@ struct SessionActionsMenu: View {
     var body: some View {
         Button(L("Resume in \(store.terminal.displayName)", "在 \(store.terminal.displayName) 中继续")) {
             Task { await store.resume(session) }
+        }
+        .disabled(session.resumeBlocker != nil)
+        let app = store.desktopAppInfo(for: session.tool)
+        Button(L("Open in \(app.name)", "在 \(app.name) 中打开")) {
+            Task { await store.openInDesktopApp(session) }
         }
         .disabled(session.resumeBlocker != nil)
         Button(L("Copy Resume Command", "复制恢复命令", key: "sessions.action.copy_command")) {

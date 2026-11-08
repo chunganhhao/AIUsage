@@ -21,19 +21,30 @@ struct SidebarNavItem: Identifiable {
     let tint: Color
     /// 仪表盘与设置常驻，保证用户隐藏其它入口后仍能回到设置恢复。
     let isHideable: Bool
+    var groupSubtitleEn: String? = nil
+    var groupSubtitleZh: String? = nil
 
     var id: AppSection { section }
     var title: String { L(titleEn, titleZh, key: localizationKey) }
+    var settingsTitle: String {
+        guard let groupSubtitleEn, let groupSubtitleZh else { return title }
+        return "\(title) (\(L(groupSubtitleEn, groupSubtitleZh)))"
+    }
 }
 
 /// 侧边栏导航条目集合与可见性过滤。
 enum SidebarNavigation {
+    /// 本地应用分组标题（可折叠 Section 的 header，位于代理分组上方）。
+    static var localGroupTitle: String {
+        L("Local", "本地", key: "nav.group.local")
+    }
+
     /// 代理分组标题（可折叠 Section 的 header）。
     static var proxiesGroupTitle: String {
         L("Proxies", "代理", key: "nav.group.proxies")
     }
 
-    /// 代理分组上方的主条目。
+    /// 本地与代理分组上方的主条目。
     static let primaryTop: [SidebarNavItem] = [
         SidebarNavItem(section: .dashboard, titleEn: "Dashboard", titleZh: "仪表盘",
                        localizationKey: "nav.dashboard", icon: .system("chart.bar.doc.horizontal"),
@@ -52,20 +63,32 @@ enum SidebarNavigation {
                        tint: .teal, isHideable: true)
     ]
 
+    /// 可折叠的「本地」分组：管理本机安装的 Codex / Antigravity 客户端账号切换、重启与环境规则。
+    static let local: [SidebarNavItem] = [
+        SidebarNavItem(section: .codexLocalManagement, titleEn: "Codex", titleZh: "Codex",
+                       localizationKey: "nav.codex_local_management", icon: .providerAsset("codex"),
+                       tint: .primary, isHideable: true,
+                       groupSubtitleEn: "Local", groupSubtitleZh: "本地"),
+        SidebarNavItem(section: .antigravityManagement, titleEn: "Antigravity", titleZh: "Antigravity",
+                       localizationKey: "nav.antigravity_management", icon: .providerAsset("antigravity"),
+                       tint: .primary, isHideable: true,
+                       groupSubtitleEn: "Local", groupSubtitleZh: "本地")
+    ]
+
     /// 可折叠的「代理」分组：分组标题已表达“代理”语义，条目只保留应用名。
     static let proxies: [SidebarNavItem] = [
         SidebarNavItem(section: .codexProxyManagement, titleEn: "Codex", titleZh: "Codex",
                        localizationKey: "nav.codex_proxy_management", icon: .providerAsset("codex"),
-                       tint: .primary, isHideable: true),
+                       tint: .primary, isHideable: true,
+                       groupSubtitleEn: "Proxy", groupSubtitleZh: "代理"),
         SidebarNavItem(section: .proxyManagement, titleEn: "Claude", titleZh: "Claude",
                        localizationKey: "nav.proxy_management", icon: .providerAsset("claude"),
-                       tint: .primary, isHideable: true),
+                       tint: .primary, isHideable: true,
+                       groupSubtitleEn: "Proxy", groupSubtitleZh: "代理"),
         SidebarNavItem(section: .opencodeManagement, titleEn: "OpenCode", titleZh: "OpenCode",
                        localizationKey: "nav.opencode_management", icon: .providerAsset("opencode"),
-                       tint: .primary, isHideable: true),
-        SidebarNavItem(section: .antigravityManagement, titleEn: "Antigravity", titleZh: "Antigravity",
-                       localizationKey: "nav.antigravity_management", icon: .providerAsset("antigravity"),
-                       tint: .primary, isHideable: true)
+                       tint: .primary, isHideable: true,
+                       groupSubtitleEn: "Proxy", groupSubtitleZh: "代理")
     ]
 
     /// 代理分组下方的主条目。
@@ -78,8 +101,8 @@ enum SidebarNavigation {
                        tint: .purple, isHideable: true)
     ]
 
-    /// 分隔线上方的全部主条目（含代理分组，供设置页等平铺场景使用）。
-    static let primary: [SidebarNavItem] = primaryTop + proxies + primaryBottom
+    /// 分隔线上方的全部主条目（含本地与代理分组，供设置页等平铺场景使用）。
+    static let primary: [SidebarNavItem] = primaryTop + local + proxies + primaryBottom
 
     /// 分隔线下方的次分组（消息 + 设置）。
     static let secondary: [SidebarNavItem] = [

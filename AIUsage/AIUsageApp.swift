@@ -453,7 +453,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         revealMainWindow(section: .settings)
     }
 
-    @objc func quit() {
+    @MainActor @objc func quit() {
         CLIProxyGatewayManager.shared.runtime.stopSynchronouslyForTermination()
         NSApplication.shared.terminate(nil)
     }

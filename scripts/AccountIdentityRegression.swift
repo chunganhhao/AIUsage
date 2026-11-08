@@ -1770,5 +1770,107 @@ struct AccountIdentityRegression {
                 && invalidManagedReconciled.identity.accountId == nil
                 && !invalidManagedReconciled.identity.matches(targetCodexIdentity),
               "Codex Restart UI Selected-Group P2: reconcileSameIdentityAuthData fails closed when managed baseline has dual-group access/id conflict")
+
+        // 8r. Round 3: Antigravity runtime & workspace telemetry (read-only state.vscdb + conversation_summaries.db + transcript.jsonl)
+        let parsedModelSelection = AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (Medium). No need to comment.\n</USER_SETTINGS_CHANGE>"
+        )
+        check(parsedModelSelection?.model == "gemini-4-argon" && parsedModelSelection?.effort == "MEDIUM",
+              "AGY R3: parseModelSelection extracts normalized model slug and thinking effort")
+
+        let parsedNoParenSuffix = AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3 Flash. No need to comment.\n</USER_SETTINGS_CHANGE>"
+        )
+        check(parsedNoParenSuffix?.model == "gemini-3-flash" && parsedNoParenSuffix?.effort == nil,
+              "AGY R3 P2-1a: parseModelSelection strips '. No need to comment.' notification suffix when selection lacks parentheses")
+
+        let samplePrefsB64 = "ChsKF3BsYW5uaW5nTW9kZVNlbnRpbmVsS2V5EgAKKQofYXJ0aWZhY3RSZXZpZXdQb2xpY3lTZW50aW5lbEtleRIGCgRFQUU9CjAKJnRlcm1pbmFsQXV0b0V4ZWN1dGlvblBvbGljeVNlbnRpbmVsS2V5EgYKBEVBRT0KLAoidGVybWluYWxBbGxvd2VkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CisKIXRlcm1pbmFsRGVuaWVkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CjYKLGFsbG93QWdlbnRBY2Nlc3NOb25Xb3Jrc3BhY2VGaWxlc1NlbnRpbmVsS2V5EgYKBENBQT0KNQorYWxsb3dDYXNjYWRlQWNjZXNzR2l0aWdub3JlRmlsZXNTZW50aW5lbEtleRIGCgRDQUE9CjcKLWV4cGxhaW5BbmRGaXhJbkN1cnJlbnRDb252ZXJzYXRpb25TZW50aW5lbEtleRIGCgRDQUE9CjoKMGF1dG9Db250aW51ZU9uTWF4R2VuZXJhdG9ySW52b2NhdGlvbnNTZW50aW5lbEtleRIGCgRFQUE9Ch8KFXNlY3VyZU1vZGVTZW50aW5lbEtleRIGCgRDQUE9"
+        let parsedPrefs = AntigravityAccountSwitcher.parseAgentPreferencesProto(samplePrefsB64)
+        check(parsedPrefs.executionPolicy == "always-proceed"
+                && parsedPrefs.artifactReviewPolicy == "always-proceed"
+                && parsedPrefs.securityMode == "standard",
+              "AGY R3: parseAgentPreferencesProto decodes executionPolicy, artifactReviewPolicy, and securityMode")
+
+        let invalidPrefs = AntigravityAccountSwitcher.parseAgentPreferencesProto("!!!invalid-base64!!!")
+        check(invalidPrefs.executionPolicy == nil
+                && invalidPrefs.artifactReviewPolicy == nil
+                && invalidPrefs.securityMode == nil,
+              "AGY R3 P2-2a: parseAgentPreferencesProto returns nil policies for invalid base64")
+
+        let r3Home = r5NegativeHome.deletingLastPathComponent().appendingPathComponent("agy-r3-telemetry", isDirectory: true)
+        let r3DBDir = r3Home.appendingPathComponent("Library/Application Support/Antigravity/User/globalStorage", isDirectory: true)
+        let r3AGYRoot = r3Home.appendingPathComponent(".gemini/antigravity", isDirectory: true)
+        let r3ConvID = "11111111-2222-3333-4444-555555555555"
+        let r3LogDir = r3AGYRoot.appendingPathComponent("brain/\(r3ConvID)/.system_generated/logs", isDirectory: true)
+        try! fm.createDirectory(at: r3DBDir, withIntermediateDirectories: true)
+        try! fm.createDirectory(at: r3LogDir, withIntermediateDirectories: true)
+
+        var r3StateDB: OpaquePointer?
+        _ = sqlite3_open(r3DBDir.appendingPathComponent("state.vscdb").path, &r3StateDB)
+        _ = sqlite3_exec(r3StateDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(
+            r3StateDB,
+            "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.agentPreferences', '\(samplePrefsB64)');",
+            nil,
+            nil,
+            nil
+        )
+        sqlite3_close(r3StateDB)
+
+        var r3SummariesDB: OpaquePointer?
+        _ = sqlite3_open(r3AGYRoot.appendingPathComponent("conversation_summaries.db").path, &r3SummariesDB)
+        _ = sqlite3_exec(
+            r3SummariesDB,
+            """
+            CREATE TABLE conversation_summaries (
+                conversation_id TEXT PRIMARY KEY,
+                last_modified_time TEXT NOT NULL,
+                workspace_uris TEXT NOT NULL,
+                nesting_depth INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO conversation_summaries (conversation_id, last_modified_time, workspace_uris, nesting_depth)
+            VALUES ('\(r3ConvID)', '2026-11-08 18:00:00+00:00', '["file:///Users/test/projA","file:///Users/test/projB"]', 0);
+            """,
+            nil,
+            nil,
+            nil
+        )
+        sqlite3_close(r3SummariesDB)
+
+        let r3TranscriptURL = r3LogDir.appendingPathComponent("transcript.jsonl")
+        let r3TranscriptLine = #"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>Hi</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Claude Opus 5.5 (High).\n</USER_SETTINGS_CHANGE>"}"# + "\n"
+        try! Data(r3TranscriptLine.utf8).write(to: r3TranscriptURL)
+
+        let r3Env = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3Home.path)
+        check(r3Env.activeModel == "claude-opus-5.5"
+                && r3Env.thinkingEffort == "HIGH"
+                && r3Env.executionPolicy == "always-proceed"
+                && r3Env.artifactReviewPolicy == "always-proceed"
+                && r3Env.securityMode == "standard"
+                && r3Env.workspaceCount == 2,
+              "AGY R3: inspectEnvironmentAsync extracts model, thinking effort, execution/review/security policies, and unique workspace count in read-only mode")
+
+        let r3SwitchTranscript = r3TranscriptLine
+            + #"{"step_index":1,"type":"USER_INPUT","content":"<USER_REQUEST>Next</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Claude Opus 5.5 (High) to Gemini 3 Flash. No need to comment.\n</USER_SETTINGS_CHANGE>"}"# + "\n"
+        try! Data(r3SwitchTranscript.utf8).write(to: r3TranscriptURL)
+
+        let extractedSwitch = AntigravityAccountSwitcher.extractLatestModelAndEffort(fromTranscriptAt: r3TranscriptURL.path)
+        let r3SwitchedEnv = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3Home.path)
+        check(extractedSwitch?.model == "gemini-3-flash"
+                && extractedSwitch?.effort == nil
+                && r3SwitchedEnv.activeModel == "gemini-3-flash"
+                && r3SwitchedEnv.thinkingEffort == nil,
+              "AGY R3 P2-1b: switching to a model without effort clears previous model's HIGH effort to nil")
+
+        let r3MissingHome = r5NegativeHome.deletingLastPathComponent().appendingPathComponent("agy-r3-missing-telemetry", isDirectory: true)
+        try! fm.createDirectory(at: r3MissingHome, withIntermediateDirectories: true)
+        let r3MissingEnv = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3MissingHome.path)
+        check(r3MissingEnv.activeModel == nil
+                && r3MissingEnv.thinkingEffort == nil
+                && r3MissingEnv.executionPolicy == nil
+                && r3MissingEnv.artifactReviewPolicy == nil
+                && r3MissingEnv.securityMode == nil
+                && r3MissingEnv.workspaceCount == 0,
+              "AGY R3 P2-2b: inspectEnvironmentAsync leaves optional runtime/policy fields nil when databases and transcripts are absent")
     }
 }

@@ -296,6 +296,7 @@ enum APIProviderCPALoopGuard {
         )
     }
 
+    @MainActor
     static func blockReason(for provider: APIProvider, cpaPort: Int) -> String? {
         if provider.id == CLIProxyGatewayManager.managedProviderID {
             return AppSettings.shared.t(

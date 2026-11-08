@@ -151,7 +151,7 @@ final class CLIProxyGatewayManager: ObservableObject {
 
     var isInstalled: Bool { currentVersion != nil }
 
-    static let managedProviderID = "aiusage.cliproxyapi.gateway"
+    nonisolated static let managedProviderID = "aiusage.cliproxyapi.gateway"
     private static let openCodeProtocolDefaultsKey = "aiusage.cliproxyapi.managedOpenCodeProtocol"
     private static let claudeProtocolDefaultsKey = "aiusage.cliproxyapi.managedClaudeProtocol"
 

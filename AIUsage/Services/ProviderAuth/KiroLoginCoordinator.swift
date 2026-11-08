@@ -160,7 +160,7 @@ final class KiroLoginCoordinator: ObservableObject {
         let clientSecret: String
     }
 
-    private static let kiroUserAgent = "aws-sdk-js/3.980.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.980.0 m/E KiroIDE"
+    private nonisolated static let kiroUserAgent = "aws-sdk-js/3.980.0 ua/2.1 os/other lang/js md/browser#unknown_unknown api/sso-oidc#3.980.0 m/E KiroIDE"
 
     private func registerClient(oidcBase: String) async -> ClientRegistration? {
         guard let url = URL(string: "\(oidcBase)/client/register") else {

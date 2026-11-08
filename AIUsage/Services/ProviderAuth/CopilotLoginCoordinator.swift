@@ -22,16 +22,16 @@ final class CopilotLoginCoordinator: ObservableObject {
     @Published private(set) var accountLogin: String?
     @Published private(set) var accountEmail: String?
 
-    private static let deviceCodeURL = URL(string: "https://github.com/login/device/code")!
-    private static let tokenURL = URL(string: "https://github.com/login/oauth/access_token")!
+    private nonisolated static let deviceCodeURL = URL(string: "https://github.com/login/device/code")!
+    private nonisolated static let tokenURL = URL(string: "https://github.com/login/oauth/access_token")!
 
     // gh CLI's public OAuth App client_id. Device flow tokens appear as
     // "GitHub CLI" in the user's GitHub settings. Override via env var
     // AIUSAGE_GITHUB_OAUTH_CLIENT_ID if you register a dedicated OAuth App.
-    private static let defaultClientId = "178c6fc778ccc68e1d6a"
+    private nonisolated static let defaultClientId = "178c6fc778ccc68e1d6a"
 
-    private static let scopes = "read:user user:email"
-    private static let maxPollDuration: UInt64 = 15 * 60
+    private nonisolated static let scopes = "read:user user:email"
+    private nonisolated static let maxPollDuration: UInt64 = 15 * 60
 
     private var pollingTask: Task<Void, Never>?
     private var timeoutTask: Task<Void, Never>?

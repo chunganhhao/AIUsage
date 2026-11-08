@@ -187,6 +187,7 @@ extension ProviderAuthManager {
 
     /// AIUsage「API 提供商」里已保存的订阅 Key 同样能读取额度，省去再去控制台复制一次。
     /// 这些只作为连接弹窗里的建议，不进入 discoverCandidates——刷新时的自动接入不会悄悄把它们加成账号。
+    @MainActor
     static func savedAPIKeyCandidates(for providerId: String) -> [ProviderAuthCandidate] {
         let isSubscriptionKey: (APIProvider, String) -> Bool
         switch providerId {

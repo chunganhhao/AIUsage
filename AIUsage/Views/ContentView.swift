@@ -24,6 +24,10 @@ struct ContentView: View {
         SidebarNavigation.visible(SidebarNavigation.primaryTop, hidden: hiddenSections)
     }
 
+    private var visibleLocal: [SidebarNavItem] {
+        SidebarNavigation.visible(SidebarNavigation.local, hidden: hiddenSections)
+    }
+
     private var visibleProxies: [SidebarNavItem] {
         SidebarNavigation.visible(SidebarNavigation.proxies, hidden: hiddenSections)
     }
@@ -37,7 +41,14 @@ struct ContentView: View {
     }
 
     private var hasVisiblePrimary: Bool {
-        !(visiblePrimaryTop.isEmpty && visibleProxies.isEmpty && visiblePrimaryBottom.isEmpty)
+        !(visiblePrimaryTop.isEmpty && visibleLocal.isEmpty && visibleProxies.isEmpty && visiblePrimaryBottom.isEmpty)
+    }
+
+    private var localGroupExpanded: Binding<Bool> {
+        Binding(
+            get: { appState.settings.sidebarLocalGroupExpanded },
+            set: { appState.settings.sidebarLocalGroupExpanded = $0 }
+        )
     }
 
     private var proxiesGroupExpanded: Binding<Bool> {
@@ -115,7 +126,16 @@ struct ContentView: View {
             List(selection: sectionBinding) {
                 ForEach(visiblePrimaryTop) { navRow($0) }
 
-                // 四条代理入口收进一个可折叠分组，分组标题表达“代理”语义，
+                // 本地应用分组（Codex Local / Antigravity Local）：位于代理分组上方，独立折叠。
+                if !visibleLocal.isEmpty {
+                    Section(isExpanded: localGroupExpanded) {
+                        ForEach(visibleLocal) { navRow($0) }
+                    } header: {
+                        Text(SidebarNavigation.localGroupTitle)
+                    }
+                }
+
+                // 代理入口收进一个可折叠分组，分组标题表达“代理”语义，
                 // 条目只显示应用名；展开状态持久化，重启后保持。
                 if !visibleProxies.isEmpty {
                     Section(isExpanded: proxiesGroupExpanded) {
@@ -146,7 +166,11 @@ struct ContentView: View {
                 }
             }
             .onChange(of: appState.selectedSection) { _, section in
-                // 从菜单栏/设置等处跳转到代理页时自动展开分组，避免选中项藏在收起的组里。
+                // 从菜单栏/设置等处跳转到本地或代理页时自动展开对应分组，避免选中项藏在收起的组里。
+                if SidebarNavigation.local.contains(where: { $0.section == section }),
+                   !appState.settings.sidebarLocalGroupExpanded {
+                    appState.settings.sidebarLocalGroupExpanded = true
+                }
                 if SidebarNavigation.proxies.contains(where: { $0.section == section }),
                    !appState.settings.sidebarProxiesGroupExpanded {
                     appState.settings.sidebarProxiesGroupExpanded = true
@@ -188,6 +212,9 @@ struct ContentView: View {
                 case .opencodeManagement:
                     OpenCodeManagementView()
                         .navigationTitle(L("OpenCode Proxy", "OpenCode 代理"))
+                case .codexLocalManagement:
+                    CodexLocalManagementView()
+                        .navigationTitle("Codex")
                 case .antigravityManagement:
                     AntigravityManagementView()
                         .navigationTitle("Antigravity")

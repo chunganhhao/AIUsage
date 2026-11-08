@@ -304,7 +304,7 @@ final class SessionLiveSearchTests: XCTestCase {
     // MARK: Monitor
 
     func testMonitorOnlyCaresAboutSessionRecords() {
-        let roots = SessionSourceMonitor.Roots(claude: "/h/.claude", codex: "/h/.codex", openCode: "/h/oc")
+        let roots = SessionSourceMonitor.Roots(claude: "/h/.claude", codex: "/h/.codex", openCode: "/h/oc", antigravity: "/h/.gemini/antigravity")
         let relevant = [
             "/h/.claude/projects/-Users-me-app/\(claudeID).jsonl",
             "/h/.claude/projects/-Users-me-app",
@@ -312,7 +312,9 @@ final class SessionLiveSearchTests: XCTestCase {
             "/h/.codex/state_5.sqlite-wal",
             "/h/.codex/thread_history_1.sqlite",
             "/h/oc/opencode.db-wal",
-            "/h/oc/storage/message/ses_1/msg_1.json"
+            "/h/oc/storage/message/ses_1/msg_1.json",
+            "/h/.gemini/antigravity/conversation_summaries.db-wal",
+            "/h/.gemini/antigravity/brain/\(claudeID)/.system_generated/logs/transcript.jsonl"
         ]
         let temporary = SessionSourceMonitor.Roots(claude: "/var/t/.claude", codex: "", openCode: "")
         XCTAssertTrue(SessionSourceMonitor.isRelevant("/private/var/t/.claude/sessions/1.json", roots: temporary),
@@ -326,7 +328,9 @@ final class SessionLiveSearchTests: XCTestCase {
             "/h/.codex/state_5.sqlite-shm",
             "/h/.codex/sessions/2026/11/02/rollout.jsonl",
             "/h/oc/log/2026.log",
-            "/h/.claudette/projects/x/y.jsonl"
+            "/h/.claudette/projects/x/y.jsonl",
+            "/h/.gemini/antigravity/conversation_summaries.db-shm",
+            "/h/.gemini/antigravity/brain/\(claudeID)/scratch/debug.py"
         ]
         for path in relevant { XCTAssertTrue(SessionSourceMonitor.isRelevant(path, roots: roots), path) }
         for path in ignored { XCTAssertFalse(SessionSourceMonitor.isRelevant(path, roots: roots), path) }

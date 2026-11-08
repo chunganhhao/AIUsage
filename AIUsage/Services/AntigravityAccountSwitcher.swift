@@ -79,6 +79,48 @@ struct AntigravityEnvironmentSummary: Equatable {
     let mcpConfigPath: String
     let activeAccountEmail: String?
     let activeStoragePath: String
+    let activeModel: String?
+    let thinkingEffort: String?
+    let executionPolicy: String?
+    let artifactReviewPolicy: String?
+    let securityMode: String?
+    let workspaceCount: Int
+
+    init(
+        isAppInstalled: Bool,
+        isAppRunning: Bool,
+        appVersion: String?,
+        mcpServerCount: Int,
+        skillCount: Int,
+        brainSessionCount: Int,
+        geminiRulesPath: String,
+        mcpConfigPath: String,
+        activeAccountEmail: String?,
+        activeStoragePath: String,
+        activeModel: String? = nil,
+        thinkingEffort: String? = nil,
+        executionPolicy: String? = nil,
+        artifactReviewPolicy: String? = nil,
+        securityMode: String? = nil,
+        workspaceCount: Int = 0
+    ) {
+        self.isAppInstalled = isAppInstalled
+        self.isAppRunning = isAppRunning
+        self.appVersion = appVersion
+        self.mcpServerCount = mcpServerCount
+        self.skillCount = skillCount
+        self.brainSessionCount = brainSessionCount
+        self.geminiRulesPath = geminiRulesPath
+        self.mcpConfigPath = mcpConfigPath
+        self.activeAccountEmail = activeAccountEmail
+        self.activeStoragePath = activeStoragePath
+        self.activeModel = activeModel
+        self.thinkingEffort = thinkingEffort
+        self.executionPolicy = executionPolicy
+        self.artifactReviewPolicy = artifactReviewPolicy
+        self.securityMode = securityMode
+        self.workspaceCount = workspaceCount
+    }
 
     static let empty = AntigravityEnvironmentSummary(
         isAppInstalled: false,
@@ -1688,7 +1730,8 @@ enum AntigravityAccountSwitcher {
     // MARK: - App & Environment Inspection
 
     static func inspectEnvironment(
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isRunningOverride: Bool? = nil
     ) -> AntigravityEnvironmentSummary {
         let fm = FileManager.default
         let appCandidates = [
@@ -1699,13 +1742,18 @@ enum AntigravityAccountSwitcher {
         let appVersion = installedAppPath
             .flatMap { Bundle(path: $0)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
 
-        #if canImport(AppKit)
-        let isRunning = NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+        let isRunning: Bool
+        if let isRunningOverride {
+            isRunning = isRunningOverride
+        } else {
+            #if canImport(AppKit)
+            isRunning = NSWorkspace.shared.runningApplications.contains {
+                $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+            }
+            #else
+            isRunning = false
+            #endif
         }
-        #else
-        let isRunning = false
-        #endif
 
         // Count MCP servers from ~/.gemini/antigravity/mcp_config.json or ~/.gemini/config/mcp_config.json
         let mcpCandidates = [
@@ -1759,6 +1807,8 @@ enum AntigravityAccountSwitcher {
                 ? "Keychain (gemini/antigravity)"
                 : "~/Library/Application Support/Antigravity/.../state.vscdb")
 
+        let runtime = inspectRuntimeAndWorkspaces(homeDirectory: homeDirectory)
+
         return AntigravityEnvironmentSummary(
             isAppInstalled: installedAppPath != nil,
             isAppRunning: isRunning,
@@ -1769,16 +1819,367 @@ enum AntigravityAccountSwitcher {
             geminiRulesPath: "\(homeDirectory)/.gemini/GEMINI.md",
             mcpConfigPath: mcpConfigPath,
             activeAccountEmail: activeAccountEmail,
-            activeStoragePath: activeStoragePath
+            activeStoragePath: activeStoragePath,
+            activeModel: runtime.model,
+            thinkingEffort: runtime.thinkingEffort,
+            executionPolicy: runtime.executionPolicy,
+            artifactReviewPolicy: runtime.artifactReviewPolicy,
+            securityMode: runtime.securityMode,
+            workspaceCount: runtime.workspaceCount
         )
     }
 
     static func inspectEnvironmentAsync(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) async -> AntigravityEnvironmentSummary {
-        await Task.detached(priority: .userInitiated) {
-            inspectEnvironment(homeDirectory: homeDirectory)
+        #if canImport(AppKit)
+        let isRunning = await MainActor.run {
+            NSWorkspace.shared.runningApplications.contains {
+                $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+            }
+        }
+        #else
+        let isRunning = false
+        #endif
+        return await Task.detached(priority: .userInitiated) {
+            inspectEnvironment(homeDirectory: homeDirectory, isRunningOverride: isRunning)
         }.value
+    }
+
+    private struct RuntimeTelemetry {
+        var model: String?
+        var thinkingEffort: String?
+        var executionPolicy: String?
+        var artifactReviewPolicy: String?
+        var securityMode: String?
+        var workspaceCount: Int = 0
+    }
+
+    private static func inspectRuntimeAndWorkspaces(homeDirectory: String) -> RuntimeTelemetry {
+        var result = RuntimeTelemetry()
+        let fm = FileManager.default
+
+        // 1. Read agentPreferences and recent paths from state.vscdb (strictly read-only)
+        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
+        var workspaces = Set<String>()
+        if fm.fileExists(atPath: dbPath), let db = openReadOnlySQLiteWithImmutableFallback(at: dbPath) {
+            defer { sqlite3_close(db) }
+            if let prefsB64 = queryItemValue(db: db, key: "antigravityUnifiedStateSync.agentPreferences") {
+                let prefs = parseAgentPreferencesProto(prefsB64)
+                result.executionPolicy = prefs.executionPolicy
+                result.artifactReviewPolicy = prefs.artifactReviewPolicy
+                result.securityMode = prefs.securityMode
+            }
+            if let historyJSON = queryItemValue(db: db, key: "history.recentlyOpenedPathsList"),
+               let data = historyJSON.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let entries = obj["entries"] as? [[String: Any]] {
+                for entry in entries {
+                    if let uri = (entry["folderUri"] as? String) ?? (entry["workspace"] as? [String: Any])?["configPath"] as? String {
+                        let normalized = normalizeWorkspaceEntry(uri)
+                        if !normalized.isEmpty { workspaces.insert(normalized) }
+                    }
+                }
+            }
+        }
+
+        // 2. Read unique workspace URIs & recent top-level conversation IDs from conversation_summaries.db (strictly read-only)
+        let summariesDBPath = "\(homeDirectory)/.gemini/antigravity/conversation_summaries.db"
+        var recentConversationIDs: [String] = []
+        if fm.fileExists(atPath: summariesDBPath), let db = openReadOnlySQLiteWithImmutableFallback(at: summariesDBPath) {
+            defer { sqlite3_close(db) }
+            var wsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT workspace_uris FROM conversation_summaries WHERE workspace_uris != '' AND workspace_uris != '[]'",
+                -1,
+                &wsStmt,
+                nil
+            ) == SQLITE_OK {
+                defer { sqlite3_finalize(wsStmt) }
+                while sqlite3_step(wsStmt) == SQLITE_ROW {
+                    guard let cStr = sqlite3_column_text(wsStmt, 0) else { continue }
+                    let raw = String(cString: cStr)
+                    if let data = raw.data(using: .utf8),
+                       let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                        for uri in arr {
+                            let normalized = normalizeWorkspaceEntry(uri)
+                            if !normalized.isEmpty { workspaces.insert(normalized) }
+                        }
+                    }
+                }
+            }
+
+            var recentStmt: OpaquePointer?
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT conversation_id FROM conversation_summaries WHERE nesting_depth = 0 ORDER BY last_modified_time DESC LIMIT 8",
+                -1,
+                &recentStmt,
+                nil
+            ) == SQLITE_OK {
+                defer { sqlite3_finalize(recentStmt) }
+                while sqlite3_step(recentStmt) == SQLITE_ROW {
+                    if let cStr = sqlite3_column_text(recentStmt, 0) {
+                        let id = String(cString: cStr).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !id.isEmpty { recentConversationIDs.append(id) }
+                    }
+                }
+            }
+        }
+
+        // Fallback workspace count from app_storage.json projectsOrder if needed
+        if workspaces.isEmpty,
+           let data = fm.contents(atPath: appStoragePath(homeDirectory: homeDirectory)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let projectsOrderRaw = obj["projectsOrder"] as? String,
+           let orderData = projectsOrderRaw.data(using: .utf8),
+           let orderArr = try? JSONSerialization.jsonObject(with: orderData) as? [String] {
+            for item in orderArr where !item.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                workspaces.insert(item)
+            }
+        }
+        result.workspaceCount = workspaces.count
+
+        // 3. Extract active model and thinking effort from recent conversation transcripts
+        let brainDir = "\(homeDirectory)/.gemini/antigravity/brain"
+        if recentConversationIDs.isEmpty, let items = try? fm.contentsOfDirectory(atPath: brainDir) {
+            let sorted = items
+                .filter { !$0.hasPrefix(".") }
+                .compactMap { id -> (String, Date)? in
+                    let logPath = "\(brainDir)/\(id)/.system_generated/logs/transcript.jsonl"
+                    guard let attrs = try? fm.attributesOfItem(atPath: logPath),
+                          let mod = attrs[.modificationDate] as? Date else { return nil }
+                    return (id, mod)
+                }
+                .sorted { $0.1 > $1.1 }
+                .prefix(6)
+                .map(\.0)
+            recentConversationIDs = Array(sorted)
+        }
+
+        for id in recentConversationIDs {
+            let logCandidates = [
+                "\(brainDir)/\(id)/.system_generated/logs/transcript.jsonl",
+                "\(brainDir)/\(id)/.system_generated/logs/transcript_full.jsonl"
+            ]
+            guard let logPath = logCandidates.first(where: { fm.fileExists(atPath: $0) }) else { continue }
+            if let (model, effort) = extractLatestModelAndEffort(fromTranscriptAt: logPath) {
+                result.model = model
+                result.thinkingEffort = effort
+                break
+            }
+        }
+
+        return result
+    }
+
+    private static func openReadOnlySQLiteWithImmutableFallback(at path: String) -> OpaquePointer? {
+        if let db = openSQLite(at: path, readonly: true) {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master LIMIT 1", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_finalize(stmt)
+                return db
+            }
+            sqlite3_close(db)
+        }
+        var components = URLComponents()
+        components.scheme = "file"
+        components.path = path
+        components.queryItems = [
+            URLQueryItem(name: "mode", value: "ro"),
+            URLQueryItem(name: "immutable", value: "1")
+        ]
+        guard let uri = components.string else { return nil }
+        var db: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
+        guard sqlite3_open_v2(uri, &db, flags, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }
+            return nil
+        }
+        return db
+    }
+
+    private static func normalizeWorkspaceEntry(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return url.standardizedFileURL.path
+        }
+        return (trimmed as NSString).standardizingPath
+    }
+
+    static func extractLatestModelAndEffort(fromTranscriptAt path: String) -> (model: String, effort: String?)? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let maxTailBytes: UInt64 = 256 * 1024
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        let startOffset = fileSize > maxTailBytes ? (fileSize - maxTailBytes) : 0
+        try? handle.seek(toOffset: startOffset)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        var latestModel: String?
+        var latestEffort: String?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.contains("<USER_SETTINGS_CHANGE>") else { continue }
+            guard let lineData = String(line).data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let content = obj["content"] as? String else { continue }
+            if let parsed = parseModelSelection(from: content) {
+                latestModel = parsed.model
+                latestEffort = parsed.effort
+            }
+        }
+        if let latestModel {
+            return (latestModel, latestEffort)
+        }
+        return nil
+    }
+
+    static func parseModelSelection(from content: String) -> (model: String, effort: String?)? {
+        let marker = "changed setting `Model Selection`"
+        guard let markerRange = content.range(of: marker, options: .backwards) else { return nil }
+        let tail = content[markerRange.upperBound...]
+        guard let toRange = tail.range(of: " to ") else { return nil }
+        let afterTo = tail[toRange.upperBound...]
+        var rawSegment = String(afterTo.prefix { $0 != "\n" && $0 != "\r" && $0 != "<" })
+        if let escapedNewline = rawSegment.range(of: "\\n") {
+            rawSegment = String(rawSegment[..<escapedNewline.lowerBound])
+        }
+        if let suffixRange = rawSegment.range(of: ". No need", options: [.caseInsensitive]) {
+            rawSegment = String(rawSegment[..<suffixRange.lowerBound])
+        }
+        var rawTarget = rawSegment.trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        guard !rawTarget.isEmpty, rawTarget.lowercased() != "none" else { return nil }
+
+        var effort: String?
+        if rawTarget.hasSuffix(")"),
+           let openParen = rawTarget.lastIndex(of: "("),
+           let closeParen = rawTarget.lastIndex(of: ")"),
+           openParen < closeParen {
+            let inside = rawTarget[rawTarget.index(after: openParen)..<closeParen]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !inside.isEmpty {
+                effort = inside.uppercased()
+            }
+            rawTarget = String(rawTarget[..<openParen]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        }
+        let normalizedModel = rawTarget
+            .lowercased()
+            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
+            .filter { !$0.isEmpty }
+            .joined(separator: "-")
+            .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        guard !normalizedModel.isEmpty,
+              normalizedModel != "unknown-model",
+              !normalizedModel.hasPrefix("model-placeholder") else { return nil }
+        return (normalizedModel, effort)
+    }
+
+    static func parseAgentPreferencesProto(_ base64String: String) -> (
+        executionPolicy: String?,
+        artifactReviewPolicy: String?,
+        securityMode: String?
+    ) {
+        let cleaned = base64String.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let outerData = Data(base64Encoded: cleaned) else {
+            return (nil, nil, nil)
+        }
+        var executionPolicy: String?
+        var artifactReviewPolicy: String?
+        var securityMode: String?
+
+        var offset = 0
+        while offset < outerData.count {
+            guard let (fieldNum, wireType, afterTag) = ProtobufCodec.decodeTag(outerData, offset: offset) else { break }
+            if fieldNum == 1, wireType == 2,
+               let range = ProtobufCodec.readLengthDelimitedRange(outerData, offset: afterTag) {
+                let entryData = outerData.subdata(in: range)
+                if let (key, innerVal) = parseSentinelEntry(entryData) {
+                    switch key {
+                    case "terminalAutoExecutionPolicySentinelKey":
+                        switch innerVal {
+                        case 1: executionPolicy = "always-proceed"
+                        case 2: executionPolicy = "request-review"
+                        case 3: executionPolicy = "strict"
+                        case 4: executionPolicy = "sandbox"
+                        default: break
+                        }
+                    case "artifactReviewPolicySentinelKey":
+                        switch innerVal {
+                        case 1: artifactReviewPolicy = "always-proceed"
+                        case 2: artifactReviewPolicy = "agent-decides"
+                        case 3: artifactReviewPolicy = "ask-review"
+                        default: break
+                        }
+                    case "secureModeSentinelKey":
+                        securityMode = (innerVal == 1) ? "secure-sandbox" : "standard"
+                    default:
+                        break
+                    }
+                }
+                offset = range.upperBound
+            } else if let next = ProtobufCodec.skipField(outerData, offset: afterTag, wireType: wireType) {
+                offset = next
+            } else {
+                break
+            }
+        }
+        return (executionPolicy, artifactReviewPolicy, securityMode)
+    }
+
+    private static func parseSentinelEntry(_ entryData: Data) -> (String, UInt64)? {
+        var offset = 0
+        var key: String?
+        var innerB64: String?
+        while offset < entryData.count {
+            guard let (fieldNum, wireType, afterTag) = ProtobufCodec.decodeTag(entryData, offset: offset) else { break }
+            if wireType == 2, let range = ProtobufCodec.readLengthDelimitedRange(entryData, offset: afterTag) {
+                let sub = entryData.subdata(in: range)
+                if fieldNum == 1 {
+                    key = String(data: sub, encoding: .utf8)
+                } else if fieldNum == 2 {
+                    // Field 2 is a nested message whose field 1 is the base64 sentinel payload
+                    var innerOffset = 0
+                    while innerOffset < sub.count {
+                        guard let (fNum, wType, aTag) = ProtobufCodec.decodeTag(sub, offset: innerOffset) else { break }
+                        if fNum == 1, wType == 2,
+                           let innerRange = ProtobufCodec.readLengthDelimitedRange(sub, offset: aTag) {
+                            innerB64 = String(data: sub.subdata(in: innerRange), encoding: .utf8)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            break
+                        } else if let next = ProtobufCodec.skipField(sub, offset: aTag, wireType: wType) {
+                            innerOffset = next
+                        } else {
+                            break
+                        }
+                    }
+                }
+                offset = range.upperBound
+            } else if let next = ProtobufCodec.skipField(entryData, offset: afterTag, wireType: wireType) {
+                offset = next
+            } else {
+                break
+            }
+        }
+        guard let resolvedKey = key,
+              let b64 = innerB64,
+              let valData = Data(base64Encoded: b64) else {
+            return nil
+        }
+        if valData.isEmpty { return (resolvedKey, 0) }
+        var valOffset = 0
+        while valOffset < valData.count {
+            guard let (_, wType, aTag) = ProtobufCodec.decodeTag(valData, offset: valOffset) else { break }
+            if wType == 0, let (num, _) = ProtobufCodec.readVarint(valData, offset: aTag) {
+                return (resolvedKey, num)
+            } else if let next = ProtobufCodec.skipField(valData, offset: aTag, wireType: wType) {
+                valOffset = next
+            } else {
+                break
+            }
+        }
+        return (resolvedKey, 0)
     }
 
     #if canImport(AppKit)

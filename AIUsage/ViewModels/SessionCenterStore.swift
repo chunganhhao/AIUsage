@@ -456,7 +456,9 @@ final class SessionCenterStore: ObservableObject {
     // MARK: Actions
 
     func resume(_ session: SessionSummary) async {
-        if let activity = session.activity, !confirmResumeWhileActive(session, activity: activity) { return }
+        if session.tool != .antigravity,
+           let activity = session.activity,
+           !confirmResumeWhileActive(session, activity: activity) { return }
         let plan: SessionResumePlan
         do {
             plan = try SessionResumePlan.make(for: session)
@@ -479,6 +481,98 @@ final class SessionCenterStore: ObservableObject {
             copyToPasteboard(plan.commandLine)
             show(.error(L("Couldn't open \(terminal.displayName). The resume command was copied.",
                           "无法打开 \(terminal.displayName)，已复制恢复命令。")))
+        }
+    }
+
+    func desktopAppInfo(for tool: SessionTool) -> (name: String, url: URL?) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        switch tool {
+        case .codex:
+            return ("Codex.app", ProviderActivationManager.resolveInstalledCodexAppURL(homeDirectory: home))
+        case .antigravity:
+            return (
+                "Antigravity.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["com.google.antigravity"],
+                    candidatePaths: ["/Applications/Antigravity.app", "\(home)/Applications/Antigravity.app"]
+                )
+            )
+        case .claude:
+            return (
+                "Claude.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["com.anthropic.claudefordesktop"],
+                    candidatePaths: ["/Applications/Claude.app", "\(home)/Applications/Claude.app"]
+                )
+            )
+        case .opencode:
+            return (
+                "OpenCode.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["ai.opencode.desktop", "com.opencode.desktop", "dev.opencode.desktop"],
+                    candidatePaths: ["/Applications/OpenCode.app", "\(home)/Applications/OpenCode.app"]
+                )
+            )
+        }
+    }
+
+    private static func resolveDesktopAppURL(bundleIds: [String], candidatePaths: [String]) -> URL? {
+        for bundleId in bundleIds {
+            if let runningURL = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+                .first(where: { !$0.isTerminated })?.bundleURL {
+                return runningURL
+            }
+            if let workspaceURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+                return workspaceURL
+            }
+        }
+        let fm = FileManager.default
+        for path in candidatePaths where fm.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    func openInDesktopApp(_ session: SessionSummary) async {
+        let app = desktopAppInfo(for: session.tool)
+        let plan: SessionResumePlan
+        do {
+            plan = try SessionResumePlan.make(for: session)
+        } catch SessionResumeError.directoryMissing {
+            show(.error(L("The project folder no longer exists, so this session can't be resumed.",
+                          "项目目录已不存在，无法继续这个会话。", key: "sessions.error.directory_missing")))
+            return
+        } catch {
+            show(.error(L("This session ID can't be resumed safely.", "会话 ID 格式异常，已停止继续。",
+                          key: "sessions.error.invalid_id")))
+            return
+        }
+        guard let appURL = app.url else {
+            show(.error(L("\(app.name) is not installed in /Applications.", "未在 /Applications 中安装 \(app.name)。")))
+            return
+        }
+        let folderURL = URL(fileURLWithPath: plan.directory)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        if let deepLinkURL = plan.desktopDeepLinkURL {
+            do {
+                _ = try await NSWorkspace.shared.open([deepLinkURL], withApplicationAt: appURL, configuration: configuration)
+                show(.success(L("Opened session in \(app.name)", "已在 \(app.name) 中打开该会话")))
+                return
+            } catch {
+                // Fall back to opening the workspace folder if the custom URL scheme fails.
+            }
+        }
+        do {
+            _ = try await NSWorkspace.shared.open([folderURL], withApplicationAt: appURL, configuration: configuration)
+            show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开")))
+        } catch {
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+                show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开")))
+            } catch {
+                show(.error(L("Couldn't open \(app.name).", "无法打开 \(app.name)。")))
+            }
         }
     }
 
