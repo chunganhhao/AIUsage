@@ -276,9 +276,34 @@ private func runHeadlessUIVerification() async throws {
     precondition(toolText.contains("Config Sets"), "Missing config sets surface")
     let (_, rtkVersions) = inspectOffscreen(RTKVersionsView(store: RTKVersionStore(home: toolHome, cellarRoots: [])).frame(width: 680), width: 680)
     precondition(rtkVersions.joined(separator: " | ").contains("RTK — Versions & rollback"), "Missing RTK version surface")
+    let (_, runtimeLabels) = inspectOffscreen(SubscriptionGatewaySettingsRuntimePane(runtime: CLIProxyRuntimeController(), draftSettings: .constant(.init()), onApply: {}, tokenSaverHome: toolHome).frame(width: 680), width: 680)
+    let runtimeText = runtimeLabels.joined(separator: " | ")
+    precondition(runtimeText.contains("Round robin") && runtimeText.contains("Fill first") && runtimeText.contains("Weekly reset first"), "All three routing strategies must be visible")
+    precondition(!runtimeText.contains("Codex Pool Protection") && !runtimeText.contains("Antigravity pool protection"), "Protection leaked into Runtime")
+    let (_, protectionLabels) = inspectOffscreen(SubscriptionGatewaySettingsProtectionPane(tokenSaverHome: toolHome).frame(width: 680), width: 680)
+    precondition(protectionLabels.joined(separator: " | ").contains("Codex Pool Protection"), "Missing dedicated protection controls")
+    try prepareLinkedMCPFixture(toolHome)
+    let (_, linkedLabels) = inspectOffscreen(AgentConfigToolsView(home: toolHome, platform: .antigravity).frame(width: 680), width: 680)
+    let linkedText = linkedLabels.joined(separator: " | ")
+    precondition(linkedText.contains("Read-only") && linkedText.contains("fixture-linked"), "Linked MCP config should remain visible as read-only")
+    precondition(!linkedText.contains("Token Saver will not replace"), "Read-only MCP is not a load failure")
+    print("PASS gateway UX: separate protection, three visible strategies, linked MCP read-only list (native SwiftUI/AX)")
+
     print("PASS master-plan SwiftUI/AX surfaces: warmup, environment, config sets and RTK versions (isolated)")
 
     print("PASS TokenSaverUIFixture headless verification (unconstrained <=420pt EN/ZH layout, real production .tokenSaver routing, timer cancellation/expiry on isolated NSPasteboard, Runtime & read-only Updates views)")
+}
+
+private func prepareLinkedMCPFixture(_ home: URL) throws {
+    let fm = FileManager.default
+    let config = home.appendingPathComponent(".gemini/antigravity/mcp_config.json")
+    let source = home.appendingPathComponent(".gemini/config/mcp_config.json")
+    try fm.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try fm.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if !fm.fileExists(atPath: config.path) {
+        try Data(#"{"mcpServers":{"fixture-linked":{"command":"/usr/bin/true"}}}"#.utf8).write(to: source)
+        try fm.createSymbolicLink(at: config, withDestinationURL: source)
+    }
 }
 
 struct TokenSaverUIFixtureApp: App {
@@ -302,6 +327,10 @@ struct TokenSaverUIFixtureApp: App {
                     }
                 }
                     .tabItem { Text("Updates (offline fixtures)") }.tag(2)
+                ScrollView { SubscriptionGatewaySettingsProtectionPane(tokenSaverHome: fixtureHome()).padding(20) }
+                    .tabItem { Text("Pool Protection") }.tag(3)
+                ScrollView { AgentConfigToolsView(home: fixtureHome(), platform: .antigravity).padding(20) }
+                    .tabItem { Text("Linked MCP (read-only)") }.tag(4)
             }
             .padding(20).frame(minWidth:760,minHeight:920)
             .onAppear { NSApp.activate(ignoringOtherApps:true) }
@@ -316,6 +345,7 @@ struct TokenSaverUIFixtureEntry {
             try await runHeadlessUIVerification()
             return
         }
+        try prepareLinkedMCPFixture(fixtureHome())
         TokenSaverUIFixtureApp.main()
     }
 }

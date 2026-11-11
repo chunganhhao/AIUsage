@@ -586,16 +586,30 @@ final class ProviderActivationManager: ObservableObject {
         fallbackEntry: ProviderAccountEntry? = nil,
         timeoutSeconds: TimeInterval = 6.0,
         pollIntervalMilliseconds: Int = 150
-    ) async -> Bool {
-        guard !isCodexRestarting else { return false }
+    ) async throws {
+        let startedAt = Date()
+        func phase(_ stage: String) {
+            providerActivationLog.info("Codex restart phase=\(stage, privacy: .public)")
+        }
+        func failure(_ stage: String, _ en: String, _ zh: String, underlying: Error? = nil) -> ProviderError {
+            let elapsed = Date().timeIntervalSince(startedAt)
+            // Only numeric OS codes are logged; auth errors can contain credential material.
+            let systemCode = underlying.map { ($0 as NSError).code } ?? 0
+            providerActivationLog.error("Codex restart failed phase=\(stage, privacy: .public) elapsed=\(elapsed, privacy: .public)s systemCode=\(systemCode, privacy: .public)")
+            return ProviderError("codex_restart_" + stage, settings.t(en, zh))
+        }
+        guard !isCodexRestarting else {
+            throw failure("busy", "Codex restart is already in progress.", "Codex 正在重启，请等待完成。")
+        }
         isCodexRestarting = true
         defer { isCodexRestarting = false }
 
         codexGlobalStateReconcileTask?.cancel()
         codexGlobalStateReconcileTask = nil
 
+        phase("resolve_app")
         guard let appURL = Self.resolveInstalledCodexAppURL() else {
-            return false
+            throw failure("resolve_app", "Could not locate the installed Codex app.", "找不到已安装的 Codex 应用。")
         }
 
         let checkRunning: () -> Bool = {
@@ -606,18 +620,23 @@ final class ProviderActivationManager: ObservableObject {
         if checkRunning() {
             let apps = NSRunningApplication.runningApplications(withBundleIdentifier: Self.codexBundleIdentifier)
                 .filter { !$0.isTerminated }
+            phase("request_quit")
             let accepted = apps.allSatisfy { $0.terminate() }
-            guard accepted else { return false }
+            guard accepted else {
+                throw failure("request_quit", "Codex did not accept the quit request. Check it for an open dialog or unfinished action.", "Codex 未接受退出请求，请检查是否有对话框或未完成的操作。")
+            }
+            phase("wait_for_quit")
 
             let deadline = Date().addingTimeInterval(timeoutSeconds)
             while Date() < deadline && checkRunning() {
                 try? await Task.sleep(for: .milliseconds(pollIntervalMilliseconds))
             }
             guard !checkRunning() else {
-                return false
+                throw failure("wait_for_quit", "Timed out waiting for Codex to quit. It may still be closing; no new instance was opened.", "等待 Codex 退出超时。它可能仍在关闭，尚未启动新实例。")
             }
         }
 
+        phase("wait_for_helpers")
         let appBundlePath = appURL.path
         let pollNs = UInt64(max(10, pollIntervalMilliseconds)) * 1_000_000
         let helpersExited = await Task.detached(priority: .userInitiated) { () -> Bool in
@@ -635,22 +654,24 @@ final class ProviderActivationManager: ObservableObject {
             return !Self.isCodexChildHelperRunning(appBundlePath: appBundlePath)
         }.value
         guard helpersExited else {
-            return false
+            throw failure("wait_for_helpers", "Codex quit, but its CLI helpers have not exited. Relaunch was stopped to protect account state.", "Codex 已退出，但 CLI 辅助进程尚未结束。为保护账号状态，已停止重新启动。")
         }
 
+        phase("reapply_account")
         do {
             try await reapplyCodexAccountForRestart(fallbackEntry: fallbackEntry)
         } catch {
-            return false
+            throw failure("reapply_account", "Codex quit, but the selected account could not be reapplied safely. Reconnect or select the account again before retrying.", "Codex 已退出，但无法安全重新应用所选账号。请重新连接或选择账号后重试。", underlying: error)
         }
 
+        phase("launch_app")
         let config = NSWorkspace.OpenConfiguration()
         config.activates = true
         do {
             _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: config)
-            return true
+            phase("completed")
         } catch {
-            return false
+            throw failure("launch_app", "Account preparation completed, but macOS could not reopen Codex. Try opening the app manually.", "账号准备完成，但 macOS 无法重新打开 Codex。请尝试手动打开应用。", underlying: error)
         }
     }
 

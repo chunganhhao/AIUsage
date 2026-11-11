@@ -116,22 +116,28 @@ struct AgentConfigToolsView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack {
-                Text("Config Sets · MCP & Skills").font(.headline)
+                Text("Config Sets: MCP & Skills").font(.headline)
                 Spacer()
                 Button("Refresh health") { reload() }
             }
             Text("\(platform.rawValue.capitalized) only. Static health checks never execute MCP commands. Saved sets contain names/on-off flags, not keys. Restart the agent to reload configuration.")
                 .font(.caption).foregroundStyle(.secondary)
+            if store.isConfigReadOnly {
+                Label("Linked MCP config — Read-only. Edit the shared source file to change servers.", systemImage: "link")
+                    .font(.caption).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("mcp-config-read-only")
+            }
             HStack {
                 TextField("Coding / RonC Media / Minimal", text: $profileName)
                 Button("Save current set") { perform { try sets.saveCurrent(name: profileName) } }
             }
             ForEach(profiles) { profile in
-                HStack { Text(profile.name); Spacer(); Button("Apply set") { perform { try sets.apply(profile) } } }
+                HStack { Text(profile.name); Spacer(); Button("Apply set") { perform { try sets.apply(profile) } }.disabled(store.isConfigReadOnly) }
             }
             ForEach(servers) { item in
                 HStack {
                     Toggle(item.name, isOn: Binding(get: { item.enabled }, set: { enabled in perform { try store.setEnabled(item.name, enabled: enabled) } }))
+                        .disabled(store.isConfigReadOnly)
                     if let health = item.health { Text(health).font(.caption).foregroundStyle(.orange) }
                     if item.canAuthorizeKeychain {
                         Button("Check Keychain access…") {
@@ -143,7 +149,7 @@ struct AgentConfigToolsView: View {
                                     reload(); keychainNotice = "Keychain reader access checked. No MCP command was started."
                                 } catch { self.error = error.localizedDescription }
                             }
-                        }.disabled(checkingKeychain)
+                        }.disabled(checkingKeychain || store.isConfigReadOnly)
                     }
                 }
             }
@@ -169,10 +175,11 @@ struct AgentConfigToolsView: View {
                         }
                         Text(preview.map(\.name).joined(separator: ", ")).font(.caption)
                         Spacer()
-                        Button("Import to \(platform.rawValue.capitalized)") { confirmImport = true }.disabled(preview.isEmpty)
+                        Button("Import to \(platform.rawValue.capitalized)") { confirmImport = true }.disabled(preview.isEmpty || store.isConfigReadOnly)
                     }
                 }
             }
+            .disclosureGroupStyle(FullRowDisclosureStyle())
             if let keychainNotice { Text(keychainNotice).font(.caption).foregroundStyle(.secondary) }
             if let error { Text(error).font(.caption).foregroundStyle(.red).textSelection(.enabled) }
         }.onAppear { reload() }
@@ -185,8 +192,15 @@ struct AgentConfigToolsView: View {
         if panel.runModal() == .OK, let url = panel.url { perform { try sets.repairSkill(name, target: url) } }
     }
     private func reload() {
-        do { servers = try store.items(path: aiusageDefaultCLIPath()); skills = try sets.skills(); profiles = try sets.profiles(); error = nil }
-        catch { self.error = error.localizedDescription }
+        var failures: [String] = []
+        servers = []; skills = []; profiles = []
+        do { servers = try store.items(path: aiusageDefaultCLIPath()) }
+        catch { failures.append("MCP: " + error.localizedDescription) }
+        do { skills = try sets.skills() }
+        catch { failures.append("Skills: " + error.localizedDescription) }
+        do { profiles = try sets.profiles() }
+        catch { failures.append("Config sets: " + error.localizedDescription) }
+        error = failures.isEmpty ? nil : failures.joined(separator: "\n")
     }
     private func perform(_ action: () throws -> Void) {
         do { try action(); reload() } catch { self.error = error.localizedDescription }

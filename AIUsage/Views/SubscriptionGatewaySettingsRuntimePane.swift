@@ -16,9 +16,6 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     var tokenSaverRTK: TokenSaverReleaseRTK = .init()
 
     @State private var showAdvanced = false
-    @State private var poolProtectionEnabled = false
-    @State private var poolProtectionError: String?
-    @State private var poolProtectionResidual = false
 
     private var hasUnappliedChanges: Bool {
         draftSettings.normalized != runtime.settings.normalized
@@ -33,11 +30,6 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 14) {
                     header
-                    poolProtectionSection
-                    GatewayCard { CodexPoolProtectionControls(home: tokenSaverHome) }
-
-                    DisclosureGroup("Agent tools · Warmup, Config Sets & Environment") { AgentToolsSettingsView(home: tokenSaverHome) }
-
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
                             groupLabel(L("General", "常规"))
@@ -115,6 +107,12 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                         }
                     }
 
+                    DisclosureGroup("Agent tools: Warmup, Config Sets & Environment") {
+                        AgentToolsSettingsView(home: tokenSaverHome)
+                    }
+                    .disclosureGroupStyle(FullRowDisclosureStyle())
+                    .accessibilityIdentifier("gateway-agent-tools")
+
                     DisclosureGroup(isExpanded: $showAdvanced) {
                         VStack(spacing: 0) {
                             advancedNumberRow(
@@ -154,6 +152,7 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                         Text(L("Advanced", "高级"))
                             .font(.subheadline.weight(.semibold))
                     }
+                    .disclosureGroupStyle(FullRowDisclosureStyle())
                     .padding(.horizontal, 4)
                     .padding(.bottom, 28)
                 }
@@ -163,78 +162,6 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 stickyApplyBar
             }
         }
-    }
-
-    private var poolProtectionSection: some View {
-        GatewayCard {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 8) {
-                    Text(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
-                        .font(.subheadline.weight(.medium))
-                    poolProtectionBadge
-                    Spacer(minLength: 12)
-                    Toggle("", isOn: Binding(
-                        get: { poolProtectionEnabled },
-                        set: { enabled in
-                            do {
-                                try AntigravityPoolProtectionSettings.setEnabled(enabled, homeDirectory: tokenSaverHome.path)
-                                reloadPoolProtectionState()
-                            } catch {
-                                poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
-                                poolProtectionResidual = (try? AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)) ?? poolProtectionResidual
-                                poolProtectionError = L("Could not update protection. Check the CPA version, model exclusions and file permissions.", "无法更新保护设置，请检查 CPA 版本、模型排除规则和文件权限。")
-                            }
-                        }
-                    ))
-                    .labelsHidden()
-                    .toggleStyle(SwitchToggleStyle(tint: .purple))
-                    .controlSize(.small)
-                    .tint(.purple)
-                    .accessibilityLabel(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
-                    .accessibilityIdentifier("antigravity-pool-protection")
-                }
-                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
-                    .font(.caption).foregroundStyle(.secondary)
-                AntigravityPerPoolControls(home: tokenSaverHome)
-                if !poolProtectionEnabled, poolProtectionResidual {
-                    Text(L("Off—previous protection exclusions remain", "已关闭，但之前的保护排除规则仍然存在"))
-                        .font(.caption).foregroundStyle(.orange)
-                        .accessibilityIdentifier("pool-protection-residual")
-                    Button(L("Restore previous exclusions", "恢复之前的排除规则")) {
-                        do {
-                            try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: tokenSaverHome.path)
-                            reloadPoolProtectionState()
-                        } catch {
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                    .accessibilityIdentifier("pool-protection-restore")
-                }
-                if let poolProtectionError { Text(poolProtectionError).font(.caption).foregroundStyle(.red) }
-            }
-        }
-        .onAppear { reloadPoolProtectionState() }
-    }
-
-    @ViewBuilder
-    private var poolProtectionBadge: some View {
-        if poolProtectionError != nil {
-            TokenSaverStatusBadge(text: L("Issue", "异常"), tone: .danger, id: "pool-protection-badge")
-        } else if poolProtectionEnabled {
-            TokenSaverStatusBadge(text: L("Enabled", "已启用"), tone: .active, id: "pool-protection-badge")
-        } else if poolProtectionResidual {
-            TokenSaverStatusBadge(text: L("Off · Residual rules", "已关闭 · 存在残留规则"), tone: .warning, id: "pool-protection-badge")
-        } else {
-            TokenSaverStatusBadge(text: L("Off", "已关闭"), tone: .neutral, id: "pool-protection-badge")
-        }
-    }
-
-    private func reloadPoolProtectionState() {
-        poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
-        do {
-            poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)
-            poolProtectionError = nil
-        } catch { poolProtectionError = error.localizedDescription }
     }
 
     private var header: some View {
@@ -309,19 +236,14 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
     }
 
     private var compactPickerRow: some View {
-        HStack {
-            Text(L("Strategy", "策略"))
-                .font(.subheadline.weight(.medium))
-            Spacer()
-            Picker("", selection: $draftSettings.routingStrategy) {
-                Text(L("Round robin", "轮询")).tag(CLIProxyRoutingStrategy.roundRobin)
-                Text(L("Fill first", "优先用满")).tag(CLIProxyRoutingStrategy.fillFirst)
-                Text(L("Earliest Weekly Reset First", "最早每周重置优先")).tag(CLIProxyRoutingStrategy.earliestWeeklyReset)
-            }
-            .labelsHidden()
-            .pickerStyle(.menu)
-            .frame(maxWidth: 280)
+        Picker(L("Strategy", "策略"), selection: $draftSettings.routingStrategy) {
+            Text(L("Round robin", "轮询")).tag(CLIProxyRoutingStrategy.roundRobin)
+            Text(L("Fill first", "优先用满")).tag(CLIProxyRoutingStrategy.fillFirst)
+            Text(L("Weekly reset first", "每周重置优先")).tag(CLIProxyRoutingStrategy.earliestWeeklyReset)
         }
+        .labelsHidden()
+        .pickerStyle(.segmented)
+        .accessibilityIdentifier("gateway-routing-strategy")
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
     }
@@ -1021,4 +943,92 @@ final class TokenSaverSettingsController: ObservableObject {
         }
         await waitForPendingInspection()
     }
+}
+
+// Pool settings apply independently of the Runtime draft/apply lifecycle.
+struct SubscriptionGatewaySettingsProtectionPane: View {
+    var tokenSaverHome: URL = FileManager.default.homeDirectoryForCurrentUser
+    @State private var poolProtectionEnabled = false
+    @State private var poolProtectionError: String?
+    @State private var poolProtectionResidual = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(L("Pool Protection", "账号池保护")).font(.title3.weight(.semibold))
+            poolProtectionSection
+            GatewayCard { CodexPoolProtectionControls(home: tokenSaverHome) }
+        }
+    }
+
+    private var poolProtectionSection: some View {
+        GatewayCard {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
+                        .font(.subheadline.weight(.medium))
+                    poolProtectionBadge
+                    Spacer(minLength: 12)
+                    Toggle("", isOn: Binding(
+                        get: { poolProtectionEnabled },
+                        set: { enabled in
+                            do {
+                                try AntigravityPoolProtectionSettings.setEnabled(enabled, homeDirectory: tokenSaverHome.path)
+                                reloadPoolProtectionState()
+                            } catch {
+                                poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
+                                poolProtectionResidual = (try? AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)) ?? poolProtectionResidual
+                                poolProtectionError = L("Could not update protection. Check the CPA version, model exclusions and file permissions.", "无法更新保护设置，请检查 CPA 版本、模型排除规则和文件权限。")
+                            }
+                        }
+                    ))
+                    .labelsHidden()
+                    .toggleStyle(SwitchToggleStyle(tint: .accentColor))
+                    .controlSize(.small)
+                    .tint(.accentColor)
+                    .accessibilityLabel(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
+                    .accessibilityIdentifier("antigravity-pool-protection")
+                }
+                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
+                    .font(.caption).foregroundStyle(.secondary)
+                AntigravityPerPoolControls(home: tokenSaverHome)
+                if !poolProtectionEnabled, poolProtectionResidual {
+                    Text(L("Off—previous protection exclusions remain", "已关闭，但之前的保护排除规则仍然存在"))
+                        .font(.caption).foregroundStyle(.orange)
+                        .accessibilityIdentifier("pool-protection-residual")
+                    Button(L("Restore previous exclusions", "恢复之前的排除规则")) {
+                        do {
+                            try AntigravityPoolProtectionSettings.restorePreviousExclusions(homeDirectory: tokenSaverHome.path)
+                            reloadPoolProtectionState()
+                        } catch {
+                            poolProtectionError = error.localizedDescription
+                        }
+                    }
+                    .accessibilityIdentifier("pool-protection-restore")
+                }
+                if let poolProtectionError { Text(poolProtectionError).font(.caption).foregroundStyle(.red) }
+            }
+        }
+        .onAppear { reloadPoolProtectionState() }
+    }
+
+    @ViewBuilder
+    private var poolProtectionBadge: some View {
+        if poolProtectionError != nil {
+            TokenSaverStatusBadge(text: L("Issue", "异常"), tone: .danger, id: "pool-protection-badge")
+        } else if poolProtectionEnabled {
+            TokenSaverStatusBadge(text: L("Enabled", "已启用"), tone: .active, id: "pool-protection-badge")
+        } else if poolProtectionResidual {
+            TokenSaverStatusBadge(text: L("Off · Residual rules", "已关闭 · 存在残留规则"), tone: .warning, id: "pool-protection-badge")
+        } else {
+            TokenSaverStatusBadge(text: L("Off", "已关闭"), tone: .neutral, id: "pool-protection-badge")
+        }
+    }
+
+    private func reloadPoolProtectionState() {
+        poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)
+        do {
+            poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: tokenSaverHome.path)
+            poolProtectionError = nil
+        } catch { poolProtectionError = error.localizedDescription }
+    }
+
 }

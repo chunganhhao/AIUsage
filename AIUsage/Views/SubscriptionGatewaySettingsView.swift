@@ -6,6 +6,7 @@ import QuotaBackend
 
 private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     case runtime
+    case poolProtection
     case tokenSaver
     case keys
     case updates
@@ -17,6 +18,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var title: String {
         switch self {
         case .runtime: return L("Runtime", "运行")
+        case .poolProtection: return L("Pool Protection", "账号池保护")
         case .tokenSaver: return L("Token Saver", "Token 节省")
         case .keys: return L("API Keys", "密钥")
         case .updates: return L("Updates", "更新")
@@ -28,6 +30,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .runtime: return "gearshape"
+        case .poolProtection: return "shield.lefthalf.filled"
         case .tokenSaver: return "bolt.fill"
         case .keys: return "key.fill"
         case .updates: return "arrow.down.circle"
@@ -39,6 +42,7 @@ private enum GatewaySettingsCategory: String, CaseIterable, Identifiable {
     var color: Color {
         switch self {
         case .runtime: return .gray
+        case .poolProtection: return .accentColor
         case .tokenSaver: return .purple
         case .keys: return .indigo
         case .updates: return .blue
@@ -164,6 +168,13 @@ struct SubscriptionGatewaySettingsView: View {
             .padding(.horizontal, 22)
             .padding(.top, 18)
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        case .poolProtection:
+            ScrollView {
+                SubscriptionGatewaySettingsProtectionPane()
+                    .padding(22)
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .frame(maxWidth: .infinity, alignment: .topLeading)
+            }
         case .tokenSaver:
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {

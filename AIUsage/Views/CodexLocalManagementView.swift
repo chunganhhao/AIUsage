@@ -443,14 +443,21 @@ struct CodexLocalManagementView: View {
         isRestartingCodex = true
         Task { @MainActor in
             let fallbackEntry = self.activeEntry
-            let ok = await activation.restartCodexApp(fallbackEntry: fallbackEntry)
+            let message: String
+            let failed: Bool
+            do {
+                try await activation.restartCodexApp(fallbackEntry: fallbackEntry)
+                message = L("Codex.app restarted with the active account.", "Codex.app 已使用当前激活账号重启。")
+                failed = false
+            } catch {
+                message = error.localizedDescription
+                failed = true
+            }
             isRestartingCodex = false
             refreshEnvironment()
             withAnimation(.easeInOut(duration: 0.2)) {
-                statusBannerIsError = !ok
-                statusBannerMessage = ok
-                    ? L("Codex.app restarted with the active account.", "Codex.app 已使用当前激活账号重启。")
-                    : L("Could not restart Codex.app automatically. Please reopen it manually.", "无法自动重启 Codex.app，请手动重新打开。")
+                statusBannerIsError = failed
+                statusBannerMessage = message
             }
         }
     }

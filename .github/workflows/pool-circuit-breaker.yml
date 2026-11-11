@@ -37,3 +37,4 @@ jobs:
           bash scripts/run_pool_circuit_breaker_regression.sh
           bash scripts/run_master_plan_regression.sh
           bash scripts/run_codex_pool_recovery_regression.sh
+          bash scripts/run_codex_restart_diagnostics_regression.sh

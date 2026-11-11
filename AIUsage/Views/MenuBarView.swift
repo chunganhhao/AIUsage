@@ -257,8 +257,15 @@ struct MenuBarView: View {
         isConfirmingRestart = true
         Task { @MainActor in
             let ok: Bool
+            var restartFailure: String?
             if prompt.providerId == "codex" {
-                ok = await ProviderActivationManager.shared.restartCodexApp(fallbackEntry: prompt.entry)
+                do {
+                    try await ProviderActivationManager.shared.restartCodexApp(fallbackEntry: prompt.entry)
+                    ok = true
+                } catch {
+                    ok = false
+                    restartFailure = error.localizedDescription
+                }
             } else {
                 ok = await ProviderActivationManager.shared.restartAntigravityApp(fallbackEntry: prompt.entry)
             }
@@ -272,7 +279,7 @@ struct MenuBarView: View {
                         "\(prompt.appDisplayName) 已使用 \(prompt.accountLabel) 重启"
                     )
                 } else {
-                    activationMessage = L(
+                    activationMessage = restartFailure ?? L(
                         "Could not restart \(prompt.appDisplayName) automatically. Please reopen it manually.",
                         "无法自动重启 \(prompt.appDisplayName)，请手动重新打开。"
                     )

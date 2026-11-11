@@ -161,6 +161,29 @@ private actor Attempts {
             do { try store.importServers([server]) } catch { duplicate = true }
             try check(duplicate, "never overwrite existing MCP")
         }
+        for platform in AgentMCPStore.Platform.allCases {
+            let linked = AgentMCPStore(home: home, platform: platform, vault: vault.service)
+            let target = linked.configURL.appendingPathExtension("shared")
+            try FileManager.default.moveItem(at: linked.configURL, to: target)
+            try FileManager.default.createSymbolicLink(at: linked.configURL, withDestinationURL: target)
+            let bytes = try Data(contentsOf: target)
+            try check(linked.isConfigReadOnly, "linked config is explicitly read-only")
+            try check(try linked.items().first?.name == "demo", "linked config remains inspectable")
+            var blockedToggle = false
+            do { try linked.setEnabled("demo", enabled: false) } catch { blockedToggle = true }
+            var blockedImport = false
+            do { try linked.importServers([.init(name: "linked-new", command: "/usr/bin/true")]) } catch { blockedImport = true }
+            try check(blockedToggle && blockedImport, "linked MCP writes remain refused")
+            try check(try Data(contentsOf: target) == bytes, "linked source bytes unchanged")
+            try check(try FileManager.default.destinationOfSymbolicLink(atPath: linked.configURL.path) == target.path, "linked config never replaced")
+            try FileManager.default.removeItem(at: linked.configURL)
+            try FileManager.default.moveItem(at: target, to: linked.configURL)
+            try check(!linked.isConfigReadOnly, "ordinary config remains editable")
+        }
+        let agySkills = AgentMCPStore(home: home, platform: .antigravity, vault: vault.service)
+        try check(agySkills.skillsURL.path.hasSuffix(".gemini/antigravity/global_skills"), "AGY manages its actual native global skills directory")
+        try write("---\nname: agy-native\n---\n", agySkills.skillsURL.appendingPathComponent("agy-native/SKILL.md"))
+        try check(try AgentConfigProfiles(mcp: agySkills).skills().first?.name == "agy-native", "native AGY skills visible")
         let codex = AgentMCPStore(home: home, platform: .codex, vault: vault.service)
         try write("# preserve\n[mcp_servers.demo]\ncommand = \"/usr/bin/env\"\nenabled = false\n[mcp_servers.demo.http_headers]\nX-Test = \"header\"\n[features]\nkeep = true\n", codex.configURL)
         try check(try codex.items().map(\.name) == ["demo"], "MCP subtables grouped under parent")

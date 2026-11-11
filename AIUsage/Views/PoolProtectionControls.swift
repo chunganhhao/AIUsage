@@ -9,6 +9,8 @@ struct CodexPoolProtectionControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Toggle("Codex Pool Protection (opt-in)", isOn: Binding(get: { enabled }, set: { save($0, threshold) }))
+                .toggleStyle(.switch)
+                .tint(.accentColor)
                 .accessibilityIdentifier("codex-pool-protection")
             Picker("Pause threshold", selection: Binding(get: { threshold }, set: { save(enabled, $0) })) {
                 ForEach([1.0, 3.0, 5.0], id: \.self) { Text("\(Int($0))%").tag($0) }
@@ -100,5 +102,29 @@ struct RTKVersionsView: View {
     private func perform(_ action: () throws -> Void) {
         do { try action(); versions = try store.versions(); failure = nil }
         catch { failure = error.localizedDescription }
+    }
+}
+
+// Native disclosure semantics with one keyboard-focusable, full-width hit target.
+struct FullRowDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Button {
+                configuration.isExpanded.toggle()
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.weight(.semibold))
+                        .accessibilityHidden(true)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            if configuration.isExpanded { configuration.content }
+        }
     }
 }

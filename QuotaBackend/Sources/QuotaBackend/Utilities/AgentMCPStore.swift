@@ -54,7 +54,7 @@ public struct AgentMCPStore {
     public var configURL: URL {
         home.appendingPathComponent(platform == .codex ? ".codex/config.toml" : platform == .antigravity ? ".gemini/antigravity/mcp_config.json" : ".claude.json")
     }
-    public var skillsURL: URL { home.appendingPathComponent(platform == .codex ? ".codex/skills" : platform == .antigravity ? ".gemini/antigravity/skills" : ".claude/skills") }
+    public var skillsURL: URL { home.appendingPathComponent(platform == .codex ? ".codex/skills" : platform == .antigravity ? ".gemini/antigravity/global_skills" : ".claude/skills") }
     public init(home: URL = FileManager.default.homeDirectoryForCurrentUser, platform: Platform, vault: MCPSecretVault = .keychain) { self.home = home; self.platform = platform; self.vault = vault }
     public enum Failure: LocalizedError {
         case invalid(String)
@@ -181,8 +181,15 @@ public struct AgentMCPStore {
         }
         return result
     }
-    private func readConfig() throws -> Data {
-        try TokenSaverSettingsStore.rejectSymlinks(configURL)
+    public var isConfigReadOnly: Bool {
+        do { try TokenSaverSettingsStore.rejectSymlinks(configURL); return false }
+        catch { return true }
+    }
+    private func readConfig(inspecting: Bool = false) throws -> Data {
+        if !inspecting { try TokenSaverSettingsStore.rejectSymlinks(configURL) }
+        if inspecting, (try? FileManager.default.destinationOfSymbolicLink(atPath: configURL.path)) != nil {
+            return try Data(contentsOf: configURL)
+        }
         return FileManager.default.fileExists(atPath: configURL.path) ? try Data(contentsOf: configURL) : Data((platform == .codex ? "" : "{}").utf8)
     }
     private func records(_ data: Data) throws -> [String: String] {
@@ -245,7 +252,7 @@ public struct AgentMCPStore {
         return (command.map { Server(name: name, command: $0, env: env) }, remote)
     }
     public func items(path: String = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin") throws -> [Item] {
-        let active = try records(readConfig()); let names = Set(active.keys).union(try disabledNames())
+        let active = try records(readConfig(inspecting: true)); let names = Set(active.keys).union(try disabledNames())
         return names.sorted().map { name in
             let enabled = active[name].map { record in
                 if platform == .codex { return Self.codexEnabled(record) }
