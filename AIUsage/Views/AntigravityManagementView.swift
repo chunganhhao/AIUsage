@@ -88,6 +88,7 @@ struct AntigravityManagementView: View {
                 }
                 summaryStrip
                 poolProtectionCard
+                GatewayCard { AgentConfigToolsView(platform: .antigravity) }
                 tokenSaverCard
                 AntigravitySubscriptionSection(
                     entries: antigravityEntries,
@@ -538,6 +539,7 @@ struct AntigravityManagementView: View {
                 .tint(.purple)
             }
 
+            AntigravityPerPoolControls()
             if !poolProtectionEnabled && poolProtectionResidual {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -721,7 +723,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.rtkEnabled },
                     set: { val in tokenSaver.mutate { $0.rtkEnabled = val } }
                 )) {
-                    Text("RTK CLI")
+                    Text("RTK — CLI Wrapper")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)
@@ -731,7 +733,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.cavemanEnabled },
                     set: { val in tokenSaver.mutate { $0.cavemanEnabled = val } }
                 )) {
-                    Text("Caveman")
+                    Text("Caveman — Concise Replies")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)
@@ -753,7 +755,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.ponytailEnabled },
                     set: { val in tokenSaver.mutate { $0.ponytailEnabled = val } }
                 )) {
-                    Text("Ponytail")
+                    Text("Ponytail — Minimal Code")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)

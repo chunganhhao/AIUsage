@@ -1,3 +1,4 @@
+import QuotaBackend
 import Foundation
 
 nonisolated struct CLIProxyConfigStore {
@@ -27,6 +28,10 @@ nonisolated struct CLIProxyConfigStore {
             let data = try JSONEncoder.pretty.encode(StateFile(version: 1, settings: settings.normalized))
             try data.write(to: paths.stateURL, options: [.atomic])
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.stateURL.path)
+            // Publish Off before cleanup so queued background workers cannot reapply the overlay.
+            if settings.routingStrategy != .earliestWeeklyReset {
+                try WeeklyResetPriority.sync(authDirectory: paths.authDirectory, enabled: false, observations: [])
+            }
         } catch {
             throw CLIProxyGatewayError.configuration(error.localizedDescription)
         }
@@ -103,7 +108,7 @@ nonisolated struct CLIProxyConfigStore {
             try document.setNestedScalar(
                 section: "routing",
                 key: "strategy",
-                value: yamlQuoted(value.routingStrategy.rawValue)
+                value: yamlQuoted(value.routingStrategy.cpaValue)
             )
             // 以下不是「额外补丁策略」，而是 CPA 自己的故障转移旋钮。
             // fill-first/round-robin 只决定「先挑谁」；429 后能否换号还依赖：

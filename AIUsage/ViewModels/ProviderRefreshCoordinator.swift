@@ -11,7 +11,9 @@ internal let providerRefreshLog = Logger(subsystem: "com.aiusage.desktop", categ
 final class ProviderRefreshCoordinator: ObservableObject {
     static let shared = ProviderRefreshCoordinator()
 
-    @Published var providers: [ProviderData] = []
+    @Published var providers: [ProviderData] = [] {
+        didSet { syncWeeklyResetPriorities() }
+    }
     @Published var overview: DashboardOverview?
     @Published var isLoading = true
     /// 是否完成过首次全量刷新。用于区分「首次加载中（还没拿到任何网络数据）」与
@@ -31,6 +33,9 @@ final class ProviderRefreshCoordinator: ObservableObject {
     private var refreshTimer: Timer?
     private var claudeCodeRefreshTimer: Timer?
     private var callAnalyticsSyncTimer: Timer?
+    private var warmupTimer: Timer?
+    private var weeklyResetSyncTask: Task<Void, Never>?
+    private let weeklyResetWorker = WeeklyResetPriorityWorker()
     private var isCodexFullHistoryRefreshInProgress = false
 
     /// Used by toolbar / menu bar "Refresh All" buttons to decide between the
@@ -63,6 +68,12 @@ final class ProviderRefreshCoordinator: ObservableObject {
         setupAutoRefresh()
         setupClaudeCodeAutoRefresh()
         setupCallAnalyticsAutoSync()
+        EnvironmentOverrideModel.shared.scan()
+        WarmupController.shared.providerSnapshot = { [weak self] in self?.providers ?? [] }
+        warmupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, self.settings.backendMode == "local" else { return }
+            WarmupController.shared.tick(providers: self.providers)
+        }
     }
 
     func configure(
@@ -75,6 +86,28 @@ final class ProviderRefreshCoordinator: ObservableObject {
         self.providerCatalogIds = providerCatalogIds
         self.ensureProviderSelected = ensureProviderSelected
         self.providerTitleForId = providerTitleForId
+    }
+
+    private func syncWeeklyResetPriorities() {
+        weeklyResetSyncTask?.cancel()
+        guard settings.backendMode == "local" else { return }
+        weeklyResetSyncTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            let observations = self.providers.flatMap { provider -> [WeeklyResetPriority.Observation] in
+                guard let email = provider.accountLabel else { return [] }
+                return provider.windows.compactMap { window in
+                    guard QuotaBurnRate.windowDuration(label: window.label) == 7 * 86400, let reset = window.resetAt,
+                          let date = SharedFormatters.parseISO8601(reset) else { return nil }
+                    return .init(provider: provider.baseProviderId, email: email, reset: date, accountID: provider.accountId)
+                }
+            }
+            do {
+                let paths = try CLIProxyPaths()
+                try await self.weeklyResetWorker.sync(authDirectory: paths.authDirectory, policyURL: paths.stateURL, observations: observations)
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled, self.errorMessage == nil { self.errorMessage = error.localizedDescription } }
+        }
     }
 
     // MARK: - Timers

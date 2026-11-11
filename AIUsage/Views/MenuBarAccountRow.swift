@@ -115,6 +115,7 @@ struct MenuBarAccountRow: View {
     private var accountContent: some View {
         VStack(alignment: .leading, spacing: 4) {
             accountHeader
+            BurnRateBadge(windows: windows)
             if !isCostProvider && !windows.isEmpty { quotaWindowBars }
         }
     }

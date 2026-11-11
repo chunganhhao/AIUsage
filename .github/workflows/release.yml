@@ -98,7 +98,10 @@ jobs:
 
       - name: Run Antigravity pool protection regression
         shell: bash
-        run: bash scripts/run_pool_circuit_breaker_regression.sh
+        run: |
+          bash scripts/run_pool_circuit_breaker_regression.sh
+          bash scripts/run_master_plan_regression.sh
+          bash scripts/run_codex_pool_recovery_regression.sh
 
       - name: Render Codex reset cards previews
         shell: bash

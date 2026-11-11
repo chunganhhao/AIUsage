@@ -86,13 +86,13 @@ final class ClaudeSubscriptionManager: ObservableObject {
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             process.standardInput = FileHandle.nullDevice
+            process.terminationHandler = { _ in }
             try process.run()
             let deadline = Date().addingTimeInterval(10)
             while process.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
             if process.isRunning {
                 // 只清理本次诊断子进程，不终止用户的 Code / Gateway。
                 kill(process.processIdentifier, SIGKILL)
-                process.waitUntilExit()
                 throw ProviderError("cli_timeout", timeoutMessage)
             }
             return pipe.fileHandleForReading.readDataToEndOfFile()

@@ -137,6 +137,12 @@ final class CodexUpstreamIntegrationTests: XCTestCase {
         let folder = "Library/Application Support/AIUsage/CLIProxyAPI/auth"
         try FileManager.default.createDirectory(at: directory.appendingPathComponent(folder), withIntermediateDirectories: true)
         let own = try write(folder + "/aiusage-codex-fixture.json", access: token("monthly", issuedAt: Int(Date().timeIntervalSince1970)))
+        var auth = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: own)) as? [String: Any])
+        auth["type"] = "codex"
+        auth["account_id"] = "integration-workspace"
+        auth["user_id"] = "member-a"
+        try JSONSerialization.data(withJSONObject: auth).write(to: own)
+        try CodexPoolProtectionSettings.setEnabled(true, homeDirectory: directory.path)
         let provider = CodexProvider(homeDirectory: directory.path)
         StubURLProtocol.respond(endpoint, body: list)
         let before = try Data(contentsOf: own)

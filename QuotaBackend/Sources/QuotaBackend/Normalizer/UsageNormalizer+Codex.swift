@@ -57,11 +57,15 @@ extension UsageNormalizer {
         base.spotlight = "Codex has multiple overlapping guardrails, so the UI surfaces all windows together and uses the tightest one to drive alerting."
 
         let isTripped = (usage.extra["circuitBreakerTripped"]?.value as? Bool) == true
-        if isTripped {
+        if let error = extraString(usage, "circuitBreakerError"), !error.isEmpty {
+            base.status = "watch"
+            base.statusLabel = "Pool Protection Needs Attention"
+            base.spotlight = error
+        } else if isTripped {
             base.status = "watch"
             base.statusLabel = "Protected (CPA Paused)"
             let reason = extraString(usage, "circuitBreakerReason") ?? "Quota <= 5%"
-            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt tài khoản này khỏi CLIProxyAPI để bảo toàn hạn mức (\(reason)). Khi quota hồi phục (> 5%), tài khoản sẽ tự động kích hoạt lại."
+            base.spotlight = "🛡️ Cầu dao thông minh: Đã tự động tạm ngắt tài khoản này khỏi CLIProxyAPI để bảo toàn hạn mức (\(reason)). Khi quota vượt ngưỡng bảo vệ đã cấu hình, tài khoản sẽ tự động kích hoạt lại."
         }
 
         return base

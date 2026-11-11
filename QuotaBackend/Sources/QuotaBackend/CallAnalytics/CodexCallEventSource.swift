@@ -166,7 +166,7 @@ struct CodexCallEventSource {
         var files: [String] = []
         var seen = Set<String>()
         for root in roots {
-            let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+            let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
             guard let enumerator = FileManager.default.enumerator(
                 at: rootURL,
                 includingPropertiesForKeys: [.isRegularFileKey, .contentModificationDateKey],

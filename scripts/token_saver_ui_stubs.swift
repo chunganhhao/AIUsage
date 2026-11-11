@@ -18,7 +18,15 @@ struct CLIProxyGatewaySettings: Equatable {
     var normalized: Self { self }
     func requiresCPAProcessRestart(comparedTo: Self) -> Bool { self != comparedTo }
 }
-enum CLIProxyRoutingStrategy { case roundRobin, fillFirst }
+enum CLIProxyRoutingStrategy { case roundRobin, fillFirst, earliestWeeklyReset }
+struct QuotaWindow { let label: String; let remainingPercent: Double?; let resetAt: String? }
+struct ProviderData { let accountId: String?; let sourceFilePath: String?; let baseProviderId: String; let accountLabel: String?; let fetchedAt: String?; let windows: [QuotaWindow] }
+func aiusageDefaultCLIPath() -> String { "/usr/bin:/bin" }
+func aiusageCodexExecutable() -> String? { nil }
+func aiusageResolvedExecutable(named: String) -> String? { nil }
+enum ClaudeSubscriptionManager {
+    static func authStatus(directory: String, executable: String) async throws -> ClaudeAuthStatus { .init(loggedIn: false) }
+}
 struct FixtureRuntimeState { var isRunning = false; var isTransitioning = false }
 @MainActor final class CLIProxyRuntimeController: ObservableObject {
     @Published var settings = CLIProxyGatewaySettings()
@@ -241,6 +249,34 @@ private func runHeadlessUIVerification() async throws {
     )
     let runtimeStrings = runtimeStringList.joined(separator: " | ")
     precondition(runtimeStrings.contains("Enabled 3/3"), "Expected Enabled 3/3 badge in TokenSaverRuntimeSection: \(runtimeStrings)")
+
+    // Banner sheet and settings reuse one observable model; removing a candidate clears its observers.
+    let overrideHome = homeA.appendingPathComponent("override-model")
+    try FileManager.default.createDirectory(at: overrideHome, withIntermediateDirectories: true)
+    let overrideFile = overrideHome.appendingPathComponent(".zshrc")
+    try Data("export OPENAI_API_KEY='fixture-only'\n".utf8).write(to: overrideFile)
+    let overrideModel = EnvironmentOverrideModel(home: overrideHome)
+    overrideModel.scan()
+    precondition(overrideModel.findings.count == 1)
+    _ = inspectOffscreen(EnvironmentOverrideView(model: overrideModel).frame(width: 680), width: 680)
+    overrideModel.remove(overrideModel.findings[0])
+    precondition(overrideModel.findings.isEmpty, "Shared banner model kept a stale file candidate after removal")
+    overrideModel.restore()
+    precondition(overrideModel.findings.count == 1, "Shared model Undo did not restore its candidate")
+
+    // New master-plan surfaces render real production views, isolated from user homes/Keychain.
+    let toolHome = homeA.appendingPathComponent("master-tools")
+    let codexConfig = toolHome.appendingPathComponent(".codex/config.toml")
+    try FileManager.default.createDirectory(at: codexConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(#"[mcp_servers.fixture]"#.utf8).write(to: codexConfig)
+    let (_, tools) = inspectOffscreen(AgentToolsSettingsView(home: toolHome).frame(width: 680), width: 680)
+    let toolText = tools.joined(separator: " | ")
+    precondition(toolText.contains("Scheduled 5h-Window Warmup"), "Missing warmup surface")
+    precondition(toolText.contains("Environment Overrides"), "Missing environment surface")
+    precondition(toolText.contains("Config Sets"), "Missing config sets surface")
+    let (_, rtkVersions) = inspectOffscreen(RTKVersionsView(store: RTKVersionStore(home: toolHome, cellarRoots: [])).frame(width: 680), width: 680)
+    precondition(rtkVersions.joined(separator: " | ").contains("RTK — Versions & rollback"), "Missing RTK version surface")
+    print("PASS master-plan SwiftUI/AX surfaces: warmup, environment, config sets and RTK versions (isolated)")
 
     print("PASS TokenSaverUIFixture headless verification (unconstrained <=420pt EN/ZH layout, real production .tokenSaver routing, timer cancellation/expiry on isolated NSPasteboard, Runtime & read-only Updates views)")
 }

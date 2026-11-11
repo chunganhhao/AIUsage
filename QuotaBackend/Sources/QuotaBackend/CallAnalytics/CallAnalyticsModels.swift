@@ -23,12 +23,14 @@ public enum CallSourceKind: String, Codable, Sendable, CaseIterable {
     case claude
     case codex
     case opencode
+    case antigravity
 
     public var displayName: String {
         switch self {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
+        case .antigravity: return "Antigravity"
         }
     }
 }
@@ -153,7 +155,7 @@ public struct CallAnalyticsSnapshot: Codable, Sendable {
     //     不再受「子代理是否调过工具」影响，纯文本输出 / 自定义子代理也能显示。
     // v6：解析窗口从「滚动天数 windowDays」改为「日历口径 rangeKey」（today/week/month/all，与用量统计同口径），
     //     并按事件日期精确过滤。字段类型变更会令旧缓存自动失效、整份重建。
-    public static let currentSchemaVersion = 6
+    public static let currentSchemaVersion = 7
 
     public let schemaVersion: Int
     public let generatedAt: Date

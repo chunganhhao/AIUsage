@@ -68,7 +68,7 @@ struct MultiWindowQuotaView: View {
     // MARK: - Ring Layout
 
     private var ringLayout: some View {
-        HStack(spacing: ringSpacing) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 90))], spacing: ringSpacing) {
             ForEach(displayedWindows) { window in
                 MultiWindowRingItem(
                     window: window,

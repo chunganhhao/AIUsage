@@ -347,7 +347,7 @@ struct CallAnalyticsView: View {
             }
             Button {
                 let spec = rangeSpec
-                Task { await store.refresh(rangeKey: spec.rangeKey, cutoff: spec.cutoff, end: spec.end) }
+                Task { await store.refresh(rangeKey: spec.rangeKey, cutoff: spec.cutoff, end: spec.end, rescan: true) }
             } label: {
                 Label(L("Rescan", "重新扫描", key: "calls.rescan"), systemImage: "arrow.clockwise")
             }
@@ -702,6 +702,7 @@ struct CallAnalyticsView: View {
         case .claude: return .orange
         case .codex: return .green
         case .opencode: return .blue
+        case .antigravity: return .purple
         }
     }
 }

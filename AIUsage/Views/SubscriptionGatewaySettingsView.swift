@@ -325,6 +325,7 @@ struct SubscriptionGatewaySettingsView: View {
                     }
                 }
             }
+            GatewayCard { RTKVersionsView() }
         }
     }
 

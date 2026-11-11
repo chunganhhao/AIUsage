@@ -7,6 +7,8 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AF7813F22E494D438DF55CCB /* AgentToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C73CAB12A82429690ADA677 /* AgentToolsView.swift */; };
+		12EA940922F545DB83E76B34 /* PoolProtectionControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */; };
 		9BEFE5B01F5DF04F8E29C1EE /* TokenSaverReleaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */; };
 		C1AG00012FD2000100B26789 /* AntigravityAccountSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */; };
 		C1AG00032FD2000200B26789 /* AntigravityManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */; };
@@ -247,6 +249,8 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		1C73CAB12A82429690ADA677 /* AgentToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentToolsView.swift; sourceTree = "<group>"; };
+		7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoolProtectionControls.swift; sourceTree = "<group>"; };
 		FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenSaverReleaseManager.swift; sourceTree = "<group>"; };
 		C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityAccountSwitcher.swift; sourceTree = "<group>"; };
 		C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityManagementView.swift; sourceTree = "<group>"; };
@@ -663,6 +667,8 @@
 				C1CPA01E2FD0010000B26789 /* SubscriptionGatewayConnectionsView.swift */,
 				C1CPA0202FD0011000B26789 /* SubscriptionGatewaySettingsView.swift */,
 				C1CPA0542FD0032000B26789 /* SubscriptionGatewaySettingsRuntimePane.swift */,
+				7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */,
+				1C73CAB12A82429690ADA677 /* AgentToolsView.swift */,
 				C1CPA0562FD0033000B26789 /* SubscriptionGatewayClientKeysPane.swift */,
 				5EF87F052F8D0EED002FE291 /* ProxyConfigEditorView.swift */,
 				C1AA000100000000000000A1 /* JSONWebEditorAssets.swift */,
@@ -966,6 +972,8 @@
 				C1CPA0512FD0030000B26789 /* CLIProxyClientKeyModels.swift in Sources */,
 				C1CPA0532FD0031000B26789 /* CLIProxyClientKeyStore.swift in Sources */,
 				C1CPA0552FD0032000B26789 /* SubscriptionGatewaySettingsRuntimePane.swift in Sources */,
+				12EA940922F545DB83E76B34 /* PoolProtectionControls.swift in Sources */,
+				AF7813F22E494D438DF55CCB /* AgentToolsView.swift in Sources */,
 				C1CPA0572FD0033000B26789 /* SubscriptionGatewayClientKeysPane.swift in Sources */,
 				C1CPA0372FD0023000B26789 /* SubscriptionGatewayAddUpstreamSheet.swift in Sources */,
 				C1CPA0392FD0024000B26789 /* SubscriptionGatewayImportSheet.swift in Sources */,

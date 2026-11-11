@@ -21,7 +21,7 @@ extension CodexCostProvider {
         var files: [String] = []
         var seen = Set<String>()
         for root in roots {
-            let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+            let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
             let candidates: [URL]
             if let scanWindow {
                 candidates = listDatePartitionedJSONLFiles(root: rootURL, scanWindow: scanWindow)

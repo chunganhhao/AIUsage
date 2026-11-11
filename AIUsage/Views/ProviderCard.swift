@@ -99,6 +99,8 @@ struct ProviderCard: View {
                     }
                 }
 
+                EnvironmentOverrideBanner(provider: provider.providerId)
+                BurnRateBadge(windows: provider.windows)
                 if useMultiWindowLayout {
                     MultiWindowQuotaView(
                         windows: provider.windows,
@@ -476,10 +478,10 @@ struct ProviderCard: View {
     /// 采用多窗口进度布局的服务商。
     /// Codex / Kimi / MiniMax：卡片只展示 5 小时 + 周窗口两条（第三条如 Code Review 进详情）。
     /// Droid Individual：5 小时 / 周 / 月都是硬限制，卡片展示三条。
-    private static let multiWindowProviderIds: Set<String> = ["codex", "claude-subscription", "kimi", "minimax", "droid"]
+    private static let multiWindowProviderIds: Set<String> = ["codex", "claude-subscription", "kimi", "minimax", "droid", "antigravity"]
 
     private static func multiWindowVisibleLimit(for providerId: String) -> Int {
-        providerId == "droid" ? 3 : 2
+        providerId == "antigravity" ? Int.max : (providerId == "droid" ? 3 : 2)
     }
 
     private var shouldShowStatusBadge: Bool {

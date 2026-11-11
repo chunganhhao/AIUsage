@@ -9,7 +9,10 @@ cleanup() {
 }
 trap cleanup EXIT
 
-swiftc -parse-as-library \
+swift build --package-path "$ROOT_DIR/QuotaBackend" --target QuotaBackend >/dev/null
+BACKEND_BIN="$(swift build --package-path "$ROOT_DIR/QuotaBackend" --show-bin-path)"
+jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BACKEND_BIN/description.json" > "$WORK_DIR/backend-objects.txt"
+swiftc -parse-as-library -I "$BACKEND_BIN/Modules" -Xlinker -filelist -Xlinker "$WORK_DIR/backend-objects.txt" -lsqlite3 \
   "$ROOT_DIR/AIUsage/Models/CLIProxyGatewayModels.swift" \
   "$ROOT_DIR/AIUsage/Services/CLIProxyPaths.swift" \
   "$ROOT_DIR/AIUsage/Services/CLIProxyConfigStore.swift" \

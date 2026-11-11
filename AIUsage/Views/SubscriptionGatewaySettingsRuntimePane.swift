@@ -34,6 +34,9 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 VStack(alignment: .leading, spacing: 14) {
                     header
                     poolProtectionSection
+                    GatewayCard { CodexPoolProtectionControls(home: tokenSaverHome) }
+
+                    DisclosureGroup("Agent tools · Warmup, Config Sets & Environment") { AgentToolsSettingsView(home: tokenSaverHome) }
 
                     GatewayCard(padding: 0) {
                         VStack(spacing: 0) {
@@ -54,8 +57,8 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                             groupLabel(L("Account picking", "账号选择"))
                             compactPickerRow
                             Text(L(
-                                "Fill first keeps using one available account until it cools down, then moves on. Round robin spreads requests.",
-                                "优先用满：一直打同一个可用号，额度冷却后再换下一个。轮询：请求分散到各账号。"
+                                "Fill first drains an available account. Round robin spreads requests. Earliest Weekly Reset uses refreshed weekly reset times within your existing priority tiers; unknown resets come last.",
+                                "优先用满：耗尽可用账号。轮询：分散请求。最早每周重置优先：在原有优先级内优先使用即将周重置的账号，未知重置时间排后。"
                             ))
                             .font(.caption2)
                             .foregroundStyle(.tertiary)
@@ -192,6 +195,7 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
                 }
                 Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
                     .font(.caption).foregroundStyle(.secondary)
+                AntigravityPerPoolControls(home: tokenSaverHome)
                 if !poolProtectionEnabled, poolProtectionResidual {
                     Text(L("Off—previous protection exclusions remain", "已关闭，但之前的保护排除规则仍然存在"))
                         .font(.caption).foregroundStyle(.orange)
@@ -312,10 +316,11 @@ struct SubscriptionGatewaySettingsRuntimePane: View {
             Picker("", selection: $draftSettings.routingStrategy) {
                 Text(L("Round robin", "轮询")).tag(CLIProxyRoutingStrategy.roundRobin)
                 Text(L("Fill first", "优先用满")).tag(CLIProxyRoutingStrategy.fillFirst)
+                Text(L("Earliest Weekly Reset First", "最早每周重置优先")).tag(CLIProxyRoutingStrategy.earliestWeeklyReset)
             }
             .labelsHidden()
-            .pickerStyle(.segmented)
-            .frame(maxWidth: 220)
+            .pickerStyle(.menu)
+            .frame(maxWidth: 280)
         }
         .padding(.horizontal, 14)
         .padding(.vertical, 11)
@@ -484,9 +489,9 @@ struct TokenSaverRuntimeSection: View {
                 }
                 .padding(14)
                 Divider()
-                row(L("Compress tool output (RTK)", "压缩工具输出 (RTK)"), detail: L("Managed coding rules for Antigravity, Claude Code, Codex, OpenCode and Hermes (~/.hermes/SOUL.md). Custom Hermes profiles in ~/.hermes/profiles/* stay isolated. Requires RTK on the agent's PATH; no shell aliases or automatic interception.", "针对 Antigravity、Claude Code、Codex、OpenCode 和 Hermes（~/.hermes/SOUL.md）的托管编程规则。~/.hermes/profiles/* 中的自定义配置保持隔离。需在代理 PATH 中安装 RTK；无 Shell 别名或自动拦截。"), key: \.rtkEnabled, id: "token-saver-rtk")
+                row(L("RTK — Compress Terminal Output", "RTK — 压缩终端输出"), detail: L("CLI wrapper: filters supported git, rg, ls and pytest output when explicitly invoked. Uses the selected RTK version, otherwise PATH. No aliases or automatic interception; savings vary.", "CLI 包装器：仅在显式调用时过滤 git、rg、ls、pytest 的受支持输出。优先使用选定的 RTK 版本，否则使用 PATH；不设置别名、不自动拦截，节省量因场景而异。"), key: \.rtkEnabled, id: "token-saver-rtk")
                 Divider()
-                row(L("Compress LLM output (Caveman)", "压缩模型输出 (Caveman)"), detail: L("Built-in coding-only concise instructions (works immediately without downloading references). Keeps code exact; no request or response rewriting.", "内置仅限编程的精简输出指令（无需下载参考文档即可直接生效）。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
+                row(L("Caveman — Concise Replies", "Caveman — 精简回复"), detail: L("Adds compact coding-only instructions to agent Markdown files. No full upstream repository is injected. Keeps code exact; no request/response rewriting.", "在代理 Markdown 文件中加入精简的编程指令，不注入完整上游仓库。保持代码精确，不重写请求或响应。"), key: \.cavemanEnabled, id: "token-saver-caveman")
                 Picker(L("Caveman mode", "Caveman 模式"), selection: Binding(
                     get: { saver.settings.cavemanMode },
                     set: { mode in saver.mutate { $0.cavemanMode = mode } }
@@ -501,7 +506,7 @@ struct TokenSaverRuntimeSection: View {
                 .disabled(!saver.settings.cavemanEnabled)
                 .accessibilityIdentifier("token-saver-caveman-mode")
                 Divider()
-                row(L("Lazy senior dev (Ponytail)", "极简资深开发 (Ponytail)"), detail: L("Built-in coding-only YAGNI, reuse, stdlib-first and minimal verified code (works immediately without downloading references).", "内置仅限编程的 YAGNI、优先复用、标准库优先及最少验证代码规则（无需下载参考文档即可直接生效）。"), key: \.ponytailEnabled, id: "token-saver-ponytail")
+                row(L("Ponytail — Minimal Code (YAGNI)", "Ponytail — 极简代码 (YAGNI)"), detail: L("Adds compact YAGNI, reuse and stdlib-first rules to agent Markdown. No project dependencies are installed.", "在代理 Markdown 文件中加入 YAGNI、优先复用和标准库优先的精简规则，不安装项目依赖。"), key: \.ponytailEnabled, id: "token-saver-ponytail")
                 Divider()
                 onboardingChecklist.padding(14)
                 Divider()

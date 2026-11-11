@@ -73,7 +73,7 @@ struct FixtureCPAUpdatesSection: View {
 PYCODE
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$FIXTURE/objects.txt"
 swiftc -parse-as-library -swift-version 5 -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$FIXTURE/objects.txt" -lsqlite3 \
-  "$ROOT/AIUsage/Views/SubscriptionGatewaySettingsRuntimePane.swift" "$ROOT/scripts/token_saver_ui_stubs.swift" "$FIXTURE/ParentUpdates.swift" "$FIXTURE/Updates.swift" "$FIXTURE/MenuBarTokenSaver.swift" "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" -o "$FIXTURE/TokenSaverUIFixture"
+  "$ROOT/AIUsage/Views/AgentToolsView.swift" "$ROOT/AIUsage/Views/PoolProtectionControls.swift" "$ROOT/AIUsage/Views/SubscriptionGatewaySettingsRuntimePane.swift" "$ROOT/scripts/token_saver_ui_stubs.swift" "$FIXTURE/ParentUpdates.swift" "$FIXTURE/Updates.swift" "$FIXTURE/MenuBarTokenSaver.swift" "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" -o "$FIXTURE/TokenSaverUIFixture"
 mkdir -p "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS"
 cp "$FIXTURE/TokenSaverUIFixture" "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS/TokenSaverUIFixture"
 cat > "$FIXTURE/TokenSaverUIFixture.app/Contents/Info.plist" <<'PLIST'

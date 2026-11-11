@@ -233,11 +233,25 @@ public enum TokenSaverSettingsStore {
 
 /// Adds only an owned block. Existing instructions are never replaced.
 public enum TokenSaverAgentRules {
+    public static let legacyRTKWrapper = """
+    #!/bin/zsh
+    # AIUsage-owned explicit RTK wrapper. No aliases, PATH mutation or retry.
+    set -eu
+    if (( $# == 0 )); then exit 64; fi
+    if command -v rtk >/dev/null 2>&1; then
+        exec rtk "$@"
+    fi
+    exec "$@"
+    """ + "\n"
     public static let rtkWrapper = """
     #!/bin/zsh
     # AIUsage-owned explicit RTK wrapper. No aliases, PATH mutation or retry.
     set -eu
     if (( $# == 0 )); then exit 64; fi
+    selected="${0:A:h:h}/RTK/current"
+    if [[ -L "$selected" && -x "$selected" ]]; then
+        exec "$selected" "$@"
+    fi
     if command -v rtk >/dev/null 2>&1; then
         exec rtk "$@"
     fi

@@ -174,6 +174,9 @@ nonisolated enum CLIProxyGatewayOperation: Equatable {
 nonisolated enum CLIProxyRoutingStrategy: String, Codable, CaseIterable, Identifiable, Sendable {
     case roundRobin = "round-robin"
     case fillFirst = "fill-first"
+    case earliestWeeklyReset = "earliest-weekly-reset"
+
+    var cpaValue: String { self == .earliestWeeklyReset ? "fill-first" : rawValue }
 
     var id: String { rawValue }
 }

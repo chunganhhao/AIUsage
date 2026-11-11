@@ -14,6 +14,38 @@ public enum AntigravityPoolProtectionSettings {
         return json["enabled"] as? Bool == true
     }
 
+    public static let pools = ["gemini", "claude", "argon"]
+
+    public static func enabledPools(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> Set<String> {
+        enabledPools(runtime: runtime(homeDirectory))
+    }
+
+    static func enabledPools(runtime: URL) -> Set<String> {
+        guard let data = try? Data(contentsOf: runtime.appendingPathComponent("pool-protection.json")),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return Set(pools) }
+        guard let list = json["pools"] as? [String] else { return Set(pools) }
+        return Set(list).intersection(pools)
+    }
+
+    public static func setPool(_ pool: String, enabled: Bool, homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) throws {
+        guard pools.contains(pool) else { return }
+        try AntigravityCredentialFile.withLock {
+            let directory = runtime(homeDirectory)
+            var selected = enabledPools(runtime: directory)
+            if enabled { selected.insert(pool) } else { selected.remove(pool) }
+            // Remove only deselected pools immediately; do not wait for another quota poll.
+            try AntigravityPoolCircuitBreaker.removeDeselectedPools(runtime: directory, enabledPools: selected)
+            try save(enabled: isEnabled(runtime: directory), pools: selected, runtime: directory)
+        }
+    }
+
+    private static func save(enabled: Bool, pools: Set<String>, runtime: URL) throws {
+        try FileManager.default.createDirectory(at: runtime, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        let url = runtime.appendingPathComponent("pool-protection.json")
+        try JSONSerialization.data(withJSONObject: ["enabled": enabled, "pools": pools.sorted()]).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+
     /// Read-only upgrade attention; malformed/unreadable credentials throw rather
     /// than incorrectly reporting that previously applied protection is absent.
     public static func hasResidualProtection(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) throws -> Bool {
@@ -55,10 +87,7 @@ public enum AntigravityPoolProtectionSettings {
             else if isEnabled(homeDirectory: homeDirectory) {
                 try AntigravityPoolCircuitBreaker.clearProtection(runtime: directory)
             }
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-            let url = directory.appendingPathComponent("pool-protection.json")
-            try JSONSerialization.data(withJSONObject: ["enabled": enabled]).write(to: url, options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try save(enabled: enabled, pools: enabledPools(runtime: directory), runtime: directory)
         }
     }
 

@@ -58,7 +58,8 @@ final class CallAnalyticsArchiveStore {
     func freeze(
         computed: [String: CallAnalyticsDayBucket],
         todayKey: String,
-        completedFullHistory: Bool
+        completedFullHistory: Bool,
+        backfill: Bool = false
     ) -> [String: CallAnalyticsDayBucket] {
         var archive = load()
         var changed = false
@@ -66,6 +67,15 @@ final class CallAnalyticsArchiveStore {
         for (day, bucket) in computed where !bucket.isEmpty {
             if day == todayKey {
                 archive.days[day] = bucket
+                changed = true
+            } else if backfill, var previous = archive.days[day] {
+                // Backfill missing calls without deleting history whose source sessions were removed.
+                for entry in bucket.entries {
+                    if let index = previous.entries.firstIndex(where: { $0.source == entry.source && $0.kind == entry.kind && $0.name == entry.name && $0.server == entry.server && $0.agent == entry.agent }) {
+                        if entry.count > previous.entries[index].count { previous.entries[index] = entry }
+                    } else { previous.entries.append(entry) }
+                }
+                archive.days[day] = previous
                 changed = true
             } else if archive.days[day] == nil {
                 archive.days[day] = bucket

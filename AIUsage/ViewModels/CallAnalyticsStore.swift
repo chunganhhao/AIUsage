@@ -24,12 +24,12 @@ final class CallAnalyticsStore: ObservableObject {
     }
 
     /// 重新解析并刷新（视图出现 / 手动刷新按钮 / 时间范围切换）。
-    func refresh(rangeKey: String, cutoff: Date?, end: Date?) async {
+    func refresh(rangeKey: String, cutoff: Date?, end: Date?, rescan: Bool = false) async {
         guard !isRefreshing else { return }
         isRefreshing = true
         defer { isRefreshing = false }
 
-        let result = await engine.computeSnapshot(rangeKey: rangeKey, cutoff: cutoff, end: end)
+        let result = await engine.computeSnapshot(rangeKey: rangeKey, cutoff: cutoff, end: end, rescan: rescan)
         snapshot = result
         Self.saveCache(result)
         log.debug("Call analytics refreshed: \(result.entries.count, privacy: .public) entries, range \(rangeKey, privacy: .public)")

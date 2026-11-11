@@ -4,10 +4,12 @@ public enum QuotaCircuitBreakerHelper {
     public struct BreakerOutcome: Sendable {
         public let tripped: Bool
         public let reason: String
+        public let error: String?
 
-        public init(tripped: Bool, reason: String) {
+        public init(tripped: Bool, reason: String, error: String? = nil) {
             self.tripped = tripped
             self.reason = reason
+            self.error = error
         }
     }
 
@@ -17,12 +19,22 @@ public enum QuotaCircuitBreakerHelper {
         providerPrefix: String,
         email: String?,
         currentFileURL: URL?,
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        codexIdentity: CodexAccountIdentity? = nil
     ) -> [URL] {
         var targets: [URL] = []
         var seenPaths = Set<String>()
+        let isCodex = providerPrefix.lowercased() == "codex"
+        let sourceJSON = isCodex ? currentFileURL.flatMap { try? Data(contentsOf: $0) }.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] } : nil
+        let expectedCodex = codexIdentity ?? sourceJSON.map(CodexAccountIdentity.init(authJSON:))
 
         func addTarget(_ url: URL) {
+            if isCodex {
+                guard (try? url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+                      let data = try? Data(contentsOf: url), let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      json["type"] as? String == "codex", let expectedCodex,
+                      expectedCodex.matches(CodexAccountIdentity(authJSON: json)) else { return }
+            }
             let path = url.standardizedFileURL.path
             if !seenPaths.contains(path) {
                 seenPaths.insert(path)
@@ -31,7 +43,7 @@ public enum QuotaCircuitBreakerHelper {
         }
 
         // 1. If the current file itself is in the CLIProxyAPI auth directory, include it directly
-        if let currentFileURL, currentFileURL.path.contains("CLIProxyAPI/auth") {
+        if let currentFileURL, currentFileURL.deletingLastPathComponent().standardizedFileURL == URL(fileURLWithPath: homeDirectory).appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth").standardizedFileURL {
             addTarget(currentFileURL)
         }
 
@@ -94,18 +106,29 @@ public enum QuotaCircuitBreakerHelper {
     public static func syncCircuitBreaker(
         targets: [URL],
         shouldTrip: Bool,
-        reason: String
+        reason: String,
+        codexIdentity: CodexAccountIdentity? = nil,
+        quotaRemaining: [String: Double]? = nil,
+        threshold: Double = 3
     ) -> BreakerOutcome? {
         guard !targets.isEmpty else { return nil }
 
         let activeReason = reason
 
+        var applied = false
+        var failures = 0
+        var hasPausedTarget = false
+        var recoveryDeferred = false
         for fileURL in targets {
-            guard let data = try? Data(contentsOf: fileURL),
+            guard (try? fileURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) != true,
+                  let data = try? Data(contentsOf: fileURL),
                   var json = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
+                failures += 1
                 continue
             }
 
+            guard json["type"] as? String == "codex" else { continue }
+            if let codexIdentity, !codexIdentity.matches(CodexAccountIdentity(authJSON: json)) { failures += 1; continue }
             let currentDisabled = (json["disabled"] as? Bool) ?? ((json["disabled"] as? Int) == 1)
             let isTrippedByBreaker = json["circuit_breaker_tripped"] as? Bool ?? false
 
@@ -115,9 +138,26 @@ public enum QuotaCircuitBreakerHelper {
                 continue
             }
 
+            let original = json
             var didChange = false
 
             if shouldTrip {
+                if let quotaRemaining {
+                    var blocked = Set(quotaRemaining.filter { $0.value.isFinite && $0.value <= threshold }.keys)
+                    if isTrippedByBreaker {
+                        if let previous = json["circuit_breaker_blocked_windows"] as? [String], !previous.isEmpty {
+                            blocked.formUnion(previous)
+                        } else {
+                            // Legacy pauses have no trustworthy record of the original depleted window.
+                            blocked.insert("legacy-unknown")
+                        }
+                    }
+                    let keys = blocked.sorted()
+                    if json["circuit_breaker_blocked_windows"] as? [String] != keys {
+                        json["circuit_breaker_blocked_windows"] = keys
+                        didChange = true
+                    }
+                }
                 if !currentDisabled || !isTrippedByBreaker {
                     json["disabled"] = true
                     json["circuit_breaker_tripped"] = true
@@ -130,8 +170,20 @@ public enum QuotaCircuitBreakerHelper {
                     didChange = true
                 }
             } else {
-                // Healthy: Auto-recovery when all quota pools are healthy (> 5%)
                 if currentDisabled && isTrippedByBreaker {
+                    if let quotaRemaining {
+                        guard let blocked = json["circuit_breaker_blocked_windows"] as? [String], !blocked.isEmpty,
+                              blocked.allSatisfy({ key in
+                                  guard let remaining = quotaRemaining[key] else { return false }
+                                  return remaining.isFinite && remaining > threshold
+                              }) else {
+                            recoveryDeferred = true
+                            hasPausedTarget = true
+                            applied = true
+                            continue
+                        }
+                    }
+                    json.removeValue(forKey: "circuit_breaker_blocked_windows")
                     json["disabled"] = false
                     json["circuit_breaker_tripped"] = false
                     json["circuit_breaker_partial"] = false
@@ -140,11 +192,30 @@ public enum QuotaCircuitBreakerHelper {
                 }
             }
 
-            if didChange, let updatedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
-                try? updatedData.write(to: fileURL, options: .atomic)
+            if didChange {
+                do {
+                    try AntigravityCredentialFile.update(fileURL) { current in
+                        if let codexIdentity, !codexIdentity.matches(CodexAccountIdentity(authJSON: current)) {
+                            throw AntigravityPoolCircuitBreaker.Failure.unsafe("Codex workspace changed during protection update; left unchanged.")
+                        }
+                        guard NSDictionary(dictionary: current).isEqual(to: original) else {
+                            throw AntigravityPoolCircuitBreaker.Failure.unsafe("Credential changed during Codex protection update; left unchanged.")
+                        }
+                        return json
+                    }
+                } catch {
+                    failures += 1
+                    hasPausedTarget = hasPausedTarget || (currentDisabled && isTrippedByBreaker)
+                    continue
+                }
             }
+            hasPausedTarget = hasPausedTarget || ((json["disabled"] as? Bool == true) && (json["circuit_breaker_tripped"] as? Bool == true))
+            applied = true
         }
 
-        return BreakerOutcome(tripped: shouldTrip, reason: activeReason)
+        let failureSummary = applied ? "updated only part of its targets" : "could not update any target"
+        let error = failures > 0 ? "Codex pool protection \(failureSummary) (\(failures) failed). Refresh to retry; protection is not fully confirmed."
+            : recoveryDeferred ? "Codex remains paused: a previously depleted quota window is missing or unknown. Wait for matching quota data; if the pause lacks reliable window metadata, turn protection off explicitly to restore." : nil
+        return applied || error != nil ? BreakerOutcome(tripped: hasPausedTarget, reason: recoveryDeferred ? "Quota recovery is not confirmed." : activeReason, error: error) : nil
     }
 }

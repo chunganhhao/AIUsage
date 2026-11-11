@@ -1308,6 +1308,15 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         usage.primary = parseWindow(rateLimit["primary_window"] as? [String: Any])
         usage.secondary = parseWindow(rateLimit["secondary_window"] as? [String: Any])
         usage.tertiary = parseWindow(codeReviewLimit["primary_window"] as? [String: Any])
+        var quotaWindowKeys: [String: String] = [:]
+        for role in ["primary", "secondary"] {
+            if let window = rateLimit[role + "_window"] as? [String: Any],
+               let seconds = (window["limit_window_seconds"] as? NSNumber)?.doubleValue,
+               seconds.isFinite, seconds > 0 {
+                quotaWindowKeys[role] = "rate-limit-seconds:\(seconds)"
+            }
+        }
+        usage.extra["codexQuotaWindowKeys"] = AnyCodable(quotaWindowKeys)
         usage.source = source
 
         // 按量计费工作区的月度个人上限排前（计入告警），按模型的额外限额（如 Spark）随后（只展示）。
@@ -1611,6 +1620,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     private struct CircuitBreakerResult {
         let tripped: Bool
         let reason: String
+        let error: String?
     }
 
     private func postProcessUsage(_ usage: inout ProviderUsage, fileURL: URL?) {
@@ -1619,60 +1629,61 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         if let circuitBreakerInfo = applySmartCircuitBreaker(at: fileURL, usage: usage, email: email) {
             usage.extra["circuitBreakerTripped"] = AnyCodable(circuitBreakerInfo.tripped)
             usage.extra["circuitBreakerReason"] = AnyCodable(circuitBreakerInfo.reason)
+            if let error = circuitBreakerInfo.error { usage.extra["circuitBreakerError"] = AnyCodable(error) }
         }
     }
 
     private func applySmartCircuitBreaker(at fileURL: URL, usage: ProviderUsage, email: String?) -> CircuitBreakerResult? {
-        var shouldTrip = false
-        var reason = ""
-
-        if let primary = usage.primary, let rem = primary.remainingPercent {
-            let isLongWindow = (primary.label ?? "").localizedCaseInsensitiveContains("weekly")
-                || (primary.label ?? "").localizedCaseInsensitiveContains("month")
-            let threshold = isLongWindow ? 3.0 : 5.0
-            if rem <= threshold {
-                shouldTrip = true
-                let label = primary.label ?? "Primary Window"
-                reason = "\(label) còn \(Int(rem))% (<= \(Int(threshold))%)"
-            }
+        guard CodexPoolProtectionSettings.isEnabled(homeDirectory: homeDirectory) else { return nil }
+        let configuredThreshold = CodexPoolProtectionSettings.threshold(homeDirectory: homeDirectory)
+        let windowKeys = usage.extra["codexQuotaWindowKeys"]?.value as? [String: String] ?? [:]
+        var windows: [(key: String?, label: String, remaining: Double)] = []
+        if let remaining = usage.primary?.remainingPercent, remaining.isFinite {
+            windows.append((windowKeys["primary"], usage.primary?.label ?? "Primary Window", remaining))
         }
-        if !shouldTrip, let secondary = usage.secondary, let rem = secondary.remainingPercent, rem <= 3.0 {
-            shouldTrip = true
-            let label = secondary.label ?? "Weekly Window"
-            reason = "\(label) còn \(Int(rem))% (<= 3%)"
+        if let remaining = usage.secondary?.remainingPercent, remaining.isFinite {
+            windows.append((windowKeys["secondary"], usage.secondary?.label ?? "Weekly Window", remaining))
         }
-        if !shouldTrip, let items = usage.extra["extraWindows"]?.value as? [AnyCodable] {
+        if let items = usage.extra["extraWindows"]?.value as? [AnyCodable] {
             for item in items {
                 guard let dict = item.value as? [String: AnyCodable],
                       dict["affectsStatus"]?.value as? Bool == true,
-                      let used = (dict["usedPercent"]?.value as? NSNumber)?.doubleValue else { continue }
-                let rem = max(0, 100 - used)
-                if rem <= 3.0 {
-                    shouldTrip = true
-                    let label = (dict["label"]?.value as? String) ?? "Monthly Credit Limit"
-                    reason = "\(label) còn \(Int(rem))% (<= 3%)"
-                    break
-                }
+                      let used = (dict["usedPercent"]?.value as? NSNumber)?.doubleValue,
+                      used.isFinite else { continue }
+                // Monthly spend control is the only status-affecting extra window.
+                windows.append(("monthly-credit-limit", (dict["label"]?.value as? String) ?? "Monthly Credit Limit", max(0, 100 - used)))
             }
         }
-        if !shouldTrip {
-            reason = "Hạn mức an toàn (Weekly/Monthly > 3%, Primary > 5%)"
+        let depleted = windows.first { $0.remaining <= configuredThreshold }
+        let shouldTrip = depleted != nil
+        let reason = depleted.map { "\($0.label) còn \(Int($0.remaining))% (<= \(Int(configuredThreshold))%)" }
+            ?? "Quota above configured \(Int(configuredThreshold))% threshold."
+        var quotaRemaining = Dictionary(windows.compactMap { window in window.key.map { ($0, window.remaining) } }, uniquingKeysWith: min)
+        if windows.contains(where: { $0.key == nil && $0.remaining <= configuredThreshold }) {
+            // A low quota without a stable duration can pause, but cannot prove later recovery.
+            quotaRemaining["unknown-window"] = 0
         }
 
+        let identity = CodexAccountIdentity(accountId: usage.usageAccountId, userId: usage.extra["userId"]?.value as? String, email: email)
         let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
             providerPrefix: "codex",
             email: email,
             currentFileURL: fileURL,
-            homeDirectory: homeDirectory
+            homeDirectory: homeDirectory,
+            codexIdentity: identity
         )
         guard !targets.isEmpty else { return nil }
 
-        if let outcome = QuotaCircuitBreakerHelper.syncCircuitBreaker(
+        if let outcome = CodexPoolProtectionSettings.sync(
             targets: targets,
             shouldTrip: shouldTrip,
-            reason: reason
+            reason: reason,
+            homeDirectory: homeDirectory,
+            identity: identity,
+            quotaRemaining: quotaRemaining,
+            threshold: configuredThreshold
         ) {
-            return CircuitBreakerResult(tripped: outcome.tripped, reason: outcome.reason)
+            return CircuitBreakerResult(tripped: outcome.tripped, reason: outcome.reason, error: outcome.error)
         }
         return nil
     }

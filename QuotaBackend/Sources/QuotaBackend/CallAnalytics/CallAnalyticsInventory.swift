@@ -18,7 +18,8 @@ struct CallAnalyticsInventory {
     private var skillRoots: [(source: CallSourceKind, path: String)] {
         ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/skills") } + [
             (.codex, "\(homeDirectory)/.codex/skills"),
-            (.opencode, "\(homeDirectory)/.config/opencode/skills")
+            (.opencode, "\(homeDirectory)/.config/opencode/skills"),
+            (.antigravity, "\(homeDirectory)/.gemini/antigravity/skills")
         ]
     }
 
@@ -28,7 +29,8 @@ struct CallAnalyticsInventory {
     private var mcpConfigFiles: [(source: CallSourceKind, path: String, format: MCPConfigFormat)] {
         ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/.claude.json", .json) } + [
             (.claude, "\(homeDirectory)/.claude.json", .json),
-            (.codex, "\(homeDirectory)/.codex/config.toml", .codexTOML)
+            (.codex, "\(homeDirectory)/.codex/config.toml", .codexTOML),
+            (.antigravity, "\(homeDirectory)/.gemini/antigravity/mcp_config.json", .json)
         ]
     }
 
@@ -75,7 +77,7 @@ struct CallAnalyticsInventory {
     // MARK: - Skills
 
     private func collectSkillNames(root: String, into names: inout Set<String>) {
-        let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
         guard FileManager.default.fileExists(atPath: root),
               let enumerator = FileManager.default.enumerator(
                 at: rootURL,
@@ -83,6 +85,13 @@ struct CallAnalyticsInventory {
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
               ) else { return }
 
+        // Enumerators do not descend into linked skill directories.
+        for child in (try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isSymbolicLinkKey], options: [.skipsHiddenFiles])) ?? [] {
+            if (try? child.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true,
+               FileManager.default.fileExists(atPath: child.appendingPathComponent(Self.skillMarker).path) {
+                names.insert(child.lastPathComponent)
+            }
+        }
         for case let item as URL in enumerator {
             let component = item.lastPathComponent
             if Self.skipDirectoryNames.contains(component) {
