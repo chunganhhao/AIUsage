@@ -6,6 +6,7 @@ import QuotaBackend
 // ProviderCard / MultiWindowQuotaView / ProviderIconView / GatewayChrome 按正式源码编译。
 @MainActor enum FixtureResetEnvironment {
     static var coordinator: CodexResetCreditsCoordinator!
+    static var home: URL!
     static var credentialIDs: [String: String] = [:]
 }
 

@@ -65,6 +65,11 @@ abort 'Missing coordinator shared binding' unless coordinator.sub!('static let s
 File.write(File.join(output, 'PreviewResetCoordinator.swift'), coordinator)
 card = File.read(File.join(root, 'AIUsage/Views/ProviderCard.swift')).split(/^#Preview \{/).first
 File.write(File.join(output, 'PreviewProviderCard.swift'), card)
+
+widgets = File.read(File.join(root, 'AIUsage/Views/AgentToolsView.swift')).split(/^struct AgentConfigToolsView\b/).first
+abort 'Missing environment model fixture seam' unless widgets.sub!('static let shared = EnvironmentOverrideModel()', 'static let shared = EnvironmentOverrideModel(home: FixtureResetEnvironment.home)')
+File.write(File.join(output, 'PreviewAgentWidgets.swift'), widgets)
+
 subscription = File.read(File.join(root, 'AIUsage/Views/CodexProxyManagementView.swift')).split('struct CodexSubscriptionSection', 2).last.split('// MARK: - Codex Global Config Section', 2).first
 File.write(File.join(output, 'PreviewCodexSubscriptionSection.swift'), "import SwiftUI\nimport Combine\nstruct CodexSubscriptionSection" + subscription)
 toggle = File.read(File.join(root, 'AIUsage/Views/ProxyManagementView+Card.swift')).split('// MARK: - Proxy Activation Toggle Style', 2).last.split('// MARK: - Instant Tooltip Modifier', 2).first
@@ -82,6 +87,7 @@ RUBY
   STUB_SOURCE="$REGRESSION_DIR/PreviewStubURLProtocol.swift"
   UI_SOURCES+=(
     "$REGRESSION_DIR/PreviewProviderCard.swift"
+    "$REGRESSION_DIR/PreviewAgentWidgets.swift"
     "$REGRESSION_DIR/PreviewUtilities.swift"
     "$PROJECT_DIR/AIUsage/Views/ProviderIconView.swift"
     "$PROJECT_DIR/AIUsage/Views/ProviderCard+MultiWindowQuota.swift"
