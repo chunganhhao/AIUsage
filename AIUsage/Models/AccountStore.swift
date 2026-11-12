@@ -150,6 +150,24 @@ final class AccountStore: ObservableObject {
         return persistAccountRegistry()
     }
 
+    private static func mergedCredentialMetadata(
+        existing: [String: String],
+        incoming: [String: String]
+    ) -> [String: String] {
+        var merged = existing
+        if let existingSource = merged["sourcePath"],
+           AccountCredentialStore.isEphemeralTemporaryAuthPath(existingSource) {
+            merged["sourcePath"] = ""
+        }
+        incoming.forEach { key, value in
+            if key == "sourcePath", value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                return
+            }
+            merged[key] = value
+        }
+        return merged
+    }
+
     /// 返回该账号在仪表盘中的 provider result id（`<providerId>:cred:<credentialId>`）。
     @discardableResult
     func registerAuthenticatedCredential(
@@ -225,8 +243,10 @@ final class AccountStore: ObservableObject {
             sourceIdentifierIsStable: enrichedCredential.metadata["identityScope"]
                 == ProviderAuthCandidate.IdentityScope.accountScoped.rawValue
         ) {
-            var mergedMetadata = existingCredential.metadata
-            enrichedCredential.metadata.forEach { mergedMetadata[$0.key] = $0.value }
+            let mergedMetadata = Self.mergedCredentialMetadata(
+                existing: existingCredential.metadata,
+                incoming: enrichedCredential.metadata
+            )
             enrichedCredential = AccountCredential(
                 id: existingCredential.id,
                 providerId: existingCredential.providerId,
@@ -258,7 +278,9 @@ final class AccountStore: ObservableObject {
                     accountLabel: enrichedCredential.accountLabel,
                     authMethod: enrichedCredential.authMethod,
                     credential: enrichedCredential.credential,
-                    metadata: enrichedCredential.metadata
+                    metadata: canonicalCredential.map {
+                        Self.mergedCredentialMetadata(existing: $0.metadata, incoming: enrichedCredential.metadata)
+                    } ?? enrichedCredential.metadata
                 )
                 rewrittenCanonicalCredential.lastUsedAt = validatedAt
                 if let canonicalCredential {

@@ -8,6 +8,8 @@ final class AccountCredentialStore {
     static var multiWorkspaceProviders: Set<String> { QuotaBackend.AccountCredentialStore.multiWorkspaceProviders }
     static func isMultiWorkspace(_ id: String) -> Bool { QuotaBackend.AccountCredentialStore.isMultiWorkspace(id) }
     static func normalizedAuthFilePath(_ path: String) -> String { QuotaBackend.AccountCredentialStore.normalizedAuthFilePath(path) }
+    static func isEphemeralTemporaryAuthPath(_ path: String) -> Bool { QuotaBackend.AccountCredentialStore.isEphemeralTemporaryAuthPath(path) }
+    static func persistentSourcePath(from path: String?) -> String? { QuotaBackend.AccountCredentialStore.persistentSourcePath(from: path) }
     static func credentialsShareCanonicalIdentity(_ a: AccountCredential, _ b: AccountCredential) -> Bool {
         QuotaBackend.AccountCredentialStore.credentialsShareCanonicalIdentity(a, b)
     }

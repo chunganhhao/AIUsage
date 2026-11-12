@@ -208,6 +208,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             do {
                 return try await recoverFromSourceAndRead(
                     staleCreds: creds,
+                    rejectedAccessTokens: rejectedAccessTokens,
+                    rejectedRefreshTokens: rejectedRefreshTokens,
                     credentialPath: credentialPath,
                     sourcePath: credential.metadata["sourcePath"],
                     read: read
@@ -231,31 +233,91 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     /// and must never block recovery after an upgrade or downgrade.
     private func recoverFromSourceAndRead<T>(
         staleCreds: Credentials,
+        rejectedAccessTokens: Set<String> = [],
+        rejectedRefreshTokens: Set<String> = [],
         credentialPath: String?,
         sourcePath: String?,
         read: (Credentials, SourceInfo) async throws -> T
     ) async throws -> T {
-        guard let credentialPath,
-              let rawSource = stringValue(sourcePath) else {
+        guard let credentialPath else {
             throw ProviderError("no_source", "No sourcePath metadata available for recovery.")
         }
 
-        let expandedSource = NSString(string: rawSource).expandingTildeInPath
         let expandedCredential = NSString(string: credentialPath).expandingTildeInPath
-        guard expandedSource != expandedCredential else {
-            throw ProviderError("source_same_as_copy", "Credential already points at the authoritative source.")
-        }
-        guard FileManager.default.fileExists(atPath: expandedSource) else {
-            throw ProviderError("source_missing", "Original auth file not found; cannot recover.")
+        let normalizedCredential = AccountCredentialStore.normalizedAuthFilePath(expandedCredential)
+        let explicitSource = stringValue(sourcePath).map { NSString(string: $0).expandingTildeInPath }
+        let fallbackCandidates = [
+            "\(homeDirectory)/.codex/auth.json",
+            "\(homeDirectory)/.codex/auth.json.bak"
+        ]
+        let candidatePaths = uniqueRefreshPaths((explicitSource.map { [$0] } ?? []) + fallbackCandidates)
+
+        let rejectedAccess = rejectedAccessTokens.union([staleCreds.accessToken])
+        var explicitError: ProviderError?
+        var chosen: (path: String, data: Data, creds: Credentials)?
+        for candidate in candidatePaths {
+            let isExplicit = explicitSource.map {
+                AccountCredentialStore.normalizedAuthFilePath($0) == AccountCredentialStore.normalizedAuthFilePath(candidate)
+            } ?? false
+            if AccountCredentialStore.normalizedAuthFilePath(candidate) == normalizedCredential {
+                if isExplicit {
+                    explicitError = explicitError ?? ProviderError("source_same_as_copy", "Credential already points at the authoritative source.")
+                }
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: candidate),
+                  let candidateData = FileManager.default.contents(atPath: candidate) else {
+                if isExplicit {
+                    explicitError = explicitError ?? ProviderError("source_missing", "Original auth file not found; cannot recover.")
+                }
+                continue
+            }
+            do {
+                let candidateCreds = try loadCredentials(from: candidate, data: candidateData)
+                guard sameCodexWorkspace(staleCreds, candidateCreds) else {
+                    if isExplicit {
+                        explicitError = explicitError ?? ProviderError("workspace_mismatch", "Source auth file is a different Codex workspace.")
+                    }
+                    continue
+                }
+                if let currentChosen = chosen {
+                    let candIssued = tokenIssuedAt(candidateCreds.accessToken)
+                    let currIssued = tokenIssuedAt(currentChosen.creds.accessToken)
+                    if candIssued < currIssued {
+                        continue
+                    }
+                    if candIssued == currIssued {
+                        let candUsableAccess = !rejectedAccess.contains(candidateCreds.accessToken)
+                        let currUsableAccess = !rejectedAccess.contains(currentChosen.creds.accessToken)
+                        let candPreferred = (candUsableAccess && !currUsableAccess)
+                            || (candUsableAccess == currUsableAccess
+                                && candidateCreds.refreshToken != nil
+                                && currentChosen.creds.refreshToken == nil)
+                        if !candPreferred {
+                            continue
+                        }
+                    }
+                }
+                chosen = (candidate, candidateData, candidateCreds)
+            } catch let error as ProviderError where isExplicit {
+                explicitError = explicitError ?? error
+            } catch {
+                if isExplicit {
+                    explicitError = explicitError ?? ProviderError("source_missing", "Original auth file could not be read.")
+                }
+            }
         }
 
-        guard let sourceData = FileManager.default.contents(atPath: expandedSource) else {
-            throw ProviderError("source_missing", "Original auth file could not be read.")
+        guard let resolvedSource = chosen else {
+            if let explicitError {
+                throw explicitError
+            }
+            throw ProviderError("no_source", "No sourcePath metadata available for recovery.")
         }
-        let sourceCreds = try loadCredentials(from: expandedSource, data: sourceData)
-        guard sameCodexWorkspace(staleCreds, sourceCreds) else {
-            throw ProviderError("workspace_mismatch", "Source auth file is a different Codex workspace.")
-        }
+
+        let expandedSource = resolvedSource.path
+        let sourceData = resolvedSource.data
+        let sourceCreds = resolvedSource.creds
 
         guard let targetData = FileManager.default.contents(atPath: expandedCredential),
               let targetCreds = try? loadCredentials(from: expandedCredential, data: targetData),
@@ -264,8 +326,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         }
 
         var effective = sourceCreds
-        var recoveryRejectedAccess = Set<String>([staleCreds.accessToken])
-        var recoveryRejectedRefresh = Set<String>()
+        var recoveryRejectedAccess = rejectedAccess
+        var recoveryRejectedRefresh = rejectedRefreshTokens
         if !sourceCreds.isApiKeyMode, sourceCreds.needsRefresh, let rt = sourceCreds.refreshToken {
             do {
                 let outcome = try await refreshCredentialsOutcome(
@@ -918,7 +980,11 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         credentialId: String,
         nativeIdentityKey: String?
     ) -> [String] {
-        let local = [credentialPath, sourcePath].compactMap { raw -> String? in
+        let fallbackLivePaths = [
+            "\(homeDirectory)/.codex/auth.json",
+            "\(homeDirectory)/.codex/auth.json.bak"
+        ].filter { FileManager.default.fileExists(atPath: $0) }
+        let local = ([credentialPath, sourcePath] + fallbackLivePaths).compactMap { raw -> String? in
             let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
             guard !trimmed.isEmpty else { return nil }
             return NSString(string: trimmed).expandingTildeInPath

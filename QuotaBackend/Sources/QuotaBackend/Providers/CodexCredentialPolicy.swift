@@ -200,7 +200,7 @@ public struct CodexAccountIdentity: Equatable, Sendable {
         return normalized
     }
 
-    private static func jwtPayload(_ token: String?) -> [String: Any]? {
+    fileprivate static func jwtPayload(_ token: String?) -> [String: Any]? {
         guard let pieces = token?.split(separator: "."), pieces.count >= 2 else { return nil }
         var payload = String(pieces[1]).replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
         payload += String(repeating: "=", count: (4 - payload.count % 4) % 4)
@@ -895,6 +895,105 @@ public enum CodexCredentialPolicy {
         )
     }
 
+    public static func identitiesMatchExactly(_ lhs: CodexAccountIdentity, _ rhs: CodexAccountIdentity) -> Bool {
+        guard lhs.matches(rhs) else { return false }
+        if let lKey = lhs.nativeKey, let rKey = rhs.nativeKey {
+            return lKey == rKey
+        }
+        return true
+    }
+
+    /// Flushes any fresher live Codex OAuth session from `candidatePaths` (e.g. `~/.codex/auth.json` and `.bak`)
+    /// back into managed credential files and their linked CPA copies BEFORE an incoming account switch
+    /// overwrites the shared live auth file.
+    @discardableResult
+    public static func flushLiveAuthToManagedCopies(
+        candidatePaths: [String],
+        excludingIdentity: CodexAccountIdentity,
+        loadCredentials: () -> [AccountCredential],
+        fm: FileManager = .default
+    ) -> Int {
+        let normalizedCandidates = candidatePaths.map {
+            URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath).standardizedFileURL.path
+        }
+        let candidateSet = Set(normalizedCandidates)
+        let hasOutgoingCandidate = normalizedCandidates.contains { path in
+            guard let data = fm.contents(atPath: path),
+                  let snapshot = parseAuthSnapshot(from: data) else {
+                return false
+            }
+            return !identitiesMatchExactly(excludingIdentity, snapshot.identity)
+        }
+        guard hasOutgoingCandidate else { return 0 }
+
+        var writtenCount = 0
+        var visitedPaths = Set<String>()
+
+        for credential in loadCredentials() where credential.providerId == "codex" && credential.authMethod == .authFile {
+            let primaryPath = NSString(string: credential.credential).expandingTildeInPath
+            let normalizedPrimary = URL(fileURLWithPath: primaryPath).standardizedFileURL.path
+            guard !normalizedPrimary.isEmpty,
+                  !candidateSet.contains(normalizedPrimary),
+                  let primaryData = fm.contents(atPath: primaryPath),
+                  let primarySnapshot = parseAuthSnapshot(from: primaryData) else {
+                continue
+            }
+
+            let credentialIdentity = CodexAccountIdentity(credential: credential)
+            let expectedIdentity: CodexAccountIdentity
+            if credentialIdentity.key != nil {
+                guard identitiesMatchExactly(credentialIdentity, primarySnapshot.identity) else { continue }
+                expectedIdentity = primarySnapshot.identity.nativeKey != nil ? primarySnapshot.identity : credentialIdentity
+            } else {
+                expectedIdentity = primarySnapshot.identity
+            }
+
+            guard !identitiesMatchExactly(excludingIdentity, expectedIdentity) else { continue }
+
+            let linkedPaths = CodexLinkedCredentialCopies.paths(
+                forCredentialId: credential.id,
+                nativeIdentityKey: expectedIdentity.nativeKey
+            )
+            let targetGroups: [(path: String, sources: [String])] =
+                [(primaryPath, normalizedCandidates)]
+                + linkedPaths.map { ($0, normalizedCandidates + [primaryPath]) }
+
+            for entry in targetGroups {
+                let targetStdPath = URL(fileURLWithPath: NSString(string: entry.path).expandingTildeInPath).standardizedFileURL.path
+                guard !targetStdPath.isEmpty,
+                      !candidateSet.contains(targetStdPath),
+                      visitedPaths.insert(targetStdPath).inserted,
+                      let currentData = fm.contents(atPath: entry.path),
+                      let targetSnapshot = parseAuthSnapshot(from: currentData),
+                      identitiesMatchExactly(expectedIdentity, targetSnapshot.identity) else {
+                    continue
+                }
+
+                let reconciled = reconcileSameIdentityAuthData(
+                    managedNativeData: currentData,
+                    managedSourceData: currentData,
+                    expectedIdentity: expectedIdentity,
+                    candidatePaths: entry.sources,
+                    fm: fm
+                )
+                guard reconciled.isValidBaseline,
+                      reconciled.adoptedLiveCandidate,
+                      let healedData = reconciled.healedManagedData,
+                      healedData != currentData,
+                      fm.contents(atPath: entry.path) == currentData else {
+                    continue
+                }
+                do {
+                    try healedData.write(to: URL(fileURLWithPath: entry.path), options: .atomic)
+                    writtenCount += 1
+                } catch {
+                    continue
+                }
+            }
+        }
+        return writtenCount
+    }
+
     private static func isStrictlyNewer(_ candidate: ParsedAuthSnapshot, than baseline: ParsedAuthSnapshot) -> Bool {
         if baseline.refreshToken != nil && candidate.refreshToken == nil {
             return false
@@ -1194,8 +1293,23 @@ public enum CodexCredentialPolicy {
         if let lr = best.lastRefreshRaw {
             json["last_refresh"] = lr
         }
-        if let exp = best.expiredRaw, json["expired"] != nil {
-            json["expired"] = exp
+        if json["expired"] != nil {
+            let jwtExp = (CodexAccountIdentity.jwtPayload(best.accessToken)?["exp"] as? NSNumber)?.doubleValue
+            let validBestExpired: String? = {
+                guard let expRaw = best.expiredRaw else { return nil }
+                if let expTime = best.expiredTime, expTime <= Date().timeIntervalSince1970 + 300,
+                   let jwtExp, jwtExp > expTime {
+                    return nil
+                }
+                return expRaw
+            }()
+            if let exp = validBestExpired {
+                json["expired"] = exp
+            } else if let jwtExp {
+                json["expired"] = SharedFormatters.iso8601String(from: Date(timeIntervalSince1970: jwtExp))
+            } else {
+                json.removeValue(forKey: "expired")
+            }
         }
         guard let healedData = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted, .sortedKeys]),
               let healedSnapshot = parseAuthSnapshot(from: healedData),

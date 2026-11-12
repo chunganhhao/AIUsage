@@ -91,7 +91,11 @@ final class ProviderActivationManager: ObservableObject {
         case failure(String)
     }
 
-    private init() {}
+    private init() {
+        if let cliProxyPaths = try? CLIProxyPaths() {
+            CodexLinkedCredentialCopies.registerDirectory(cliProxyPaths.authDirectory)
+        }
+    }
 
     private func persistActiveIds() {
         do {
@@ -310,6 +314,12 @@ final class ProviderActivationManager: ObservableObject {
         // 先完成 config.toml 与 auth.json 写入，成功后才更新 .codex-global-state.json，避免切换失败时污染 renderer 状态。
         NotificationCenter.default.post(name: .codexSubscriptionAccountActivating, object: nil)
         try CodexConfigManager.shared.restore()
+        CodexCredentialPolicy.flushLiveAuthToManagedCopies(
+            candidatePaths: [targetPath, "\(targetPath).bak"],
+            excludingIdentity: reconciled.identity,
+            loadCredentials: { AccountCredentialStore.shared.loadCredentials(for: "codex") },
+            fm: fm
+        )
         try writeAuthFileWithBackup(targetDir: codexDir, targetPath: targetPath, data: effectiveData, fm: fm)
         let managedURL = URL(fileURLWithPath: resolved)
         if reconciled.adoptedLiveCandidate,
@@ -975,7 +985,28 @@ final class ProviderActivationManager: ObservableObject {
         }
 
         let backupPath = "\(targetPath).bak"
-        if fm.fileExists(atPath: targetPath) {
+        let existingTargetData = fm.contents(atPath: targetPath)
+        let shouldUpdateBackup: Bool = {
+            guard fm.fileExists(atPath: targetPath) else { return false }
+            guard fm.fileExists(atPath: backupPath),
+                  let incomingJSON = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let targetData = existingTargetData,
+                  let targetJSON = try? JSONSerialization.jsonObject(with: targetData) as? [String: Any],
+                  let backupData = fm.contents(atPath: backupPath),
+                  let backupJSON = try? JSONSerialization.jsonObject(with: backupData) as? [String: Any] else {
+                return true
+            }
+            let incomingIdentity = CodexAccountIdentity(authJSON: incomingJSON)
+            let targetIdentity = CodexAccountIdentity(authJSON: targetJSON)
+            let backupIdentity = CodexAccountIdentity(authJSON: backupJSON)
+            guard incomingIdentity.key != nil, targetIdentity.key != nil, backupIdentity.key != nil else {
+                return true
+            }
+            // Keep an existing foreign outgoing backup intact when re-writing the active account (e.g., Restart Codex).
+            return !CodexCredentialPolicy.identitiesMatchExactly(incomingIdentity, targetIdentity)
+                || CodexCredentialPolicy.identitiesMatchExactly(incomingIdentity, backupIdentity)
+        }()
+        if shouldUpdateBackup {
             try? fm.removeItem(atPath: backupPath)
             try fm.copyItem(atPath: targetPath, toPath: backupPath)
         }
@@ -983,9 +1014,9 @@ final class ProviderActivationManager: ObservableObject {
         do {
             try data.write(to: URL(fileURLWithPath: targetPath), options: .atomic)
         } catch {
-            if fm.fileExists(atPath: backupPath) {
-                try? fm.removeItem(atPath: targetPath)
-                try? fm.copyItem(atPath: backupPath, toPath: targetPath)
+            // Restore only the pre-write target snapshot; never overwrite target with a preserved foreign .bak.
+            if let existingTargetData, fm.contents(atPath: targetPath) != existingTargetData {
+                try? existingTargetData.write(to: URL(fileURLWithPath: targetPath), options: .atomic)
             }
             let redactedError = SensitiveDataRedactor.redactedMessage(for: error)
             let msg = settings.t("Switch failed: \(redactedError)", "切换失败：\(redactedError)")

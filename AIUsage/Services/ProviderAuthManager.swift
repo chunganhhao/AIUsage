@@ -288,7 +288,7 @@ enum ProviderAuthManager {
                 credentialValue = candidate.credentialValue
             }
 
-            let storedSourcePath = candidate.sourcePath ?? ""
+            let storedSourcePath = AccountCredentialStore.persistentSourcePath(from: candidate.sourcePath) ?? ""
 
             let credential = AccountCredential(
                 providerId: candidate.providerId,

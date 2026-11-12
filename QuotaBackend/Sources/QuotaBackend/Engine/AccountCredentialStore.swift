@@ -661,6 +661,34 @@ public final class AccountCredentialStore: @unchecked Sendable {
         return normalized
     }
 
+    public static func isEphemeralTemporaryAuthPath(_ rawPath: String) -> Bool {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let expanded = NSString(string: trimmed).expandingTildeInPath
+        let standardized = URL(fileURLWithPath: expanded)
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        let tempRoot = FileManager.default.temporaryDirectory
+            .resolvingSymlinksInPath()
+            .standardizedFileURL.path
+        let normalizedTempRoot = tempRoot.hasSuffix("/") ? tempRoot : tempRoot + "/"
+        if standardized.hasPrefix(normalizedTempRoot) {
+            return true
+        }
+        return standardized.contains("/aiusage-codex-login-")
+            || standardized.contains("/aiusage-gemini-login-")
+            || standardized.contains("/aiusage-antigravity-login-")
+    }
+
+    public static func persistentSourcePath(from rawPath: String?) -> String? {
+        guard let trimmed = rawPath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty,
+              !isEphemeralTemporaryAuthPath(trimmed) else {
+            return nil
+        }
+        return trimmed
+    }
+
     /// Stable, secret-free descriptor of the identity information carried by a
     /// credential. This is intended for diagnostics and tests; callers must use
     /// `credentialsShareCanonicalIdentity` for comparison because incomplete
