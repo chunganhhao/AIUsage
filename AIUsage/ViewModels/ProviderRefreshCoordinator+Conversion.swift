@@ -108,7 +108,7 @@ extension ProviderRefreshCoordinator {
     // nonisolated + 显式 language：本地化是正则密集型纯变换，挪出主线程批处理（issue #28）。
     // 模块默认 MainActor 隔离，故 nonisolated 上下文不能读 settings.language，语言一律由调用方在主线程取值后传入。
     nonisolated func localizeProviderData(_ provider: ProviderData, language: String) -> ProviderData {
-        guard language == "zh" else { return provider }
+        guard language == "zh" || language == "vi" else { return provider }
 
         return ProviderData(
             id: provider.id,
@@ -210,7 +210,7 @@ extension ProviderRefreshCoordinator {
     }
 
     nonisolated func localizeOverview(_ overview: DashboardOverview, language: String) -> DashboardOverview {
-        guard language == "zh" else { return overview }
+        guard language == "zh" || language == "vi" else { return overview }
 
         return DashboardOverview(
             generatedAt: overview.generatedAt,
@@ -485,58 +485,307 @@ extension ProviderRefreshCoordinator {
             "Google stopped serving Gemini CLI for personal Google accounts (free, Google AI Pro and Ultra) on June 18, 2026. Only Gemini Code Assist Standard or Enterprise licenses still work — track personal accounts with Antigravity instead.": "Google 已于 2026 年 6 月 18 日停止为个人 Google 账号（免费、Google AI Pro / Ultra）提供 Gemini CLI，只有 Gemini Code Assist Standard / Enterprise 许可仍可使用。个人账号请改用 Antigravity 查看额度。"
     ]
 
+    private static let exactTranslationsVI: [String: String] = [
+        "Connected Sources": "Nguồn đang theo dõi",
+        "Attention Queue": "Cần chú ý",
+        "Tracked Local Cost": "Theo dõi chi phí",
+        "Resets In 24h": "Sắp làm mới",
+        "Tracked Services": "Dịch vụ đang theo dõi",
+        "Live Accounts": "Tài khoản trực tuyến",
+        "Cost Tracking": "Thống kê sử dụng",
+        "Status Alerts": "Cảnh báo trạng thái",
+        "Live snapshot": "Ảnh chụp trực tiếp",
+        "Fetched successfully": "Lấy dữ liệu thành công",
+        "This provider is connected.": "Nhà cung cấp này đã kết nối.",
+        "Collection failed": "Thu thập thất bại",
+        "Unavailable": "Không khả dụng",
+        "Check local auth or provider session": "Kiểm tra đăng nhập cục bộ hoặc phiên dịch vụ",
+        "Unknown source": "Nguồn không xác định",
+        "Environment variable": "Biến môi trường",
+        "Manual credentials": "Thông tin xác thực thủ công",
+        "Browser session": "Phiên trình duyệt",
+        "Desktop cache": "Bộ nhớ đệm ứng dụng",
+        "CLIProxy auth file": "Tệp xác thực CLIProxy",
+        "GitHub CLI": "GitHub CLI",
+        "Local CLI session": "Phiên CLI cục bộ",
+        "Local Claude logs": "Nhật ký Claude cục bộ",
+        "Proxy usage ledger": "Sổ cái sử dụng Proxy",
+        "Proxy + subscription ledger": "Sổ cái Proxy + gói đăng ký",
+        "Proxy + non-proxy ledger": "Sổ cái Proxy + ngoài Proxy",
+        "Non-proxy tokens • Cost not tracked": "Token ngoài Proxy • Không tính chi phí",
+        "Claude Subscription": "Gói đăng ký Claude",
+        "Claude Subscription needs attention": "Gói đăng ký Claude cần chú ý",
+        "Claude Subscription is getting tight": "Gói đăng ký Claude sắp chạm giới hạn",
+        "Reconnect needed": "Cần kết nối lại",
+        "Quota sync was removed from Claude Code settings.": "Đồng bộ hạn mức đã bị gỡ khỏi cài đặt Claude Code.",
+        "No subscription data": "Chưa có dữ liệu gói đăng ký",
+        "Claude Code is using an API proxy, which doesn't report subscription limits.": "Claude Code đang dùng API proxy nên không trả về hạn mức gói đăng ký.",
+        "Waiting for first sync": "Đang chờ đồng bộ đầu tiên",
+        "Limits appear after your next Claude Code message.": "Hạn mức sẽ hiện sau tin nhắn Claude Code tiếp theo.",
+        "Limits reset": "Hạn mức đã đặt lại",
+        "Starts with next message": "Bắt đầu tính từ tin nhắn tiếp theo",
+        "Updates after your next Claude Code message.": "Cập nhật sau tin nhắn Claude Code tiếp theo.",
+        "Last synced": "Đồng bộ gần nhất",
+        "Synced": "Đã đồng bộ",
+        "Organization": "Tổ chức",
+        "Quota syncs each time Claude Code responds. Usage on claude.ai or other devices shows up after your next Code message.": "Hạn mức được đồng bộ mỗi khi Claude Code trả lời; mức dùng trên claude.ai hoặc thiết bị khác sẽ hiện sau tin nhắn Code tiếp theo.",
+        "Claude Code local tokens; proxy costs only. Not subscription quota.": "Token cục bộ và chi phí proxy; không phải hạn mức gói đăng ký.",
+        "Unverified Tokens": "Token chưa xác minh",
+        "Excluded from totals": "Chưa tính vào tổng",
+        "Gemini CLI OAuth": "Gemini CLI OAuth",
+        "Kiro IDE session": "Phiên Kiro IDE",
+        "Stored credential": "Thông tin xác thực đã lưu",
+        "WebView session": "Phiên WebView",
+        "Pasted cookie": "Cookie đã dán",
+        "Stored session": "Phiên đã lưu",
+        "Imported credential": "Thông tin xác thực đã nhập",
+        "Saved": "Đã lưu",
+        "Awaiting a live session": "Đang chờ phiên hoạt động",
+        "Unknown": "Không rõ",
+        "None": "Không",
+        "Connected": "Đã kết nối",
+        "Unlimited": "Không giới hạn",
+        "Not available": "Không khả dụng",
+        "Tracked": "Đang theo dõi",
+        "No fixed cap detected": "Không phát hiện giới hạn cố định",
+        "No cap detected": "Không phát hiện giới hạn",
+        "main request reserve": "dự trữ yêu cầu chính",
+        "quota snapshot": "ảnh chụp hạn mức",
+        "Antigravity quota snapshot": "Ảnh chụp hạn mức Antigravity",
+        "lowest remaining model": "mô hình còn ít nhất",
+        "Most Copilot lanes are unlimited": "Đa số kênh Copilot không giới hạn",
+        "tightest Copilot lane": "kênh Copilot căng nhất",
+        "Kiro usage snapshot": "Ảnh chụp mức dùng Kiro",
+        "tightest Kiro lane": "kênh Kiro căng nhất",
+        "Usage snapshot ready": "Ảnh chụp mức dùng đã sẵn sàng",
+        "lowest remaining window": "cửa sổ còn ít nhất",
+        "Gemini quota snapshot": "Ảnh chụp hạn mức Gemini",
+        "lowest remaining family": "nhóm mô hình còn ít nhất",
+        "Cursor usage snapshot": "Ảnh chụp mức dùng Cursor",
+        "tightest remaining allowance": "hạn mức còn lại ít nhất",
+        "Token telemetry ready": "Dữ liệu token đã sẵn sàng",
+        "lowest remaining token pool": "pool token còn ít nhất",
+        "Unlimited mode": "Chế độ không giới hạn",
+        "Desktop quota cache": "Bộ nhớ đệm hạn mức Desktop",
+        "credits left this cycle": "tín dụng còn lại chu kỳ này",
+        "Warp reports credits through its API: the cycle allowance is used first, then bonus and add-on credits.": "Warp báo cáo tín dụng qua API: hạn mức chu kỳ được dùng trước, rồi tới tín dụng thưởng và mua thêm.",
+        "Warp API key was rejected. Create a personal key in Warp → Settings → Cloud platform → API keys.": "Warp API key bị từ chối. Hãy tạo khóa cá nhân tại Warp → Settings → Cloud platform → API keys.",
+        "Warp API is rate limiting requests. Try again later.": "API Warp đang giới hạn tốc độ. Thử lại sau.",
+        "Pool Protection Needs Attention": "Bảo vệ Pool cần chú ý",
+        "Pool Protection Active": "Bảo vệ Pool đang bật",
+        "Pool protection could not be synchronized. Check the managed CPA version and model exclusions.": "Không thể đồng bộ bảo vệ pool. Kiểm tra phiên bản CPA và danh sách loại trừ mô hình.",
+        "Local cost telemetry": "Thống kê chi phí cục bộ",
+        "Local spend ledger": "Sổ cái chi phí cục bộ",
+        "Account": "Tài khoản",
+        "Email": "Email",
+        "Plan": "Gói",
+        "Workspace": "Không gian làm việc",
+        "Credits": "Tín dụng",
+        "AI Credits": "Tín dụng AI",
+        "Available": "Khả dụng",
+        "No available credits": "Không có tín dụng khả dụng",
+        "Monthly Credit Limit": "Giới hạn tín dụng tháng",
+        "Reset": "Đặt lại",
+        "Source": "Nguồn",
+        "Project": "Dự án",
+        "Tracked Models": "Mô hình theo dõi",
+        "Quota Windows": "Cửa sổ hạn mức",
+        "Antigravity meters quota per model group, each with a 5-hour and a weekly limit, so the dashboard lists every window and puts the tightest ones first.": "Antigravity đo hạn mức theo nhóm mô hình, mỗi nhóm có giới hạn 5 giờ và hàng tuần, nên bảng điều khiển xếp các cửa sổ gần cạn lên trước.",
+        "Main Pool": "Pool chính",
+        "Assistant Pool": "Pool trợ lý",
+        "Bonus Credits": "Tín dụng thưởng",
+        "Premium": "Premium",
+        "Chat": "Trò chuyện",
+        "Completions": "Hoàn thành",
+        "Auth": "Xác thực",
+        "Region": "Khu vực",
+        "Today": "Hôm nay",
+        "This Week": "Tuần này",
+        "This Month": "Tháng này",
+        "Scanned Calls": "Lượt gọi đã quét",
+        "Scanned Turns": "Lượt trao đổi đã quét",
+        "Requests": "Yêu cầu",
+        "Assistant Credits": "Tín dụng trợ lý",
+        "Main Plan": "Gói chính",
+        "Included Usage": "Mức dùng trong gói",
+        "This MiniMax key has no active Token Plan quota.": "Khóa MiniMax này không có hạn mức Token Plan đang hoạt động.",
+        "Prepaid Balance": "Số dư trả trước",
+        "included usage this week": "mức dùng trong gói tuần này",
+        "included usage this month": "mức dùng trong gói tháng này",
+        "Cursor's unified plan shares one included-usage pool with Grok, so the card tracks that pool instead of separate model allowances; usage beyond it draws from the prepaid balance.": "Gói thống nhất của Cursor dùng chung một pool hạn mức với Grok; phần vượt quá sẽ trừ vào số dư trả trước.",
+        "Named Models": "Mô hình định danh",
+        "Free Quota": "Hạn mức miễn phí",
+        "Used": "Đã dùng",
+        "Remaining": "Còn lại",
+        "Hourly Refill": "Bổ sung theo giờ",
+        "Included Plan": "Gói bao gồm",
+        "On-demand": "Theo nhu cầu",
+        "Lowest Remaining": "Còn lại ít nhất",
+        "Billing Period": "Kỳ thanh toán",
+        "Billing cycle detected": "Đã nhận diện kỳ thanh toán",
+        "Standard Tokens": "Token chuẩn",
+        "Premium Tokens": "Token cao cấp",
+        "GitHub account": "Tài khoản GitHub",
+        "OpenAI account": "Tài khoản OpenAI",
+        "Gemini CLI account": "Tài khoản Gemini CLI",
+        "Kiro account": "Tài khoản Kiro",
+        "Local Codex logs": "Nhật ký Codex cục bộ",
+        "Reset unavailable": "Không rõ thời gian đặt lại",
+        "Reset date unknown": "Không rõ ngày đặt lại",
+        "Everything is within normal range": "Mọi thứ đều trong ngưỡng bình thường",
+        "No urgent resets detected": "Chưa có cửa sổ nào sắp đặt lại",
+        "A few windows are about to roll over": "Một số cửa sổ sắp đặt lại chu kỳ",
+        "Warp can read from local app cache, which makes the panel feel instantaneous and keeps the design centered on what is actually left right now.": "Warp đọc trực tiếp từ bộ nhớ đệm cục bộ giúp cập nhật tức thì và tập trung vào lượng còn lại thực tế.",
+        "This tracker reads AIUsage's Claude proxy usage archive. Token and cost totals are frozen when each proxy request is logged, so it works as a local cost ledger rather than an official subscription meter.": "Nguồn theo dõi này đọc lưu trữ sử dụng Claude proxy của AIUsage. Tổng token và chi phí được chốt khi ghi yêu cầu, đóng vai trò sổ cái chi phí cục bộ thay cho đồng hồ gói đăng ký.",
+        "This tracker combines priced Codex proxy archive usage with token-only non-proxy Codex session logs. Proxy JSONL rows are ignored here to avoid double counting.": "Nguồn này gộp lưu trữ Codex proxy đã tính giá với nhật ký phiên Codex ngoài proxy (chỉ tính token). Các dòng JSONL của proxy được bỏ qua để tránh đếm trùng.",
+        "Claude proxy usage archive token and cost ledger": "Sổ cái token & chi phí từ lưu trữ Claude proxy",
+        "Claude Gateway usage archive token and cost ledger": "Sổ cái token & chi phí từ lưu trữ Claude Gateway",
+        "Code, Desktop and Science usage recorded by Claude Gateway": "Mức dùng Code, Desktop và Science do Claude Gateway ghi nhận",
+        "Local token and cost ledger from Claude proxy usage": "Sổ cái token và chi phí cục bộ từ Claude proxy",
+        "Proxy cost ledger plus non-proxy Codex token usage": "Sổ cái chi phí proxy cộng mức dùng token Codex ngoài proxy",
+        "Codex": "Codex",
+        "Antigravity transcript tokens this month": "Token phiên Antigravity tháng này",
+        "This tracker reads local Antigravity transcript tokens only. Proxy costs are not included.": "Nguồn này chỉ đọc token từ nhật ký Antigravity cục bộ, không bao gồm chi phí proxy.",
+        "No Antigravity transcript token usage recorded": "Chưa ghi nhận token từ phiên Antigravity",
+        "Local token ledger": "Sổ cái token cục bộ",
+        "Codex proxy + non-proxy usage this month": "Mức dùng Codex proxy + ngoài proxy tháng này",
+        "Local ledgers and usage-derived spend": "Sổ cái cục bộ và chi phí suy diễn theo mức dùng",
+        "Copilot can mix unlimited and metered lanes. The dashboard keeps unlimited channels visible, but only metered windows affect watch and critical states.": "Copilot có cả kênh không giới hạn và kênh có định mức. Bảng điều khiển vẫn hiển thị kênh không giới hạn nhưng chỉ kênh định mức mới ảnh hưởng trạng thái cảnh báo.",
+        "Codex has multiple overlapping guardrails, so the UI surfaces all windows together and uses the tightest one to drive alerting.": "Codex có nhiều lớp giới hạn chồng lên nhau nên giao diện hiển thị tất cả cửa sổ và lấy cửa sổ căng nhất để cảnh báo.",
+        "Gemini quota is model-family based, so the dashboard groups the lowest remaining family first and keeps the project context attached.": "Hạn mức Gemini tính theo họ mô hình nên bảng điều khiển ưu tiên nhóm còn ít nhất trước và giữ nguyên ngữ cảnh dự án.",
+        "Cursor mixes percent-based allowances with dollar-based plan spend, so the card pairs remaining percentages with included and on-demand spend signals.": "Cursor kết hợp hạn mức phần trăm với chi phí gói theo USD nên thẻ hiển thị song song phần trăm còn lại và chi tiêu trong/ngoài gói.",
+        "Droid usage is token-heavy, so the panel keeps raw token counts visible next to the percentage-based pools.": "Mức dùng Droid thiên về token nên bảng vẫn giữ số token gốc cạnh các pool phần trăm.",
+        "Factory Individual plans share three rolling windows. A request needs headroom in the 5-hour, weekly, and monthly buckets.": "Gói Factory Individual dùng chung ba cửa sổ cuốn. Yêu cầu cần còn dư địa ở cả ba ngưỡng 5 giờ, hàng tuần và hàng tháng.",
+        "lowest remaining rate-limit window": "cửa sổ giới hạn tốc độ còn ít nhất",
+        "5h Window": "Cửa sổ 5 giờ",
+        "Weekly Window": "Cửa sổ 7 ngày",
+        "Monthly Window": "Cửa sổ 1 tháng",
+        "Extra Usage": "Mức dùng bổ sung",
+        "When Limit Hits": "Khi chạm giới hạn",
+        "Model": "Mô hình",
+        "5h Reset": "Đặt lại 5 giờ",
+        "Weekly Reset": "Đặt lại tuần",
+        "tightest Kimi Code window": "cửa sổ Kimi Code căng nhất",
+        "Kimi Code subscription usage": "Mức dùng gói đăng ký Kimi Code",
+        "Kimi Code shares one quota across CLI, IDE, and API keys. The weekly window resets every 7 days; the rolling rate-limit window recovers within a few hours.": "Kimi Code dùng chung một hạn mức cho CLI, IDE và API key. Cửa sổ tuần đặt lại mỗi 7 ngày; cửa sổ 5 giờ hồi phục dần sau vài giờ.",
+        "GitHub Education access": "Quyền truy cập GitHub Education",
+        "Personal": "Cá nhân",
+        "Team": "Nhóm",
+        "Business": "Doanh nghiệp",
+        "Enterprise": "Doanh nghiệp lớn",
+        "Edu": "Giáo dục",
+        "Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first.": "Antigravity cung cấp hạn mức theo từng mô hình nên bảng điều khiển giữ riêng từng mô hình và xếp mô hình gần cạn lên trước.",
+        "Antigravity groups models into shared 5-hour and weekly pools, and places the tightest window first.": "Antigravity gộp các mô hình vào pool dùng chung 5 giờ và hàng tuần, và xếp cửa sổ căng nhất lên trước.",
+        "Google stopped serving Gemini CLI for personal Google accounts (free, Google AI Pro and Ultra) on June 18, 2026. Only Gemini Code Assist Standard or Enterprise licenses still work — track personal accounts with Antigravity instead.": "Google đã ngừng phục vụ Gemini CLI cho tài khoản cá nhân (miễn phí, Google AI Pro và Ultra) từ 18/06/2026. Chỉ giấy phép Gemini Code Assist Standard hoặc Enterprise còn hoạt động — hãy theo dõi tài khoản cá nhân bằng Antigravity."
+    ]
+
+    private static let zhRegexReplacements: [(pattern: String, template: String)] = [
+        (#"^Unable to sync pool circuit breaker: (.+) Pool protection was not confirmed\.$"#, "无法同步分池熔断器：$1 未确认保护已生效。"),
+        (#"^Protected pools: (.+)\. Other pools remain available\. Recovery requires weekly > 3% and five-hour > 5%\.$"#, "受保护的池：$1。其他池仍可用；恢复需周剩余额度 > 3%、五小时剩余额度 > 5%。"),
+        (#"^Plan · (.+)$"#, "计划 · $1"),
+        (#"^Membership · (.+)$"#, "会员 · $1"),
+        (#"^(.+) · 5h$"#, "$1 · 5小时"),
+        (#"^(.+) · Weekly$"#, "$1 · 周限"),
+        (#"^(.+) left$"#, "剩余 $1"),
+        (#"^(.+) used$"#, "已用 $1"),
+        (#"^(\d[\d,]*) total$"#, "总量 $1"),
+        (#"^(\d[\d,]*) duplicate rows removed$"#, "已去重 $1 条"),
+        (#"^(\d[\d,]*) proxy responses excluded$"#, "已排除 $1 条代理记录"),
+        (#"^(\d[\d,]*) tokens$"#, "$1 个 tokens"),
+        (#"^(\d[\d,]*) tokens this month$"#, "本月 $1 tokens"),
+        (#"^(\d[\d,]*) tokens observed this week$"#, "本周记录 $1 tokens"),
+        (#"^(\d[\d,]*) providers in the mesh$"#, "当前连接 $1 个服务"),
+        (#"^(\d[\d,]*) critical right now$"#, "当前有 $1 个告急"),
+        (#"^(\d[\d,]*) lanes tracked$"#, "跟踪 $1 个通道"),
+        (#"^token expires (.+)$"#, "token 将于 $1 过期"),
+        (#"^(.+) needs attention$"#, "$1 需要关注"),
+        (#"^(.+) is getting tight$"#, "$1 余额趋紧"),
+        (#"^(.+) has unpriced models$"#, "$1 有未定价模型"),
+        (#"^(.+) • Reset unavailable$"#, "$1 • 重置时间未知"),
+        (#"^(.+) • Resets soon$"#, "$1 • 即将重置"),
+        (#"^(.+) • Resets in (\d+)d (\d+)h$"#, "$1 • $2天$3小时后重置"),
+        (#"^(.+) • Resets in (\d+)h (\d+)m$"#, "$1 • $2小时$3分钟后重置"),
+        (#"^(.+) • Resets in (\d+)m$"#, "$1 • $2分钟后重置"),
+        (#"^Resets soon$"#, "即将重置"),
+        (#"^Resets in (\d+)d (\d+)h$"#, "$1天$2小时后重置"),
+        (#"^Resets in (\d+)h (\d+)m$"#, "$1小时$2分钟后重置"),
+        (#"^Resets in (\d+)m$"#, "$1分钟后重置"),
+        (#"^Antigravity auth files detected: (\d[\d,]*)\. This snapshot uses the most recently updated file \((.+)\)\.$"#, "检测到 $1 个 Antigravity 授权文件，当前快照使用的是最近更新的那个（$2）。"),
+        (#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#, "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。"),
+        (#"^(\d[\d,]*(?:\.\d+)?) credits$"#, "$1 积分"),
+        (#"^(\d[\d,]*) over$"#, "超出 $1"),
+        (#"^Kiro reported (\d[\d,]*) usage lanes\. This card shows the three tightest ones first so attention stays on the lanes that will run out soonest\.$"#, "Kiro 报告了 $1 个用量通道，这张卡片会优先展示最紧张的三个，方便你先关注最先见底的通道。"),
+        (#"^Kiro usage is pulled from the same AWS-backed endpoint the desktop app uses, so this snapshot reflects the live agentic request lanes exposed by the app\.$"#, "Kiro 的用量来自桌面应用同一个 AWS 接口，所以这个快照能反映应用当前暴露出来的实时 agent 请求通道。"),
+        (#"^Resets (.+) at (.+)$"#, "重置于 $1 $2"),
+        (#"^(.+) bonus credits remain$"#, "剩余 $1 奖励额度"),
+        (#"^Week (.+) • Today (.+)$"#, "本周 $1 • 今日 $2"),
+        (#"^Proxy costs • Week (.+) • Today (.+)$"#, "代理费用 · 本周 $1 · 今日 $2")
+    ]
+
+    private static let viRegexReplacements: [(pattern: String, template: String)] = [
+        (#"^Unable to sync pool circuit breaker: (.+) Pool protection was not confirmed\.$"#, "Không thể đồng bộ cầu dao theo pool: $1 Không xác nhận bảo vệ thành công."),
+        (#"^Protected pools: (.+)\. Other pools remain available\. Recovery requires weekly > 3% and five-hour > 5%\.$"#, "Pool được bảo vệ: $1. Các pool khác vẫn khả dụng; khôi phục cần giới hạn tuần > 3% và 5 giờ > 5%."),
+        (#"^Plan · (.+)$"#, "Gói · $1"),
+        (#"^Membership · (.+)$"#, "Thành viên · $1"),
+        (#"^(.+) · 5h$"#, "$1 · 5 giờ"),
+        (#"^(.+) · Weekly$"#, "$1 · Hàng tuần"),
+        (#"^(.+) left$"#, "Còn $1"),
+        (#"^(.+) used$"#, "Đã dùng $1"),
+        (#"^(\d[\d,]*) total$"#, "Tổng $1"),
+        (#"^(\d[\d,]*) duplicate rows removed$"#, "Đã loại bỏ $1 dòng trùng"),
+        (#"^(\d[\d,]*) proxy responses excluded$"#, "Đã loại trừ $1 phản hồi proxy"),
+        (#"^(\d[\d,]*) tokens$"#, "$1 token"),
+        (#"^(\d[\d,]*) tokens this month$"#, "$1 token tháng này"),
+        (#"^(\d[\d,]*) tokens observed this week$"#, "$1 token ghi nhận tuần này"),
+        (#"^(\d[\d,]*) providers in the mesh$"#, "$1 dịch vụ đang kết nối"),
+        (#"^(\d[\d,]*) critical right now$"#, "$1 đang ở mức nguy cấp"),
+        (#"^(\d[\d,]*) lanes tracked$"#, "$1 kênh đang theo dõi"),
+        (#"^token expires (.+)$"#, "token hết hạn $1"),
+        (#"^(.+) needs attention$"#, "$1 cần chú ý"),
+        (#"^(.+) is getting tight$"#, "$1 sắp chạm ngưỡng"),
+        (#"^(.+) has unpriced models$"#, "$1 có mô hình chưa định giá"),
+        (#"^(.+) • Reset unavailable$"#, "$1 • Không rõ thời gian đặt lại"),
+        (#"^(.+) • Resets soon$"#, "$1 • Sắp đặt lại"),
+        (#"^(.+) • Resets in (\d+)d (\d+)h$"#, "$1 • Đặt lại sau $2 ngày $3 giờ"),
+        (#"^(.+) • Resets in (\d+)h (\d+)m$"#, "$1 • Đặt lại sau $2 giờ $3 phút"),
+        (#"^(.+) • Resets in (\d+)m$"#, "$1 • Đặt lại sau $2 phút"),
+        (#"^Resets soon$"#, "Sắp đặt lại"),
+        (#"^Resets in (\d+)d (\d+)h$"#, "Đặt lại sau $1 ngày $2 giờ"),
+        (#"^Resets in (\d+)h (\d+)m$"#, "Đặt lại sau $1 giờ $2 phút"),
+        (#"^Resets in (\d+)m$"#, "Đặt lại sau $1 phút"),
+        (#"^Antigravity auth files detected: (\d[\d,]*)\. This snapshot uses the most recently updated file \((.+)\)\.$"#, "Phát hiện $1 tệp xác thực Antigravity. Ảnh chụp hiện tại dùng tệp cập nhật mới nhất ($2)."),
+        (#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#, "Antigravity cung cấp hạn mức theo từng mô hình nên bảng điều khiển giữ riêng từng mô hình và xếp mô hình gần cạn lên trước."),
+        (#"^(\d[\d,]*(?:\.\d+)?) credits$"#, "$1 tín dụng"),
+        (#"^(\d[\d,]*) over$"#, "Vượt $1"),
+        (#"^Kiro reported (\d[\d,]*) usage lanes\. This card shows the three tightest ones first so attention stays on the lanes that will run out soonest\.$"#, "Kiro báo cáo $1 kênh sử dụng. Thẻ này hiển thị 3 kênh căng nhất trước để bạn theo dõi kênh sắp cạn."),
+        (#"^Kiro usage is pulled from the same AWS-backed endpoint the desktop app uses, so this snapshot reflects the live agentic request lanes exposed by the app\.$"#, "Mức dùng Kiro được lấy từ cùng endpoint AWS với ứng dụng máy tính, phản ánh đúng các kênh yêu cầu agent trực tiếp."),
+        (#"^Resets (.+) at (.+)$"#, "Đặt lại $1 lúc $2"),
+        (#"^(.+) bonus credits remain$"#, "Còn $1 tín dụng thưởng"),
+        (#"^Week (.+) • Today (.+)$"#, "Tuần $1 • Hôm nay $2"),
+        (#"^Proxy costs • Week (.+) • Today (.+)$"#, "Chi phí proxy · Tuần $1 · Hôm nay $2")
+    ]
+
     nonisolated func localizedDynamicText(_ text: String, _ language: String) -> String {
-        guard language == "zh", !text.isEmpty else { return text }
-        if let mapped = Self.exactTranslations[text] { return mapped }
+        guard !text.isEmpty else { return text }
+        let dictionary: [String: String]
+        let patterns: [(pattern: String, template: String)]
+        switch language {
+        case "zh":
+            dictionary = Self.exactTranslations
+            patterns = Self.zhRegexReplacements
+        case "vi":
+            dictionary = Self.exactTranslationsVI
+            patterns = Self.viRegexReplacements
+        default:
+            return text
+        }
+
+        if let mapped = dictionary[text] { return mapped }
 
         var result = text
-        result = replacingRegex(#"^Protected pools: (.+)\. Other pools remain available\. Recovery requires weekly > 3% and five-hour > 5%\.$"#, in: result, template: "受保护的池：$1。其他池仍可用；恢复需周剩余额度 > 3%、五小时剩余额度 > 5%。")
-        result = replacingRegex(#"^Plan · (.+)$"#, in: result, template: "计划 · $1")
-        result = replacingRegex(#"^Membership · (.+)$"#, in: result, template: "会员 · $1")
-        result = replacingRegex(#"^(.+) · 5h$"#, in: result, template: "$1 · 5小时")
-        result = replacingRegex(#"^(.+) · Weekly$"#, in: result, template: "$1 · 周限")
-        result = replacingRegex(#"^(.+) left$"#, in: result, template: "剩余 $1")
-        result = replacingRegex(#"^(.+) used$"#, in: result, template: "已用 $1")
-        result = replacingRegex(#"^(\d[\d,]*) total$"#, in: result, template: "总量 $1")
-        result = replacingRegex(#"^(\d[\d,]*) duplicate rows removed$"#, in: result, template: "已去重 $1 条")
-        result = replacingRegex(#"^(\d[\d,]*) proxy responses excluded$"#, in: result, template: "已排除 $1 条代理记录")
-        result = replacingRegex(#"^(\d[\d,]*) tokens$"#, in: result, template: "$1 个 tokens")
-        result = replacingRegex(#"^(\d[\d,]*) tokens this month$"#, in: result, template: "本月 $1 tokens")
-        result = replacingRegex(#"^(\d[\d,]*) tokens observed this week$"#, in: result, template: "本周记录 $1 tokens")
-        result = replacingRegex(#"^(\d[\d,]*) providers in the mesh$"#, in: result, template: "当前连接 $1 个服务")
-        result = replacingRegex(#"^(\d[\d,]*) critical right now$"#, in: result, template: "当前有 $1 个告急")
-        result = replacingRegex(#"^(\d[\d,]*) lanes tracked$"#, in: result, template: "跟踪 $1 个通道")
-        result = replacingRegex(#"^token expires (.+)$"#, in: result, template: "token 将于 $1 过期")
-        result = replacingRegex(#"^(.+) needs attention$"#, in: result, template: "$1 需要关注")
-        result = replacingRegex(#"^(.+) is getting tight$"#, in: result, template: "$1 余额趋紧")
-        result = replacingRegex(#"^(.+) has unpriced models$"#, in: result, template: "$1 有未定价模型")
-        result = replacingRegex(#"^(.+) • Reset unavailable$"#, in: result, template: "$1 • 重置时间未知")
-        result = replacingRegex(#"^(.+) • Resets soon$"#, in: result, template: "$1 • 即将重置")
-        result = replacingRegex(#"^(.+) • Resets in (\d+)d (\d+)h$"#, in: result, template: "$1 • $2天$3小时后重置")
-        result = replacingRegex(#"^(.+) • Resets in (\d+)h (\d+)m$"#, in: result, template: "$1 • $2小时$3分钟后重置")
-        result = replacingRegex(#"^(.+) • Resets in (\d+)m$"#, in: result, template: "$1 • $2分钟后重置")
-        result = replacingRegex(#"^Resets soon$"#, in: result, template: "即将重置")
-        result = replacingRegex(#"^Resets in (\d+)d (\d+)h$"#, in: result, template: "$1天$2小时后重置")
-        result = replacingRegex(#"^Resets in (\d+)h (\d+)m$"#, in: result, template: "$1小时$2分钟后重置")
-        result = replacingRegex(#"^Resets in (\d+)m$"#, in: result, template: "$1分钟后重置")
-        result = replacingRegex(#"^Antigravity auth files detected: (\d[\d,]*)\. This snapshot uses the most recently updated file \((.+)\)\.$"#,
-                                in: result,
-                                template: "检测到 $1 个 Antigravity 授权文件，当前快照使用的是最近更新的那个（$2）。")
-        result = replacingRegex(#"^Antigravity exposes per-model quotas, so the dashboard keeps each model separate and puts the tightest ones first\.$"#,
-                                in: result,
-                                template: "Antigravity 提供按模型拆分的配额，所以面板会保留每个模型的独立窗口，并把最紧张的那些放在前面。")
-        result = replacingRegex(#"^(\d[\d,]*(?:\.\d+)?) credits$"#, in: result, template: "$1 积分")
-        result = replacingRegex(#"^(\d[\d,]*) over$"#, in: result, template: "超出 $1")
-        result = replacingRegex(#"^Kiro reported (\d[\d,]*) usage lanes\. This card shows the three tightest ones first so attention stays on the lanes that will run out soonest\.$"#,
-                                in: result,
-                                template: "Kiro 报告了 $1 个用量通道，这张卡片会优先展示最紧张的三个，方便你先关注最先见底的通道。")
-        result = replacingRegex(#"^Kiro usage is pulled from the same AWS-backed endpoint the desktop app uses, so this snapshot reflects the live agentic request lanes exposed by the app\.$"#,
-                                in: result,
-                                template: "Kiro 的用量来自桌面应用同一个 AWS 接口，所以这个快照能反映应用当前暴露出来的实时 agent 请求通道。")
-        result = replacingRegex(#"^Resets (.+) at (.+)$"#, in: result, template: "重置于 $1 $2")
-        result = replacingRegex(#"^(.+) bonus credits remain$"#, in: result, template: "剩余 $1 奖励额度")
-        result = replacingRegex(#"^Week (.+) • Today (.+)$"#, in: result, template: "本周 $1 • 今日 $2")
-        result = replacingRegex(#"^Proxy costs • Week (.+) • Today (.+)$"#, in: result, template: "代理费用 · 本周 $1 · 今日 $2")
+        for entry in patterns {
+            result = replacingRegex(entry.pattern, in: result, template: entry.template)
+        }
         return result
     }
 
@@ -586,10 +835,11 @@ extension ProviderRefreshCoordinator {
 
     func sendClaudeDailyThresholdNotification(cost: Double, threshold: Double) {
         let content = UNMutableNotificationContent()
-        content.title = settings.t("Claude daily cost alert", "Claude 每日消费提醒")
+        content.title = settings.t("Claude daily cost alert", "Claude 每日消费提醒", "Cảnh báo chi tiêu Claude hằng ngày")
         content.body = settings.t(
             "Today's cost $\(String(format: "%.2f", cost)) has exceeded the threshold of $\(String(format: "%.2f", threshold))",
-            "今日消费 $\(String(format: "%.2f", cost)) 已超过阈值 $\(String(format: "%.2f", threshold))"
+            "今日消费 $\(String(format: "%.2f", cost)) 已超过阈值 $\(String(format: "%.2f", threshold))",
+            "Chi phí hôm nay $\(String(format: "%.2f", cost)) đã vượt ngưỡng $\(String(format: "%.2f", threshold))"
         )
         content.sound = .default
 

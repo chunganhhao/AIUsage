@@ -8,7 +8,7 @@ swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --s
 BACKEND_BIN="$(swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --scratch-path "$SCRATCH" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BACKEND_BIN/description.json" > "$REGRESSION_DIR/backend-objects.txt"
 # 编译正式转换/定向刷新方法，系统边界由 fixture engine 替换。
-ruby - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionRefreshMethods.swift" <<'RUBY'
+ruby -E UTF-8:UTF-8 - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionRefreshMethods.swift" <<'RUBY'
 root, output = ARGV
 def extract(source, name)
   pattern = /^    (?:nonisolated )?func #{Regexp.escape(name)}\(/
@@ -58,7 +58,7 @@ if [[ "${1:-}" == "--render" ]]; then
   shift
   # 只替换 shared 绑定为显式 fixture coordinator；不实例化生产 singleton。
   # 时间视图使用正式实现，但去掉全局轮询时钟；#Preview 宏不参与独立 swiftc。
-  ruby - "$PROJECT_DIR" "$REGRESSION_DIR" <<'RUBY'
+  ruby -E UTF-8:UTF-8 - "$PROJECT_DIR" "$REGRESSION_DIR" <<'RUBY'
 root, output = ARGV
 coordinator = File.read(File.join(root, 'AIUsage/ViewModels/CodexResetCreditsCoordinator.swift'))
 abort 'Missing coordinator shared binding' unless coordinator.sub!('static let shared = CodexResetCreditsCoordinator()', 'static var shared: CodexResetCreditsCoordinator { FixtureResetEnvironment.coordinator }')

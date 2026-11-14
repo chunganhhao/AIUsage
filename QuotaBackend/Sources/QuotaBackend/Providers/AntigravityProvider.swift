@@ -374,10 +374,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let resetAt: String?
         let providerLabel: String?
 
-        /// Argon is an independent pool: protect it separately, without lowering the core-pool headline.
+        /// Argon and Carbon share the auxiliary pool: protect together without lowering the core-pool headline.
         var isAuxiliary: Bool {
-            id.localizedCaseInsensitiveContains("argon")
-                || label.localizedCaseInsensitiveContains("argon")
+            id.localizedCaseInsensitiveContains("argon") || label.localizedCaseInsensitiveContains("argon")
+                || id.localizedCaseInsensitiveContains("carbon") || label.localizedCaseInsensitiveContains("carbon")
         }
     }
 

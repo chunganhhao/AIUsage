@@ -156,6 +156,13 @@ enum DefaultsKey {
     static let sessionResumeTerminal = "sessionResumeTerminal"
     /// 菜单栏「最近会话」是否展开。缺省=true。
     static let menuBarRecentSessionsExpanded = "menuBarRecentSessionsExpanded"
+    /// 菜单栏「费用」「用量」区块是否展开。缺省=true。
+    static let menuBarCostExpanded = "menuBarCostExpanded"
+    static let menuBarUsageExpanded = "menuBarUsageExpanded"
+    /// 后台自动同步各节点的上游模型与 models.dev 公开价格。缺省=true。
+    static let modelAutoSyncEnabled = "modelAutoSyncEnabled"
+    /// 侧边栏左下角的合作服务商推荐位。缺省=false，可在设置里按需开启。
+    static let showSponsorSpot = "showSponsorSpot"
     /// 会话中心全文搜索：在本机缓存目录建正文索引，搜索也覆盖回复与工具调用。缺省=false（用户确认后开启）。
     static let sessionFullTextSearch = "sessionFullTextSearch"
     /// 主机端：是否把本机额度快照只读共享给远程模式的其它 AIUsage。缺省=false。
@@ -336,6 +343,21 @@ final class AppSettings: ObservableObject {
     @Published var menuBarRecentSessionsExpanded: Bool =
         UserDefaults.standard.object(forKey: DefaultsKey.menuBarRecentSessionsExpanded) as? Bool ?? true
 
+    @Published var menuBarCostExpanded: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.menuBarCostExpanded) as? Bool ?? true
+
+    @Published var menuBarUsageExpanded: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.menuBarUsageExpanded) as? Bool ?? true
+
+    /// 后台自动同步模型与公开价格（见 ModelAutoSyncCoordinator）。只追加上游新上架的模型、
+    /// 只填空白价格或刷新来源为 models.dev 的价格；手动价格与已删除的模型不受影响。
+    @Published var modelAutoSyncEnabled: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.modelAutoSyncEnabled) as? Bool ?? true
+
+    /// 侧边栏合作服务商推荐位（见 SidebarSponsorSpot）。
+    @Published var showSponsorSpot: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.showSponsorSpot) as? Bool ?? false
+
     /// 会话中心全文搜索；关闭时删除索引（见 SessionCenterStore）。
     @Published var sessionFullTextSearch: Bool =
         UserDefaults.standard.bool(forKey: DefaultsKey.sessionFullTextSearch)
@@ -431,6 +453,10 @@ final class AppSettings: ObservableObject {
         $sidebarProxiesGroupExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sidebarProxiesGroupExpanded) }.store(in: &cancellables)
         $sessionResumeTerminal.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sessionResumeTerminal) }.store(in: &cancellables)
         $menuBarRecentSessionsExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarRecentSessionsExpanded) }.store(in: &cancellables)
+        $menuBarCostExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarCostExpanded) }.store(in: &cancellables)
+        $menuBarUsageExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarUsageExpanded) }.store(in: &cancellables)
+        $modelAutoSyncEnabled.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.modelAutoSyncEnabled) }.store(in: &cancellables)
+        $showSponsorSpot.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.showSponsorSpot) }.store(in: &cancellables)
         $sessionFullTextSearch.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sessionFullTextSearch) }.store(in: &cancellables)
     }
 
@@ -463,12 +489,42 @@ final class AppSettings: ObservableObject {
     /// Called when remote backend URL changes. Wired in AppState init.
     var onRemoteSettingsChanged: ((String) -> Void)?
 
-    func t(_ en: String, _ zh: String) -> String {
-        language == "zh" ? zh : en
+    func t(_ en: String, _ zh: String, _ vi: String? = nil) -> String {
+        switch language {
+        case "zh": return zh
+        case "vi": return vi ?? LocalizationBundleCache.lookup(en, fallback: en, lproj: "vi")
+        default: return en
+        }
     }
 
-    static func localized(_ en: String, _ zh: String) -> String {
-        AppSettings.shared.language == "zh" ? zh : en
+    static func localized(_ en: String, _ zh: String, _ vi: String? = nil) -> String {
+        AppSettings.shared.t(en, zh, vi)
+    }
+}
+
+private enum LocalizationBundleCache {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cache: [String: Bundle?] = [:]
+
+    static func bundle(for lproj: String) -> Bundle? {
+        lock.lock()
+        if let existing = cache[lproj] {
+            lock.unlock()
+            return existing
+        }
+        lock.unlock()
+
+        let resolved: Bundle? = Bundle.main.path(forResource: lproj, ofType: "lproj").flatMap(Bundle.init(path:))
+        lock.lock()
+        cache[lproj] = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    static func lookup(_ key: String, fallback: String, lproj: String) -> String {
+        guard let bundle = bundle(for: lproj) else { return fallback }
+        let value = bundle.localizedString(forKey: key, value: nil, table: "Localizable")
+        return value != key ? value : fallback
     }
 }
 
@@ -476,12 +532,23 @@ final class AppSettings: ObservableObject {
 /// stable `.strings` keys. Prefer passing `key:` for new static UI copy so generated
 /// `Localizable.strings` entries are no longer tied to call-site file paths.
 /// Strategy note: `docs/LOCALIZATION_STRATEGY.md`.
-func L(_ en: String, _ zh: String, key: String? = nil, file: StaticString = #fileID) -> String {
-    let fallback = AppSettings.localized(en, zh)
-    let language = AppSettings.shared.language == "zh" ? "zh_CN" : "en"
+func L(_ en: String, _ zh: String, _ vi: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String {
+    let lang = AppSettings.shared.language
+    let fallback: String
+    let lproj: String
+    switch lang {
+    case "zh":
+        fallback = zh
+        lproj = "zh_CN"
+    case "vi":
+        fallback = vi ?? en
+        lproj = "vi"
+    default:
+        fallback = en
+        lproj = "en"
+    }
 
-    guard let path = Bundle.main.path(forResource: language, ofType: "lproj"),
-          let bundle = Bundle(path: path) else {
+    guard let bundle = LocalizationBundleCache.bundle(for: lproj) else {
         return fallback
     }
 
@@ -497,4 +564,31 @@ func L(_ en: String, _ zh: String, key: String? = nil, file: StaticString = #fil
     }
 
     return fallback
+}
+
+extension ProviderCatalogItem {
+    func title(for language: String) -> String {
+        localizedCatalogText(en: titleEn, zh: titleZh, language: language)
+    }
+
+    func summary(for language: String) -> String {
+        localizedCatalogText(en: summaryEn, zh: summaryZh, language: language)
+    }
+
+    func restriction(for language: String) -> String? {
+        guard let restrictionEn else { return nil }
+        return localizedCatalogText(en: restrictionEn, zh: restrictionZh ?? restrictionEn, language: language)
+    }
+
+    private func localizedCatalogText(en: String, zh: String, language: String) -> String {
+        switch language {
+        case "zh":
+            return zh
+        case "vi":
+            return LocalizationBundleCache.bundle(for: "vi")?
+                .localizedString(forKey: en, value: en, table: "Localizable") ?? en
+        default:
+            return en
+        }
+    }
 }

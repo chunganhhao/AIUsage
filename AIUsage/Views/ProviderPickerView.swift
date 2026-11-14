@@ -150,12 +150,12 @@ struct ProviderPickerView: View {
 
             HStack(spacing: 10) {
                 summaryBadge(
-                    text: L("\(selection.count) selected", "已选 \(selection.count) 项"),
+                    text: L("\(selection.count) selected", "已选 \(selection.count) 项", "Đã chọn \(selection.count) mục"),
                     tint: .blue
                 )
 
                 summaryBadge(
-                    text: L("\(filteredItems.count) visible", "显示 \(filteredItems.count) 项"),
+                    text: L("\(filteredItems.count) visible", "显示 \(filteredItems.count) 项", "Đang hiện \(filteredItems.count) mục"),
                     tint: .secondary
                 )
 
@@ -192,7 +192,7 @@ struct ProviderPickerView: View {
 
                 Spacer()
 
-                Text(L("\(items.count) apps", "\(items.count) 个应用"))
+                Text(L("\(items.count) apps", "\(items.count) 个应用", "\(items.count) ứng dụng"))
                     .font(.caption.weight(.semibold))
                     .foregroundStyle(.secondary)
             }
@@ -533,15 +533,15 @@ struct ProviderPickerView: View {
         case .initialSetup:
             return selection.isEmpty
                 ? L("Choose at least one source", "至少选择一个来源")
-                : L("\(selection.count) sources ready", "已准备 \(selection.count) 个来源")
+                : L("\(selection.count) sources ready", "已准备 \(selection.count) 个来源", "Sẵn sàng \(selection.count) nguồn")
         case .add:
             return selection.isEmpty
                 ? L("No apps selected", "未选择应用")
-                : L("\(selection.count) apps selected", "已选 \(selection.count) 个应用")
+                : L("\(selection.count) apps selected", "已选 \(selection.count) 个应用", "Đã chọn \(selection.count) ứng dụng")
         case .manage:
             return selection == appState.selectedProviderIds
                 ? L("No changes to apply", "没有需要应用的变更")
-                : L("\(selection.count) sources enabled", "已启用 \(selection.count) 个来源")
+                : L("\(selection.count) sources enabled", "已启用 \(selection.count) 个来源", "Đã bật \(selection.count) nguồn")
         }
     }
 
@@ -565,7 +565,7 @@ private struct SourceSelectionCard: View {
     let action: () -> Void
 
     private var title: String {
-        language == "zh" ? item.titleZh : item.titleEn
+        item.title(for: language)
     }
 
     private var accentColor: Color {
@@ -596,7 +596,11 @@ private struct SourceSelectionCard: View {
         case "ide":
             return "IDE"
         case "local":
-            return language == "zh" ? "本地" : "Local"
+            switch language {
+            case "zh": return "本地"
+            case "vi": return "Cục bộ"
+            default: return "Local"
+            }
         default:
             return "CLI"
         }

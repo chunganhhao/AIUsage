@@ -281,6 +281,12 @@ struct PoolCircuitBreakerRegression {
                 try check(saved["project_id"] as? String == "fixture-project", "Two refreshes preserve unrelated credential metadata")
             }
         }
+        try check(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-hydrogen-xhigh") == .gemini, "Gemini 4 Hydrogen maps to core Gemini pool")
+        try check(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-carbon-high") == .argon, "Gemini 4 Carbon maps to Argon/Carbon pool")
+        try check(AntigravityPoolCircuitBreaker.Pool.quota(q("Gemini 4 Hydrogen", 50)) == .gemini, "Gemini 4 Hydrogen quota label maps to core Gemini pool")
+        try check(AntigravityPoolCircuitBreaker.Pool.quota(q("Gemini 4 Carbon", 50)) == .argon, "Gemini 4 Carbon quota label maps to Argon/Carbon pool")
+        try check(q("Gemini 4 Carbon", 50).isAuxiliary == true, "Gemini 4 Carbon quota is auxiliary")
+        try check(q("Gemini 4 Hydrogen", 50).isAuxiliary == false, "Gemini 4 Hydrogen quota is core (non-auxiliary)")
         print("Pool circuit breaker: \(checks) checks passed (production backend, temporary credentials only)")
     }
 }

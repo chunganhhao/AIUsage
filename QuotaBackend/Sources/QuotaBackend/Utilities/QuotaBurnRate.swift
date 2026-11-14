@@ -21,8 +21,8 @@ public struct QuotaBurnRate: Sendable, Equatable {
     }
     public static func windowDuration(label: String) -> TimeInterval? {
         let lower = label.lowercased()
-        if ["week", "7d", "7-day", "7 days", "周", "7天"].contains(where: lower.contains) { return 7 * 86400 }
-        if ["5h", "5-hour", "5 hour", "5 小时", "5小时"].contains(where: lower.contains) { return 5 * 3600 }
+        if ["week", "7d", "7-day", "7 days", "周", "7天", "7 天", "tuần", "7 ngày"].contains(where: lower.contains) { return 7 * 86400 }
+        if ["5h", "5-hour", "5 hour", "5 小时", "5小时", "5 giờ"].contains(where: lower.contains) { return 5 * 3600 }
         return nil
     }
 }

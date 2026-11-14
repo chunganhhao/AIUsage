@@ -229,7 +229,7 @@ struct ProviderDetailView: View {
                     badge(text: membership, tint: membershipBadgeTint(for: membership))
                 }
                 if shouldShowStatusBadge {
-                    badge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
+                    badge(text: localizedProviderStatusLabel(provider.statusLabel, language: appState.language), tint: statusColor)
                 }
                 Spacer(minLength: 0)
                 if let refreshTimestamp {
@@ -410,24 +410,6 @@ struct ProviderDetailView: View {
         )
     }
     
-    private func localizedStatusLabel(_ label: String) -> String {
-        guard appState.language == "zh" else { return label }
-        switch label {
-        case "Healthy":  return "正常"
-        case "Watch":    return "偏低"
-        case "Critical": return "告急"
-        case "Error":    return "错误"
-        case "Tracking": return "追踪中"
-        case "Idle":     return "空闲"
-        case "Active":   return "活跃"
-        case "Snapshot": return "额度快照"
-        case "Waiting": return "等待同步"
-        case "Proxy session": return "代理会话"
-        case "Feedback disconnected": return "同步已断开"
-        default: return label
-        }
-    }
-
     private var accentColor: Color {
         switch provider.providerId {
         case "antigravity", "antigravity-cost": return .cyan

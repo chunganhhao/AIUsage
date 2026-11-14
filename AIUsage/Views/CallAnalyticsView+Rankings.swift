@@ -22,7 +22,7 @@ extension CallAnalyticsView {
             .onChange(of: lens) { _, _ in expandedServers.removeAll() }
 
             if rows.isEmpty {
-                Text(L("No \(lens.title) calls in range", "范围内暂无\(lens.title)调用", key: "calls.rank.empty"))
+                Text(L("No \(lens.title) calls in range", "范围内暂无\(lens.title)调用", "Không có lượt gọi \(lens.title) trong khoảng này", key: "calls.rank.empty"))
                     .font(.caption)
                     .foregroundStyle(.tertiary)
                     .padding(.top, 4)

@@ -128,7 +128,7 @@ final class AccountCredentialStore {
     }
 }
 @MainActor var fixtureLanguage = "en"
-@MainActor func L(_ english: String, _ chinese: String) -> String { fixtureLanguage == "zh" ? chinese : english }
+@MainActor func L(_ english: String, _ chinese: String, _ vietnamese: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String { fixtureLanguage == "zh" ? chinese : (fixtureLanguage == "vi" ? (vietnamese ?? english) : english) }
 
 // 账号列表使用正式视图，运行时和持久顺序替换为内存边界。
 @MainActor final class ProxyViewModel: ObservableObject {

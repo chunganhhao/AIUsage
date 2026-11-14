@@ -25,7 +25,7 @@ struct AntigravityUsageArchive: Codable, Sendable {
 }
 
 actor AntigravityNonProxyUsageArchiveStore {
-    static let artifactVersion = 2
+    static let artifactVersion = 3
 
     private var archives: [String: AntigravityUsageArchive] = [:]
     private var loaded: Set<String> = []
@@ -235,25 +235,70 @@ actor AntigravityNonProxyUsageArchiveStore {
             return decoded
         }
 
-        // Seed days from v1 if present, keeping fullHistoryImportedAt = nil so v2 runs a full rescan
+        // Seed days from v2 or v1 if present, keeping fullHistoryImportedAt = nil so v3 runs a full rescan
         // while preserving any historical tokens from purged transcripts via mergingPreservedRemainder.
-        let v1URL = Self.fileURL(homeDirectory: homeDirectory, version: 1)
-        if let data = try? Data(contentsOf: v1URL),
-           let decodedV1 = try? JSONDecoder().decode(CodexUsageArchive.self, from: data) {
-            let seeded = AntigravityUsageArchive(
-                version: Self.artifactVersion,
-                updatedAt: decodedV1.updatedAt,
-                days: decodedV1.days,
-                fullHistoryImportedAt: nil,
-                fileDays: nil
-            )
-            archives[homeDirectory] = seeded
-            return seeded
+        for legacyVersion in [2, 1] {
+            let legacyURL = Self.fileURL(homeDirectory: homeDirectory, version: legacyVersion)
+            guard let data = try? Data(contentsOf: legacyURL) else { continue }
+            if let decodedLegacy = try? JSONDecoder().decode(AntigravityUsageArchive.self, from: data) {
+                let migratedDays = decodedLegacy.days.mapValues(Self.migratedLegacyDayBucket)
+                let seeded = AntigravityUsageArchive(
+                    version: Self.artifactVersion,
+                    updatedAt: decodedLegacy.updatedAt,
+                    days: migratedDays,
+                    fullHistoryImportedAt: nil,
+                    fileDays: nil
+                )
+                archives[homeDirectory] = seeded
+                return seeded
+            }
+            if legacyVersion == 1,
+               let decodedV1 = try? JSONDecoder().decode(CodexUsageArchive.self, from: data) {
+                let migratedDays = decodedV1.days.mapValues(Self.migratedLegacyDayBucket)
+                let seeded = AntigravityUsageArchive(
+                    version: Self.artifactVersion,
+                    updatedAt: decodedV1.updatedAt,
+                    days: migratedDays,
+                    fullHistoryImportedAt: nil,
+                    fileDays: nil
+                )
+                archives[homeDirectory] = seeded
+                return seeded
+            }
         }
 
         let fresh = AntigravityUsageArchive(version: Self.artifactVersion, updatedAt: "", days: [:])
         archives[homeDirectory] = fresh
         return fresh
+    }
+
+    private static func migratedLegacyDayBucket(_ bucket: CodexAggregateBucket) -> CodexAggregateBucket {
+        let suffix = AntigravityCostProvider.nonProxySourceSuffix
+        let orchestratorKey = "orchestrator" + suffix
+        let unknownKey = "unknown-model" + suffix
+        let argonKey = "gemini-4-argon" + suffix
+        let flashKey = "gemini-3.8-flash" + suffix
+
+        var out = CodexAggregateBucket(usageRows: bucket.usageRows, totalTokens: 0, estimatedCostUsd: 0, models: [:])
+        for (rawKey, modelAgg) in bucket.models {
+            let targetKey: String
+            switch rawKey {
+            case orchestratorKey: targetKey = argonKey
+            case unknownKey: targetKey = flashKey
+            default: targetKey = rawKey
+            }
+            var item = modelAgg
+            item.model = targetKey
+            if var existing = out.models[targetKey] {
+                existing.merge(item)
+                out.models[targetKey] = existing
+            } else {
+                out.models[targetKey] = item
+            }
+            out.totalTokens += item.totalTokens
+            out.estimatedCostUsd += item.estimatedCostUsd
+        }
+        return out
     }
 
     private func save(_ homeDirectory: String, _ archive: AntigravityUsageArchive) {

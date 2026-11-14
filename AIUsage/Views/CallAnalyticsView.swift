@@ -618,13 +618,14 @@ struct CallAnalyticsView: View {
             return L("Legacy records unverified", "旧记录待确认")
         }
         if let code = status.errorCode {
-            return L("error: \(code)", "采集失败: \(code)", key: "calls.source.error")
+            return L("error: \(code)", "采集失败: \(code)", "lỗi: \(code)", key: "calls.source.error")
         }
         if !status.available {
             return L("not installed / no data", "未安装 / 无数据", key: "calls.source.absent")
         }
         return L("scanned \(status.filesScanned) sessions · \(status.eventCount) calls",
                  "扫 \(status.filesScanned) 个会话 · \(status.eventCount) 次调用",
+                 "đã quét \(status.filesScanned) phiên · \(status.eventCount) lượt gọi",
                  key: "calls.source.ok")
     }
 
@@ -636,16 +637,20 @@ struct CallAnalyticsView: View {
         }
         if let code = status.errorCode {
             return L("Collection failed (\(code)).",
-                     "采集失败（\(code)）。", key: "calls.source.help.error")
+                     "采集失败（\(code)）。",
+                     "Thu thập thất bại (\(code)).",
+                     key: "calls.source.help.error")
         }
         if !status.available {
             return L("\(status.source.displayName) not installed, or no local session logs found.",
                      "未检测到 \(status.source.displayName)，或本地没有会话日志。",
+                     "\(status.source.displayName) chưa cài đặt hoặc không tìm thấy nhật ký phiên cục bộ.",
                      key: "calls.source.help.absent")
         }
         let summary = L(
             "Scanned \(status.filesScanned) \(status.source.displayName) session file(s) and counted \(status.eventCount) tool / MCP / skill calls within the selected range.",
             "在所选时间范围内，扫描了 \(status.filesScanned) 个 \(status.source.displayName) 会话文件，统计到 \(status.eventCount) 次工具 / MCP / 技能调用。",
+            "Trong khoảng đã chọn, đã quét \(status.filesScanned) tệp phiên \(status.source.displayName) và đếm được \(status.eventCount) lượt gọi công cụ / MCP / skill.",
             key: "calls.source.help.ok"
         )
         guard status.source == .claude else { return summary }

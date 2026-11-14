@@ -2037,20 +2037,37 @@ enum AntigravityAccountSwitcher {
     }
 
     static func parseModelSelection(from content: String) -> (model: String, effort: String?)? {
-        let marker = "changed setting `Model Selection`"
-        guard let markerRange = content.range(of: marker, options: .backwards) else { return nil }
+        guard content.contains("<USER_SETTINGS_CHANGE>") else { return nil }
+        let markers = ["changed setting `Model Selection`", "`Model Selection`", "Model Selection changed"]
+        guard let markerRange = markers
+            .compactMap({ content.range(of: $0, options: .backwards) })
+            .max(by: { $0.upperBound < $1.upperBound }) else { return nil }
         let tail = content[markerRange.upperBound...]
         guard let toRange = tail.range(of: " to ") else { return nil }
         let afterTo = tail[toRange.upperBound...]
-        var rawSegment = String(afterTo.prefix { $0 != "\n" && $0 != "\r" && $0 != "<" })
-        if let escapedNewline = rawSegment.range(of: "\\n") {
-            rawSegment = String(rawSegment[..<escapedNewline.lowerBound])
+        let delimiters: [(pattern: String, options: String.CompareOptions)] = [
+            (". No need", .caseInsensitive),
+            ("\\n", []),
+            ("\n", []),
+            ("\r", []),
+            ("</USER_SETTINGS_CHANGE>", []),
+            ("<", [])
+        ]
+        var endIndex = afterTo.endIndex
+        for (pattern, options) in delimiters {
+            if let range = afterTo.range(of: pattern, options: options),
+               range.lowerBound < endIndex {
+                endIndex = range.lowerBound
+            }
         }
-        if let suffixRange = rawSegment.range(of: ". No need", options: [.caseInsensitive]) {
-            rawSegment = String(rawSegment[..<suffixRange.lowerBound])
-        }
-        var rawTarget = rawSegment.trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        var rawTarget = String(afterTo[..<endIndex]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
         guard !rawTarget.isEmpty, rawTarget.lowercased() != "none" else { return nil }
+        if rawTarget.contains("\"") || rawTarget.contains("'") || rawTarget.contains("`")
+            || rawTarget.contains("\\") || rawTarget.contains(":") || rawTarget.contains("{")
+            || rawTarget.contains("}") || rawTarget.contains("[") || rawTarget.contains("]")
+            || rawTarget.split(whereSeparator: \.isWhitespace).count > 5 {
+            return nil
+        }
 
         var effort: String?
         if rawTarget.hasSuffix(")"),
@@ -2059,20 +2076,38 @@ enum AntigravityAccountSwitcher {
            openParen < closeParen {
             let inside = rawTarget[rawTarget.index(after: openParen)..<closeParen]
                 .trimmingCharacters(in: .whitespacesAndNewlines)
-            if !inside.isEmpty {
-                effort = inside.uppercased()
+            let allowedEffortChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ "))
+            guard !inside.isEmpty,
+                  inside.unicodeScalars.allSatisfy({ allowedEffortChars.contains($0) }) else {
+                return nil
             }
+            effort = inside.uppercased()
             rawTarget = String(rawTarget[..<openParen]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
         }
-        let normalizedModel = rawTarget
-            .lowercased()
-            .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
-            .filter { !$0.isEmpty }
-            .joined(separator: "-")
-            .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        guard !rawTarget.contains("("), !rawTarget.contains(")") else { return nil }
+        let normalizedModel: String
+        let lowerTarget = rawTarget.lowercased()
+        if lowerTarget.contains("orchestrator") {
+            if effort == "CARBON" || lowerTarget.contains("carbon") { normalizedModel = "gemini-4-carbon" }
+            else if effort == "HYDROGEN" || lowerTarget.contains("hydrogen") { normalizedModel = "gemini-4-hydrogen" }
+            else if effort == "FLASH" || lowerTarget.contains("flash") { normalizedModel = "gemini-3.8-flash" }
+            else { normalizedModel = "gemini-4-argon" }
+        } else if lowerTarget.contains("gemini 3.5 flash") || lowerTarget.contains("gemini-3.5-flash") {
+            normalizedModel = "gemini-3.5-flash-lite"
+        } else if lowerTarget.contains("gpt-oss") {
+            normalizedModel = "gpt-oss-120b"
+        } else {
+            normalizedModel = lowerTarget
+                .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: "-")
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        }
+        let knownPrefixes = ["gemini-", "claude-", "gpt-", "o1", "o3", "o4"]
         guard !normalizedModel.isEmpty,
               normalizedModel != "unknown-model",
-              !normalizedModel.hasPrefix("model-placeholder") else { return nil }
+              !normalizedModel.hasPrefix("model-placeholder"),
+              knownPrefixes.contains(where: { normalizedModel.hasPrefix($0) }) else { return nil }
         return (normalizedModel, effort)
     }
 

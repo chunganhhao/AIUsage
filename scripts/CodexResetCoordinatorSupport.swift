@@ -70,4 +70,4 @@ final class AppSettings: ObservableObject {
     func sendErrorNotification(_ message: String) {}
 }
 @MainActor var fixtureLanguage = "en"
-@MainActor func L(_ english: String, _ chinese: String) -> String { fixtureLanguage == "zh" ? chinese : english }
+@MainActor func L(_ english: String, _ chinese: String, _ vietnamese: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String { fixtureLanguage == "zh" ? chinese : (fixtureLanguage == "vi" ? (vietnamese ?? english) : english) }

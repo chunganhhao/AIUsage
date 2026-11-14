@@ -1784,6 +1784,47 @@ struct AccountIdentityRegression {
         check(parsedNoParenSuffix?.model == "gemini-3-flash" && parsedNoParenSuffix?.effort == nil,
               "AGY R3 P2-1a: parseModelSelection strips '. No need to comment.' notification suffix when selection lacks parentheses")
 
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Carbon). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-4-carbon" && $0.effort == "CARBON" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Carbon) to gemini-4-carbon")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Hydrogen). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-4-hydrogen" && $0.effort == "HYDROGEN" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Hydrogen) to gemini-4-hydrogen")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Flash). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-3.8-flash" && $0.effort == "FLASH" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Flash) to gemini-3.8-flash")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>`Model Selection` to Gemini 3.5 Flash</USER_SETTINGS_CHANGE>"
+        )?.model == "gemini-3.5-flash-lite",
+              "AGY R7: parseModelSelection supports fallback `Model Selection` marker and normalizes Gemini 3.5 Flash to gemini-3.5-flash-lite")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>Model Selection changed to GPT-OSS 120B (Medium)</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gpt-oss-120b" && $0.effort == "MEDIUM" } == true,
+              "AGY R7: parseModelSelection supports legacy 'Model Selection changed' marker and normalizes GPT-OSS 120B")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 4 Argon. Later Model Selection changed to Gemini 4 Carbon. No need to comment</USER_SETTINGS_CHANGE>"
+        )?.model == "gemini-4-carbon",
+              "AGY R7: parseModelSelection selects latest marker when multiple markers appear in one content block")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE> handler maps `Model Selection` to the active model</USER_SETTINGS_CHANGE>"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects prose mentioning 'to the active model'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>When this fails, reset `Model Selection` to default</USER_SETTINGS_CHANGE>"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects prose mentioning 'to default'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "// <USER_SETTINGS_CHANGE> `Model Selection` changed to foo.bar()"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects function call syntax 'foo.bar()'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "The user changed setting `Model Selection` from None to Gemini 4 Argon"
+        ) == nil,
+              "AGY R7: parseModelSelection requires <USER_SETTINGS_CHANGE> tag scoping")
+
         let samplePrefsB64 = "ChsKF3BsYW5uaW5nTW9kZVNlbnRpbmVsS2V5EgAKKQofYXJ0aWZhY3RSZXZpZXdQb2xpY3lTZW50aW5lbEtleRIGCgRFQUU9CjAKJnRlcm1pbmFsQXV0b0V4ZWN1dGlvblBvbGljeVNlbnRpbmVsS2V5EgYKBEVBRT0KLAoidGVybWluYWxBbGxvd2VkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CisKIXRlcm1pbmFsRGVuaWVkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CjYKLGFsbG93QWdlbnRBY2Nlc3NOb25Xb3Jrc3BhY2VGaWxlc1NlbnRpbmVsS2V5EgYKBENBQT0KNQorYWxsb3dDYXNjYWRlQWNjZXNzR2l0aWdub3JlRmlsZXNTZW50aW5lbEtleRIGCgRDQUE9CjcKLWV4cGxhaW5BbmRGaXhJbkN1cnJlbnRDb252ZXJzYXRpb25TZW50aW5lbEtleRIGCgRDQUE9CjoKMGF1dG9Db250aW51ZU9uTWF4R2VuZXJhdG9ySW52b2NhdGlvbnNTZW50aW5lbEtleRIGCgRFQUE9Ch8KFXNlY3VyZU1vZGVTZW50aW5lbEtleRIGCgRDQUE9"
         let parsedPrefs = AntigravityAccountSwitcher.parseAgentPreferencesProto(samplePrefsB64)
         check(parsedPrefs.executionPolicy == "always-proceed"

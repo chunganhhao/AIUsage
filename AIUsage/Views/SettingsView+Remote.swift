@@ -145,7 +145,8 @@ extension SettingsView {
             remoteConnectionState = .success
             remoteConnectionMessage = L(
                 "Connected · \(dashboard.providers.count) accounts · \(latencyMs) ms",
-                "已连接 · \(dashboard.providers.count) 个账号 · 耗时 \(latencyMs) ms"
+                "已连接 · \(dashboard.providers.count) 个账号 · 耗时 \(latencyMs) ms",
+                "Đã kết nối · \(dashboard.providers.count) tài khoản · \(latencyMs) ms"
             )
             // 首次连上时把主机共享的服务商加入本机勾选，否则仪表盘只显示本机原先勾选的那部分；
             // 之后的刷新仍以本机勾选为准，用户取消勾选不会被反复加回。
@@ -270,15 +271,16 @@ extension SettingsView {
             icon = "hourglass"; tint = .secondary; text = L("Starting…", "正在启动…")
         case .running(let port):
             icon = "dot.radiowaves.left.and.right"; tint = .green
-            text = L("Sharing on port \(port)", "正在共享 · 端口 \(port)")
+            text = L("Sharing on port \(port)", "正在共享 · 端口 \(port)", "Đang chia sẻ ở cổng \(port)")
         case .failed(let message, let portInUse):
             icon = "exclamationmark.triangle.fill"; tint = .orange; showsRetry = true
             text = portInUse
                 ? L(
                     "Port \(settings.shareQuotaPort) is already in use. Choose another port.",
-                    "端口 \(settings.shareQuotaPort) 已被占用，请换一个端口。"
+                    "端口 \(settings.shareQuotaPort) 已被占用，请换一个端口。",
+                    "Cổng \(settings.shareQuotaPort) đang được sử dụng. Hãy chọn cổng khác."
                 )
-                : L("Sharing failed: \(message)", "共享启动失败：\(message)")
+                : L("Sharing failed: \(message)", "共享启动失败：\(message)", "Chia sẻ thất bại: \(message)")
         }
 
         return HStack(spacing: 8) {

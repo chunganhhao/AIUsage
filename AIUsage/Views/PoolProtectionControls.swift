@@ -40,7 +40,7 @@ struct AntigravityPerPoolControls: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             ForEach(AntigravityPoolProtectionSettings.pools, id: \.self) { pool in
-                Toggle(pool == "claude" ? "Claude / GPT Pool" : "\(pool.capitalized) Pool", isOn: Binding(
+                Toggle(Self.poolTitle(for: pool), isOn: Binding(
                     get: { pools.contains(pool) }, set: { enabled in
                         do {
                             try AntigravityPoolProtectionSettings.setPool(pool, enabled: enabled, homeDirectory: home.path)
@@ -50,10 +50,23 @@ struct AntigravityPerPoolControls: View {
                     }))
                 .accessibilityIdentifier("agy-pool-\(pool)")
             }
-            Text("Pool selection takes effect only when Antigravity protection is enabled. Other platforms are never changed.")
+            Text(L("Pool selection takes effect only when Antigravity protection is enabled. Other platforms are never changed.", "分池选择仅在启用 Antigravity 保护时生效，其他平台不受影响。"))
                 .font(.caption).foregroundStyle(.secondary)
             if let failure { Text(failure).font(.caption).foregroundStyle(.red) }
         }.onAppear { pools = AntigravityPoolProtectionSettings.enabledPools(homeDirectory: home.path) }
+    }
+
+    private static func poolTitle(for pool: String) -> String {
+        switch pool {
+        case "gemini":
+            return L("Gemini Pool (Flash 3.8 / Hydrogen 4)", "Gemini 池 (Flash 3.8 / Hydrogen 4)")
+        case "claude":
+            return L("Claude / GPT Pool", "Claude / GPT 池")
+        case "argon":
+            return L("Argon / Carbon Pool (Gemini 4 Argon / Carbon)", "Argon / Carbon 池 (Gemini 4 Argon / Carbon)")
+        default:
+            return "\(pool.capitalized) Pool"
+        }
     }
 }
 
@@ -63,36 +76,78 @@ struct RTKVersionsView: View {
     @State private var failure: String?
     @State private var deletion: String?
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack {
-                Text("RTK — Versions & rollback").font(.headline)
-                Spacer()
-                Button("Refresh") { reload() }
-            }
-            Text("Activates the RTK binary behind token-saver-rtk; keeps the wrapper and fallback intact. Homebrew owns deletion of Cellar versions.")
-                .font(.caption).foregroundStyle(.secondary)
-            if versions.isEmpty { Text("No installed RTK versions found.").foregroundStyle(.secondary) }
-            ForEach(versions) { version in
-                HStack {
-                    Image(systemName: version.isActive ? "checkmark.seal.fill" : "shippingbox")
-                        .foregroundStyle(version.isActive ? .green : .secondary)
-                    VStack(alignment: .leading) {
-                        Text(version.version.hasPrefix("v") ? version.version : "v\(version.version)")
-                        Text(version.installedAt.formatted()).font(.caption2).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 0) {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Text(L("RTK — Versions & rollback", "RTK — 版本与回退"))
+                        .font(.headline)
+                    Spacer(minLength: 8)
+                    if let active = versions.first(where: \.isActive) {
+                        GatewayQuietBadge(text: active.version.hasPrefix("v") ? active.version : "v\(active.version)", tint: .green)
                     }
-                    if version.isActive { Text("Active").foregroundStyle(.green) }
-                    Spacer()
-                    if !version.isActive {
-                        Button("Activate") { perform { try store.activate(version.id) } }
-                        Button(role: .destructive) { deletion = version.id } label: { Image(systemName: "trash") }
-                            .disabled(!version.isManaged).help("Only inactive AIUsage-managed versions can be deleted here.")
+                    Button(L("Refresh", "刷新")) { reload() }
+                }
+                Text(L("Activates the RTK binary behind token-saver-rtk; keeps the wrapper and fallback intact. Homebrew owns deletion of Cellar versions.", "切换 token-saver-rtk 背后的 RTK 二进制版本；保持封装脚本和回退逻辑不变。Cellar 中的版本由 Homebrew 管理删除。"))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .padding(.horizontal, 14)
+            .padding(.vertical, 12)
+
+            Divider().opacity(0.35)
+
+            if versions.isEmpty {
+                Text(L("No installed RTK versions found.", "未发现已安装的 RTK 版本。"))
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, minHeight: 72)
+            } else {
+                VStack(spacing: 0) {
+                    ForEach(versions) { version in
+                        HStack(spacing: 10) {
+                            Image(systemName: version.isActive ? "checkmark.seal.fill" : "shippingbox")
+                                .foregroundStyle(version.isActive ? .green : .secondary)
+                                .frame(width: 20)
+                            VStack(alignment: .leading, spacing: 1) {
+                                Text(version.version.hasPrefix("v") ? version.version : "v\(version.version)")
+                                    .font(.subheadline.weight(.semibold).monospacedDigit())
+                                Text(version.installedAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption2)
+                                    .foregroundStyle(.secondary)
+                            }
+                            if version.isActive {
+                                GatewayQuietBadge(text: L("Active", "当前"), tint: .green)
+                            }
+                            Spacer(minLength: 8)
+                            if !version.isActive {
+                                Button(L("Activate", "启用")) { perform { try store.activate(version.id) } }
+                                Button(role: .destructive) { deletion = version.id } label: {
+                                    Image(systemName: "trash")
+                                }
+                                .buttonStyle(.borderless)
+                                .disabled(!version.isManaged)
+                                .help(L("Only inactive AIUsage-managed versions can be deleted here.", "仅可在此删除非当前启用且由 AIUsage 托管的版本。"))
+                            }
+                        }
+                        .padding(.horizontal, 14)
+                        .padding(.vertical, 10)
+                        if version.id != versions.last?.id {
+                            Divider().opacity(0.35).padding(.leading, 44)
+                        }
                     }
                 }
             }
-            if let failure { Text(failure).foregroundStyle(.red).font(.caption) }
-        }.onAppear { reload() }
-        .confirmationDialog("Delete this RTK version?", isPresented: Binding(get: { deletion != nil }, set: { if !$0 { deletion = nil } })) {
-            Button("Delete", role: .destructive) {
+            if let failure {
+                Text(failure)
+                    .foregroundStyle(.red)
+                    .font(.caption)
+                    .padding(.horizontal, 14)
+                    .padding(.bottom, 10)
+            }
+        }
+        .onAppear { reload() }
+        .confirmationDialog(L("Delete this RTK version?", "确定删除此 RTK 版本？"), isPresented: Binding(get: { deletion != nil }, set: { if !$0 { deletion = nil } })) {
+            Button(L("Delete", "删除"), role: .destructive) {
                 if let deletion { perform { try store.delete(deletion) } }
                 deletion = nil
             }

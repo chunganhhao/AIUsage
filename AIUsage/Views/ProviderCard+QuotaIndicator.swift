@@ -26,7 +26,13 @@ struct QuotaIndicatorView: View {
     private var inlineResetText: String? {
         guard let resetAt, let date = parseResetDate(resetAt) else { return nil }
         let remaining = max(0, Int(date.timeIntervalSinceNow))
-        if remaining == 0 { return appState.language == "zh" ? "即将刷新" : "soon" }
+        if remaining == 0 {
+            switch appState.language {
+            case "zh": return "即将刷新"
+            case "vi": return "sắp đặt lại"
+            default: return "soon"
+            }
+        }
         let days = remaining / 86_400
         let hours = (remaining % 86_400) / 3_600
         let minutes = (remaining % 3_600) / 60

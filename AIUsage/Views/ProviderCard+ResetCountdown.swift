@@ -71,9 +71,20 @@ struct ResetCountdownView: View {
     }
 
     private func absoluteResetText(_ date: Date) -> String {
-        let locale = Locale(identifier: appState.language == "zh" ? "zh_CN" : "en_US")
-        let format = appState.language == "zh" ? "M月d日 HH:mm" : "MMM d, HH:mm"
-        return DateFormat.formatter(format, timeZone: .current, locale: locale).string(from: date)
+        let localeId: String
+        let format: String
+        switch appState.language {
+        case "zh":
+            localeId = "zh_CN"
+            format = "M月d日 HH:mm"
+        case "vi":
+            localeId = "vi_VN"
+            format = "d MMM, HH:mm"
+        default:
+            localeId = "en_US"
+            format = "MMM d, HH:mm"
+        }
+        return DateFormat.formatter(format, timeZone: .current, locale: Locale(identifier: localeId)).string(from: date)
     }
 
     private func countdownSnapshot(to target: Date, now: Date) -> CountdownSnapshot {
@@ -153,15 +164,22 @@ struct CountdownSnapshot {
     }
 
     func primaryLabel(language: String) -> String {
-        if totalSeconds == 0 {
-            return language == "zh" ? "即将刷新" : "Refreshing soon"
+        switch language {
+        case "zh":
+            if totalSeconds == 0 { return "即将刷新" }
+            if days > 0 { return "\(days)天 \(hours)小时" }
+            if hours > 0 { return "\(hours)小时 \(minutes)分钟" }
+            return "\(max(1, minutes))分钟内"
+        case "vi":
+            if totalSeconds == 0 { return "Sắp làm mới" }
+            if days > 0 { return "\(days) ngày \(hours) giờ" }
+            if hours > 0 { return "\(hours) giờ \(minutes) phút" }
+            return "trong \(max(1, minutes)) phút"
+        default:
+            if totalSeconds == 0 { return "Refreshing soon" }
+            if days > 0 { return "\(days)d \(hours)h" }
+            if hours > 0 { return "\(hours)h \(minutes)m" }
+            return "within \(max(1, minutes))m"
         }
-        if days > 0 {
-            return language == "zh" ? "\(days)天 \(hours)小时" : "\(days)d \(hours)h"
-        }
-        if hours > 0 {
-            return language == "zh" ? "\(hours)小时 \(minutes)分钟" : "\(hours)h \(minutes)m"
-        }
-        return language == "zh" ? "\(max(1, minutes))分钟内" : "within \(max(1, minutes))m"
     }
 }

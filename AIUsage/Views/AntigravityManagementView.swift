@@ -443,7 +443,11 @@ struct AntigravityManagementView: View {
             }
             return "—"
         }
-        let values = windows.compactMap(\.remainingPercent)
+        let coreWindows = windows.filter {
+            !$0.label.localizedCaseInsensitiveContains("argon")
+                && !$0.label.localizedCaseInsensitiveContains("carbon")
+        }
+        let values = (coreWindows.isEmpty ? windows : coreWindows).compactMap(\.remainingPercent)
         guard let minVal = values.min() else { return "—" }
         return "\(Int(minVal.rounded()))%"
     }
@@ -511,8 +515,8 @@ struct AntigravityManagementView: View {
                         tosSafeBadge
                     }
                     Text(L(
-                        "Isolates depleted Claude, Gemini Pro/Flash or Argon pools without locking the whole account. TOS-safe defaults keep project-switching and credit flags disabled.",
-                        "当 Claude、Gemini Pro/Flash 或 Argon 单个模型池耗尽时仅隔离该池，不停用整号；默认关闭跨项目切换与积分实验标志以保护账号安全。"
+                        "Isolates depleted Claude/GPT, Gemini (Flash 3.8 / Hydrogen 4), or Argon/Carbon pools without locking the whole account. TOS-safe defaults keep project-switching and credit flags disabled.",
+                        "当 Claude/GPT、Gemini (Flash 3.8 / Hydrogen 4) 或 Argon/Carbon 模型池耗尽时仅隔离该池，不停用整号；默认关闭跨项目切换与积分实验标志以保护账号安全。"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
@@ -683,7 +687,7 @@ struct AntigravityManagementView: View {
                             .font(.subheadline.weight(.semibold))
                         TokenSaverStatusBadge(
                             text: enabledCount > 0
-                                ? L("Enabled \(enabledCount)/3", "已启用 \(enabledCount)/3")
+                                ? L("Enabled \(enabledCount)/3", "已启用 \(enabledCount)/3", "Đã bật \(enabledCount)/3")
                                 : L("Off", "已关闭"),
                             tone: enabledCount > 0 ? .active : .neutral,
                             id: "agy-token-saver-badge"
@@ -771,11 +775,11 @@ struct AntigravityManagementView: View {
                 )
                 envPill(
                     icon: "server.rack",
-                    text: L("MCP Servers: \(envSummary.mcpServerCount)", "MCP 服务: \(envSummary.mcpServerCount)")
+                    text: L("MCP Servers: \(envSummary.mcpServerCount)", "MCP 服务: \(envSummary.mcpServerCount)", "MCP Server: \(envSummary.mcpServerCount)")
                 )
                 envPill(
                     icon: "sparkles.rectangle.stack",
-                    text: L("Skills: \(envSummary.skillCount)", "技能数: \(envSummary.skillCount)")
+                    text: L("Skills: \(envSummary.skillCount)", "技能数: \(envSummary.skillCount)", "Skills: \(envSummary.skillCount)")
                 )
                 envPill(
                     icon: "macwindow",
@@ -960,7 +964,8 @@ struct AntigravitySubscriptionSection: View {
         } message: { entry in
             Text(L(
                 "Remove \"\(entry.accountPrimaryLabel)\" from AIUsage? Local Antigravity IDE sessions will not be deleted.",
-                "从 AIUsage 移除“\(entry.accountPrimaryLabel)”？不会删除本地 Antigravity IDE 会话。"
+                "从 AIUsage 移除“\(entry.accountPrimaryLabel)”？不会删除本地 Antigravity IDE 会话。",
+                "Gỡ \"\(entry.accountPrimaryLabel)\" khỏi AIUsage? Các phiên Antigravity IDE cục bộ sẽ không bị xóa."
             ))
         }
     }
@@ -1184,7 +1189,7 @@ struct AntigravitySubscriptionSection: View {
                             .background(Capsule().fill(Self.antigravityBrand.opacity(0.14)))
                     }
                     if partialTripped {
-                        Text(trippedPool.map { L("Pool Protected: \($0)", "池保护: \($0)") } ?? L("Pool Protected", "分池保护中"))
+                        Text(trippedPool.map { L("Pool Protected: \($0)", "池保护: \($0)", "Đang bảo vệ pool: \($0)") } ?? L("Pool Protected", "分池保护中"))
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 6)
@@ -1211,7 +1216,8 @@ struct AntigravitySubscriptionSection: View {
                                 onShowStatus(
                                     L(
                                         "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。"
+                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。",
+                                        "Đã chuyển sang \(entry.accountPrimaryLabel). Thoát và mở lại Antigravity.app để dùng tài khoản này."
                                     ),
                                     false
                                 )
@@ -1252,7 +1258,8 @@ struct AntigravitySubscriptionSection: View {
                         onShowStatus(
                             L(
                                 "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。"
+                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。",
+                                "Đã chuyển sang \(entry.accountPrimaryLabel). Thoát và mở lại Antigravity.app để dùng tài khoản này."
                             ),
                             false
                         )

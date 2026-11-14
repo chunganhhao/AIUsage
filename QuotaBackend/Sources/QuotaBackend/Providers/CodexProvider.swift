@@ -1005,18 +1005,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     private static func refreshLockKey(creds: Credentials, path: String?, refreshToken: String) -> String {
-        if let account = creds.accountId?.trimmingCharacters(in: .whitespacesAndNewlines), !account.isEmpty,
-           let user = creds.jwtUserId?.trimmingCharacters(in: .whitespacesAndNewlines), !user.isEmpty {
-            return "ws:\(account.lowercased()):\(user.lowercased())"
-        }
-        let token = refreshToken.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !token.isEmpty {
-            return "rt:\(token)"
-        }
-        if let path, !path.isEmpty {
-            return "path:\(AccountCredentialStore.normalizedAuthFilePath(path))"
-        }
-        return "codex-oauth"
+        CodexOAuthRefreshSerializer.lockKey(
+            accountId: creds.accountId,
+            userId: creds.jwtUserId,
+            refreshToken: refreshToken,
+            path: path
+        )
     }
 
     private func performOAuthRefresh(_ creds: Credentials, refreshToken: String) async throws -> Credentials {
@@ -1758,9 +1752,24 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 /// Serializes Codex OAuth refresh per workspace so parallel account fetches
 /// cannot rotate the same refresh_token. Callers must reload/persist inside
 /// `run`; awaiting across the actor boundary is not a lock.
-private actor CodexOAuthRefreshSerializer {
+actor CodexOAuthRefreshSerializer {
     static let shared = CodexOAuthRefreshSerializer()
     private var tails: [String: Task<Void, Never>] = [:]
+
+    static func lockKey(accountId: String?, userId: String?, refreshToken: String?, path: String?) -> String {
+        if let account = accountId?.trimmingCharacters(in: .whitespacesAndNewlines), !account.isEmpty,
+           let user = userId?.trimmingCharacters(in: .whitespacesAndNewlines), !user.isEmpty {
+            return "ws:\(account.lowercased()):\(user.lowercased())"
+        }
+        let token = refreshToken?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        if !token.isEmpty {
+            return "rt:\(token)"
+        }
+        if let path, !path.isEmpty {
+            return "path:\(AccountCredentialStore.normalizedAuthFilePath(path))"
+        }
+        return "codex-oauth"
+    }
 
     func run<T: Sendable>(
         key: String,

@@ -81,8 +81,13 @@ public actor CallAnalyticsEngine {
             claude = (claudeLedger.retainedDays(legacy: legacyClaude), CallSourceStatus(source: .claude, available: false,
                 eventCount: 0, filesScanned: 0, errorCode: "ledger_io_failed"))
         }
-        let codex = CodexCallEventSource(homeDirectory: homeDirectory, timeZone: timeZone, environment: environment)
-            .collect(cutoff: nonOpenCodeScanCutoff)
+        let codexServers = Set(installedMCP.filter { $0.source == .codex }.map(\.name))
+        let codex = CodexCallEventSource(
+            homeDirectory: homeDirectory,
+            timeZone: timeZone,
+            environment: environment,
+            knownMCPServers: codexServers
+        ).collect(cutoff: nonOpenCodeScanCutoff)
         let antigravity = antigravitySource.collect(cutoff: cutoff, rescan: rescan, knownMCPServers: Set(installedMCP.filter { $0.source == .antigravity }.map(\.name)))
         let opencodeRaw = OpenCodeCallEventSource(
             homeDirectory: homeDirectory, timeZone: timeZone, environment: environment,

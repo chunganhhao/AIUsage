@@ -8,16 +8,30 @@ enum AntigravityPoolCircuitBreaker {
 
         static func model(_ id: String) -> Pool? {
             let id = id.lowercased()
-            if id.hasPrefix("gemini-4-argon") { return .argon }
-            if id.hasPrefix("gemini-") { return .gemini }
-            if id.hasPrefix("claude-") || id.hasPrefix("gpt-") { return .claude }
+            if id.hasPrefix("gemini-4-argon") || id.hasPrefix("gemini-4-carbon")
+                || id.contains("argon") || id.contains("carbon") {
+                return .argon
+            }
+            if id.hasPrefix("gemini-") || id.contains("hydrogen") {
+                return .gemini
+            }
+            if id.hasPrefix("claude-") || id.hasPrefix("gpt-") {
+                return .claude
+            }
             return nil
         }
 
         static func quota(_ model: AntigravityProvider.ModelQuota) -> Pool? {
-            if model.isAuxiliary { return .argon }
-            if model.id.hasPrefix("3p-") || model.label.hasPrefix("Claude + GPT") { return .claude }
-            if model.label.hasPrefix("Gemini ·") { return .gemini }
+            let labelLower = model.label.lowercased()
+            if model.isAuxiliary || labelLower.contains("argon") || labelLower.contains("carbon") {
+                return .argon
+            }
+            if model.id.hasPrefix("3p-") || model.label.hasPrefix("Claude + GPT") {
+                return .claude
+            }
+            if model.label.hasPrefix("Gemini ·") || labelLower.contains("hydrogen") || labelLower.contains("flash") || labelLower == "pro" {
+                return .gemini
+            }
             return Self.model(model.id)
         }
     }

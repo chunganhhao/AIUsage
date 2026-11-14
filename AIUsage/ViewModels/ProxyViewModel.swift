@@ -62,16 +62,18 @@ enum ProxyRuntimeError: LocalizedError {
                 "找不到 QuotaServer 辅助程序。请重新构建或重新安装 AIUsage 后再试。"
             )
         case .proxyStartFailed(let reason):
-            return AppSettings.shared.t("Failed to start proxy: \(reason)", "启动代理失败：\(reason)")
+            return AppSettings.shared.t("Failed to start proxy: \(reason)", "启动代理失败：\(reason)", "Khởi động proxy thất bại: \(reason)")
         case .proxyPortInUse(let port):
             return AppSettings.shared.t(
                 "Port \(port) is already in use by another process. Quit the program occupying it (or restart AIUsage to clear leftover proxies), then try again.",
-                "端口 \(port) 已被其它进程占用。请关闭占用该端口的程序（或重启 AIUsage 清理残留代理）后重试。"
+                "端口 \(port) 已被其它进程占用。请关闭占用该端口的程序（或重启 AIUsage 清理残留代理）后重试。",
+                "Cổng \(port) đang được tiến trình khác sử dụng. Hãy thoát ứng dụng đang chiếm cổng (hoặc khởi động lại AIUsage để dọn proxy còn sót) rồi thử lại."
             )
         case .proxyPortInUseByNode(let port, let track, let name):
             return AppSettings.shared.t(
                 "Port \(port) is already in use by node \"\(name)\" under the \(track) proxy. Change this node's port, or stop that node first.",
-                "端口 \(port) 已被「\(track) 代理」下的节点「\(name)」占用。请修改本节点端口，或先停用那个节点。"
+                "端口 \(port) 已被「\(track) 代理」下的节点「\(name)」占用。请修改本节点端口，或先停用那个节点。",
+                "Cổng \(port) đang được node \"\(name)\" thuộc proxy \(track) sử dụng. Hãy đổi cổng của node này hoặc dừng node đó trước."
             )
         case .activationStatePersistFailed:
             return AppSettings.shared.t("The node started, but AIUsage could not persist the activated state.", "节点已启动，但 AIUsage 无法保存激活状态。")
@@ -385,6 +387,47 @@ class ProxyViewModel: ObservableObject {
         return true
     }
 
+    /// 切换节点默认模型（节点卡片与菜单栏共用）。Codex 单模型即 bigModel（写入 config.toml 的 model）。
+    /// 走 `updateProfile`：已接入的节点会按新模型重写 CLI 配置。
+    func switchDefaultModel(nodeID: String, to model: String) async {
+        let normalized = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !normalized.isEmpty, var profile = profileStore.profile(for: nodeID) else { return }
+        if profile.metadata.nodeType.isCodex {
+            guard profile.metadata.proxy.modelMapping.bigModel.name != normalized else { return }
+            profile.metadata.proxy.modelMapping.bigModel.name = normalized
+        } else {
+            guard profile.metadata.proxy.defaultModel != normalized else { return }
+        }
+        profile.metadata.proxy.defaultModel = normalized
+        profile.metadata.proxy.modelCatalog.mergeModels([normalized])
+        profile.syncEnvFromProxy()
+        await updateProfile(profile)
+    }
+
+    /// 整体替换某节点的模型目录（后台模型 / 公开价格同步专用）。
+    ///
+    /// 与 `setSupports1M` 同理不走 `updateProfile`：那条路会停掉再重建节点运行时，正在进行的
+    /// 请求会被打断；而目录与价格只影响可选模型和费用估算，运行中的进程不需要重启。
+    /// 价格变化立即对新请求生效（费用按内存中的 `configurations` 计算），并回填历史未定价日志。
+    @discardableResult
+    func applyModelCatalogUpdate(nodeID: String, catalog: ProxyConfiguration.ModelCatalog) -> Bool {
+        guard let index = configurations.firstIndex(where: { $0.id == nodeID }),
+              var profile = profileStore.profile(for: nodeID) else { return false }
+        guard profile.metadata.proxy.modelCatalog != catalog else { return true }
+
+        let previous = configurations[index].modelCatalog
+        profile.metadata.proxy.modelCatalog = catalog
+        configurations[index].modelCatalog = catalog
+        guard profileStore.save(profile) else {
+            configurations[index].modelCatalog = previous
+            return false
+        }
+        if previous.pricingOverrides != catalog.pricingOverrides {
+            recalculateCosts(for: nodeID)
+        }
+        return true
+    }
+
     func saveActivatedId() {
         if let id = activatedConfigId {
             UserDefaults.standard.set(id, forKey: DefaultsKey.proxyActivatedConfigId)
@@ -640,12 +683,14 @@ class ProxyViewModel: ObservableObject {
         if openCode.isRuntimeEnabled, openCode.activeNodeId == id { consumers.append("OpenCode") }
 
         guard !consumers.isEmpty else { return nil }
-        let names = AppSettings.shared.language == "zh"
+        let lang = AppSettings.shared.language
+        let names = lang == "zh"
             ? consumers.joined(separator: "、")
             : consumers.joined(separator: ", ")
         return AppSettings.shared.t(
             "Disconnect \(names) before deleting this node.",
-            "请先断开 \(names)，再删除此节点。"
+            "请先断开 \(names)，再删除此节点。",
+            "Ngắt kết nối \(names) trước khi xóa node này."
         )
     }
 

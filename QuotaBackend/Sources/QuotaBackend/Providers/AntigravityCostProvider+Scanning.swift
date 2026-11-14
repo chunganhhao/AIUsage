@@ -179,35 +179,81 @@ extension AntigravityCostProvider {
     }
 
     static func extractSelectedModel(from line: String) -> String? {
-        guard line.contains("<USER_SETTINGS_CHANGE>"),
-              let markerRange = line.range(of: "Model Selection") else { return nil }
+        guard line.contains("<USER_SETTINGS_CHANGE>") else { return nil }
+        let markers = ["changed setting `Model Selection`", "`Model Selection`", "Model Selection changed"]
+        guard let markerRange = markers
+            .compactMap({ line.range(of: $0, options: .backwards) })
+            .max(by: { $0.upperBound < $1.upperBound }) else { return nil }
         let tail = line[markerRange.upperBound...]
         guard let toRange = tail.range(of: " to ") else { return nil }
         let afterTo = tail[toRange.upperBound...]
-        let rawModel: Substring
-        if let dotRange = afterTo.range(of: ". No need") {
-            rawModel = afterTo[..<dotRange.lowerBound]
-        } else if let escapedNewline = afterTo.range(of: "\\n") {
-            rawModel = afterTo[..<escapedNewline.lowerBound]
-        } else if let newline = afterTo.range(of: "\n") {
-            rawModel = afterTo[..<newline.lowerBound]
-        } else if let closeTag = afterTo.range(of: "</USER_SETTINGS_CHANGE>") {
-            rawModel = afterTo[..<closeTag.lowerBound]
-        } else {
-            rawModel = afterTo
+        let delimiters: [(pattern: String, options: String.CompareOptions)] = [
+            (". No need", .caseInsensitive),
+            ("\\n", []),
+            ("\n", []),
+            ("\r", []),
+            ("</USER_SETTINGS_CHANGE>", []),
+            ("<", [])
+        ]
+        var endIndex = afterTo.endIndex
+        for (pattern, options) in delimiters {
+            if let range = afterTo.range(of: pattern, options: options),
+               range.lowerBound < endIndex {
+                endIndex = range.lowerBound
+            }
         }
-        let trimmed = String(rawModel).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        let trimmed = String(afterTo[..<endIndex]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
         return normalizeSelectedModelName(trimmed)
     }
 
     static func normalizeSelectedModelName(_ raw: String) -> String? {
         let cleaned = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !cleaned.isEmpty, cleaned != "none" else { return nil }
+        // Reject prose/code discussion fragments that mention USER_SETTINGS_CHANGE + Model Selection.
+        if cleaned.contains("\"") || cleaned.contains("'") || cleaned.contains("`")
+            || cleaned.contains("\\") || cleaned.contains(":") || cleaned.contains("{") || cleaned.contains("}")
+            || cleaned.contains("[") || cleaned.contains("]") {
+            return nil
+        }
+        if cleaned.split(whereSeparator: \.isWhitespace).count > 5 {
+            return nil
+        }
+        let withoutParen: String
+        if cleaned.hasSuffix(")"), let parenIndex = cleaned.lastIndex(of: "(") {
+            let inside = cleaned[cleaned.index(after: parenIndex)..<cleaned.index(before: cleaned.endIndex)]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedEffortChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ "))
+            guard !inside.isEmpty,
+                  inside.unicodeScalars.allSatisfy({ allowedEffortChars.contains($0) }) else {
+                return nil
+            }
+            withoutParen = String(cleaned[..<parenIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
+        } else {
+            withoutParen = cleaned
+        }
+        guard !withoutParen.contains("("), !withoutParen.contains(")") else {
+            return nil
+        }
+        if cleaned.contains("orchestrator") {
+            if cleaned.contains("carbon") { return "gemini-4-carbon" }
+            if cleaned.contains("hydrogen") { return "gemini-4-hydrogen" }
+            if cleaned.contains("flash") { return "gemini-3.8-flash" }
+            return "gemini-4-argon"
+        }
+        if cleaned.contains("gemini 4 hydrogen") || cleaned.contains("gemini-4-hydrogen") {
+            return "gemini-4-hydrogen"
+        }
+        if cleaned.contains("gemini 4 carbon") || cleaned.contains("gemini-4-carbon") {
+            return "gemini-4-carbon"
+        }
         if cleaned.contains("gemini 4 argon") || cleaned.contains("gemini-4-argon") {
             return "gemini-4-argon"
         }
         if cleaned.contains("gemini 3.8 flash") || cleaned.contains("gemini-3.8-flash") {
             return "gemini-3.8-flash"
+        }
+        if cleaned.contains("gemini 3.5 flash") || cleaned.contains("gemini-3.5-flash") {
+            return "gemini-3.5-flash-lite"
         }
         if cleaned.contains("gemini 3.1 pro") || cleaned.contains("gemini-3.1-pro") {
             return "gemini-3.1-pro"
@@ -221,6 +267,12 @@ extension AntigravityCostProvider {
         if cleaned.contains("gemini 2.5 flash") || cleaned.contains("gemini-2.5-flash") {
             return "gemini-2.5-flash"
         }
+        if cleaned.contains("claude opus 5.5") || cleaned.contains("claude-opus-5-5") || cleaned.contains("claude-opus-5.5") {
+            return "claude-opus-5.5"
+        }
+        if cleaned.contains("claude sonnet 5.5") || cleaned.contains("claude-sonnet-5-5") || cleaned.contains("claude-sonnet-5.5") {
+            return "claude-sonnet-5.5"
+        }
         if cleaned.contains("claude opus 4.6") || cleaned.contains("claude-opus-4-6") || cleaned.contains("claude-opus-4.6") {
             return "claude-opus-4.6"
         }
@@ -233,21 +285,16 @@ extension AntigravityCostProvider {
         if cleaned.contains("gpt-oss") {
             return "gpt-oss-120b"
         }
-        // Fallback for any newly introduced model in <USER_SETTINGS_CHANGE>:
-        // strip trailing parenthetical mode tags like "(high)" or "(thinking)" and slugify,
-        // so new models never inherit the previous model's token attribution.
-        let withoutParen: String
-        if let parenIndex = cleaned.firstIndex(of: "(") {
-            withoutParen = String(cleaned[..<parenIndex]).trimmingCharacters(in: .whitespacesAndNewlines)
-        } else {
-            withoutParen = cleaned
-        }
         let slug = withoutParen
             .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
             .filter { !$0.isEmpty }
             .joined(separator: "-")
             .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
-        return slug.isEmpty ? "unknown-model" : slug
+        let knownPrefixes = ["gemini-", "claude-", "gpt-", "o1", "o3", "o4"]
+        guard !slug.isEmpty, knownPrefixes.contains(where: { slug.hasPrefix($0) }) else {
+            return nil
+        }
+        return slug
     }
 
     // MARK: - Proxy Archive

@@ -60,6 +60,13 @@ public struct CallAnalyticsEntry: Codable, Sendable, Hashable {
     public var durationSampleCount: Int
     /// 耗时总和（毫秒，平均耗时分子）。
     public var durationMsTotal: Double
+    /// Transient in-memory count of `function_call(namespace: "mcp__...")` events reclassified from bare v1 `.builtin`.
+    public var reclassifiedBuiltinCount: Int
+
+    private enum CodingKeys: String, CodingKey {
+        case source, kind, name, server, agent, dayKey, count
+        case outcomeKnownCount, successCount, durationSampleCount, durationMsTotal
+    }
 
     public init(
         source: CallSourceKind,
@@ -72,7 +79,8 @@ public struct CallAnalyticsEntry: Codable, Sendable, Hashable {
         outcomeKnownCount: Int = 0,
         successCount: Int = 0,
         durationSampleCount: Int = 0,
-        durationMsTotal: Double = 0
+        durationMsTotal: Double = 0,
+        reclassifiedBuiltinCount: Int = 0
     ) {
         self.source = source
         self.kind = kind
@@ -85,6 +93,51 @@ public struct CallAnalyticsEntry: Codable, Sendable, Hashable {
         self.successCount = successCount
         self.durationSampleCount = durationSampleCount
         self.durationMsTotal = durationMsTotal
+        self.reclassifiedBuiltinCount = reclassifiedBuiltinCount
+    }
+
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        self.source = try container.decode(CallSourceKind.self, forKey: .source)
+        self.kind = try container.decode(CallKind.self, forKey: .kind)
+        self.name = try container.decode(String.self, forKey: .name)
+        self.server = try container.decodeIfPresent(String.self, forKey: .server)
+        self.agent = try container.decodeIfPresent(String.self, forKey: .agent)
+        self.dayKey = try container.decode(String.self, forKey: .dayKey)
+        self.count = try container.decode(Int.self, forKey: .count)
+        self.outcomeKnownCount = try container.decode(Int.self, forKey: .outcomeKnownCount)
+        self.successCount = try container.decode(Int.self, forKey: .successCount)
+        self.durationSampleCount = try container.decode(Int.self, forKey: .durationSampleCount)
+        self.durationMsTotal = try container.decode(Double.self, forKey: .durationMsTotal)
+        self.reclassifiedBuiltinCount = 0
+    }
+
+    public static func == (lhs: CallAnalyticsEntry, rhs: CallAnalyticsEntry) -> Bool {
+        lhs.source == rhs.source
+            && lhs.kind == rhs.kind
+            && lhs.name == rhs.name
+            && lhs.server == rhs.server
+            && lhs.agent == rhs.agent
+            && lhs.dayKey == rhs.dayKey
+            && lhs.count == rhs.count
+            && lhs.outcomeKnownCount == rhs.outcomeKnownCount
+            && lhs.successCount == rhs.successCount
+            && lhs.durationSampleCount == rhs.durationSampleCount
+            && lhs.durationMsTotal == rhs.durationMsTotal
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(source)
+        hasher.combine(kind)
+        hasher.combine(name)
+        hasher.combine(server)
+        hasher.combine(agent)
+        hasher.combine(dayKey)
+        hasher.combine(count)
+        hasher.combine(outcomeKnownCount)
+        hasher.combine(successCount)
+        hasher.combine(durationSampleCount)
+        hasher.combine(durationMsTotal)
     }
 
     /// 成功率（0...1）。无结果信号时为 nil（UI 应显式留白，而非显示 0%）。
@@ -155,7 +208,7 @@ public struct CallAnalyticsSnapshot: Codable, Sendable {
     //     不再受「子代理是否调过工具」影响，纯文本输出 / 自定义子代理也能显示。
     // v6：解析窗口从「滚动天数 windowDays」改为「日历口径 rangeKey」（today/week/month/all，与用量统计同口径），
     //     并按事件日期精确过滤。字段类型变更会令旧缓存自动失效、整份重建。
-    public static let currentSchemaVersion = 7
+    public static let currentSchemaVersion = 8
 
     public let schemaVersion: Int
     public let generatedAt: Date

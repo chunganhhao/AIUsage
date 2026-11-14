@@ -7,8 +7,14 @@ import QuotaBackend
 import CryptoKit
 
 var fixtureForceChinese = false
-func L(_ en: String, _ zh: String) -> String {
-    (fixtureForceChinese || ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "zh") ? zh : en
+func L(_ en: String, _ zh: String, _ vi: String? = nil, key: String? = nil, file: String = #fileID) -> String {
+    if fixtureForceChinese || ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "zh" {
+        return zh
+    }
+    if ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "vi", let vi {
+        return vi
+    }
+    return en
 }
 struct CLIProxyGatewaySettings: Equatable {
     var autoStart = false, allowLANAccess = false, accountModelProbeEnabled = false, enablePlugins = false

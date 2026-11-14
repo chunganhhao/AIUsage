@@ -37,7 +37,7 @@ struct CallAnalyticsArchive: Codable, Sendable {
 }
 
 final class CallAnalyticsArchiveStore {
-    static let artifactVersion = 1
+    static let artifactVersion = 2
 
     private let homeDirectory: String
     private var cached: CallAnalyticsArchive?
@@ -62,23 +62,59 @@ final class CallAnalyticsArchiveStore {
         backfill: Bool = false
     ) -> [String: CallAnalyticsDayBucket] {
         var archive = load()
+        let isLegacyV1Migration = (archive.fullHistoryImportedAt == nil)
         var changed = false
 
         for (day, bucket) in computed where !bucket.isEmpty {
             if day == todayKey {
-                archive.days[day] = bucket
+                var cleanBucket = bucket
+                for i in cleanBucket.entries.indices {
+                    cleanBucket.entries[i].reclassifiedBuiltinCount = 0
+                }
+                archive.days[day] = cleanBucket
                 changed = true
             } else if backfill, var previous = archive.days[day] {
                 // Backfill missing calls without deleting history whose source sessions were removed.
+                previous = Self.migratedV1DayBucket(previous)
                 for entry in bucket.entries {
-                    if let index = previous.entries.firstIndex(where: { $0.source == entry.source && $0.kind == entry.kind && $0.name == entry.name && $0.server == entry.server && $0.agent == entry.agent }) {
-                        if entry.count > previous.entries[index].count { previous.entries[index] = entry }
-                    } else { previous.entries.append(entry) }
+                    let addedCount: Int
+                    var cleanedEntry = entry
+                    cleanedEntry.reclassifiedBuiltinCount = 0
+                    if let index = previous.entries.firstIndex(where: { Self.matchesBackfillEntry($0, cleanedEntry) }) {
+                        let existing = previous.entries[index]
+                        addedCount = max(0, cleanedEntry.count - existing.count)
+                        var merged = cleanedEntry
+                        merged.count = max(cleanedEntry.count, existing.count)
+                        merged.outcomeKnownCount = min(merged.count, max(cleanedEntry.outcomeKnownCount, existing.outcomeKnownCount))
+                        merged.successCount = min(merged.outcomeKnownCount, max(cleanedEntry.successCount, existing.successCount))
+                        merged.durationSampleCount = min(merged.count, max(cleanedEntry.durationSampleCount, existing.durationSampleCount))
+                        merged.durationMsTotal = max(cleanedEntry.durationMsTotal, existing.durationMsTotal)
+                        previous.entries[index] = merged
+                    } else {
+                        addedCount = cleanedEntry.count
+                        previous.entries.append(cleanedEntry)
+                    }
+                    let deductCount = min(addedCount, entry.reclassifiedBuiltinCount)
+                    if isLegacyV1Migration,
+                       cleanedEntry.source == .codex, cleanedEntry.kind == .mcp, deductCount > 0,
+                       let toolName = cleanedEntry.name.split(separator: "/", maxSplits: 1).last.map(String.init),
+                       !toolName.isEmpty {
+                        Self.deductSupersededLegacyCodexBuiltin(
+                            toolName: toolName,
+                            agent: cleanedEntry.agent,
+                            count: deductCount,
+                            from: &previous.entries
+                        )
+                    }
                 }
                 archive.days[day] = previous
                 changed = true
             } else if archive.days[day] == nil {
-                archive.days[day] = bucket
+                var cleanBucket = bucket
+                for i in cleanBucket.entries.indices {
+                    cleanBucket.entries[i].reclassifiedBuiltinCount = 0
+                }
+                archive.days[day] = cleanBucket
                 changed = true
             }
         }
@@ -108,16 +144,131 @@ final class CallAnalyticsArchiveStore {
     private func load() -> CallAnalyticsArchive {
         if let cached { return cached }
 
-        if let data = try? Data(contentsOf: Self.fileURL(homeDirectory: homeDirectory)),
+        if let data = try? Data(contentsOf: Self.fileURL(homeDirectory: homeDirectory, version: Self.artifactVersion)),
            let decoded = try? JSONDecoder().decode(CallAnalyticsArchive.self, from: data),
            decoded.version == Self.artifactVersion {
             cached = decoded
             return decoded
         }
 
+        // Migrate v1 -> v2: retain existing historical days (for deleted sessions), upgrading legacy
+        // Codex `mcp__...` builtins to `.mcp` and resetting fullHistoryImportedAt for backfill.
+        if let v1Data = try? Data(contentsOf: Self.fileURL(homeDirectory: homeDirectory, version: 1)),
+           let decodedV1 = try? JSONDecoder().decode(CallAnalyticsArchive.self, from: v1Data) {
+            let seeded = CallAnalyticsArchive(
+                version: Self.artifactVersion,
+                updatedAt: decodedV1.updatedAt,
+                fullHistoryImportedAt: nil,
+                days: decodedV1.days.mapValues(Self.migratedV1DayBucket)
+            )
+            cached = seeded
+            return seeded
+        }
+
         let fresh = CallAnalyticsArchive(version: Self.artifactVersion, updatedAt: "", fullHistoryImportedAt: nil, days: [:])
         cached = fresh
         return fresh
+    }
+
+    private static func canonicalCodexServer(_ raw: String?) -> String {
+        let normalized = (raw ?? "").replacingOccurrences(of: "-", with: "_")
+        return normalized == "cua_repl" ? "computer_use" : normalized
+    }
+
+    private static func matchesBackfillEntry(_ existing: CallAnalyticsEntry, _ incoming: CallAnalyticsEntry) -> Bool {
+        if existing.source == incoming.source,
+           existing.kind == incoming.kind,
+           existing.name == incoming.name,
+           existing.server == incoming.server,
+           existing.agent == incoming.agent {
+            return true
+        }
+        guard existing.source == .codex, incoming.source == .codex,
+              existing.kind == .mcp, incoming.kind == .mcp,
+              existing.agent == incoming.agent else {
+            return false
+        }
+        let existingTool = existing.name.split(separator: "/", maxSplits: 1).last
+        let incomingTool = incoming.name.split(separator: "/", maxSplits: 1).last
+        guard let existingTool, let incomingTool, existingTool == incomingTool else {
+            return false
+        }
+        let existingServer = canonicalCodexServer(existing.server)
+        let incomingServer = canonicalCodexServer(incoming.server)
+        return !existingServer.isEmpty && existingServer == incomingServer
+    }
+
+    private static func deductSupersededLegacyCodexBuiltin(
+        toolName: String,
+        agent: String?,
+        count: Int,
+        from entries: inout [CallAnalyticsEntry]
+    ) {
+        var remainingToDeduct = count
+        var idx = 0
+        while idx < entries.count && remainingToDeduct > 0 {
+            let candidate = entries[idx]
+            if candidate.source == .codex,
+               candidate.kind == .builtin,
+               candidate.name == toolName,
+               candidate.agent == agent {
+                let deducted = min(candidate.count, remainingToDeduct)
+                let newCount = candidate.count - deducted
+                remainingToDeduct -= deducted
+                if newCount > 0 {
+                    var updated = candidate
+                    updated.count = newCount
+                    updated.outcomeKnownCount = min(candidate.outcomeKnownCount, newCount)
+                    updated.successCount = min(candidate.successCount, updated.outcomeKnownCount)
+                    updated.durationSampleCount = min(candidate.durationSampleCount, newCount)
+                    entries[idx] = updated
+                    idx += 1
+                } else {
+                    entries.remove(at: idx)
+                }
+            } else {
+                idx += 1
+            }
+        }
+    }
+
+    private static func migratedV1DayBucket(_ bucket: CallAnalyticsDayBucket) -> CallAnalyticsDayBucket {
+        var migratedEntries: [CallAnalyticsEntry] = []
+        for entry in bucket.entries {
+            let normalized: CallAnalyticsEntry
+            if entry.source == .codex,
+               entry.kind == .builtin,
+               let mcp = CallAnalyticsNaming.parseClaudeMCP(entry.name) {
+                normalized = CallAnalyticsEntry(
+                    source: entry.source,
+                    kind: .mcp,
+                    name: CallAnalyticsNaming.mcpDisplayName(server: mcp.server, tool: mcp.tool),
+                    server: mcp.server,
+                    agent: entry.agent,
+                    dayKey: entry.dayKey,
+                    count: entry.count,
+                    outcomeKnownCount: entry.outcomeKnownCount,
+                    successCount: entry.successCount,
+                    durationSampleCount: entry.durationSampleCount,
+                    durationMsTotal: entry.durationMsTotal
+                )
+            } else {
+                normalized = entry
+            }
+            if let idx = migratedEntries.firstIndex(where: {
+                $0.source == normalized.source && $0.kind == normalized.kind
+                    && $0.name == normalized.name && $0.server == normalized.server && $0.agent == normalized.agent
+            }) {
+                migratedEntries[idx].count += normalized.count
+                migratedEntries[idx].outcomeKnownCount += normalized.outcomeKnownCount
+                migratedEntries[idx].successCount += normalized.successCount
+                migratedEntries[idx].durationSampleCount += normalized.durationSampleCount
+                migratedEntries[idx].durationMsTotal += normalized.durationMsTotal
+            } else {
+                migratedEntries.append(normalized)
+            }
+        }
+        return CallAnalyticsDayBucket(entries: migratedEntries, agentInvocations: bucket.agentInvocations)
     }
 
     private func save(_ archive: CallAnalyticsArchive) {
@@ -134,9 +285,9 @@ final class CallAnalyticsArchiveStore {
         }
     }
 
-    static func fileURL(homeDirectory: String) -> URL {
+    static func fileURL(homeDirectory: String, version: Int = artifactVersion) -> URL {
         let dir = (homeDirectory as NSString).appendingPathComponent(".config/aiusage/usage-archive")
         return URL(fileURLWithPath: dir, isDirectory: true)
-            .appendingPathComponent("call-analytics-archive-v\(artifactVersion).json")
+            .appendingPathComponent("call-analytics-archive-v\(version).json")
     }
 }

@@ -290,53 +290,73 @@ struct SubscriptionGatewaySettingsView: View {
         VStack(alignment: .leading, spacing: 14) {
             sectionHeader(title: L("Versions & rollback", "版本与回退"))
 
-            GatewayCard(padding: 4) {
-                if manager.installedVersions.isEmpty {
-                    Text(L("No CPA versions installed.", "尚未安装 CPA。"))
-                        .font(.callout)
-                        .foregroundStyle(.secondary)
-                        .frame(maxWidth: .infinity, minHeight: 72)
-                } else {
-                    VStack(spacing: 0) {
-                        ForEach(manager.installedVersions) { version in
-                            HStack(spacing: 10) {
-                                Image(systemName: version.isCurrent ? "checkmark.seal.fill" : "shippingbox")
-                                    .foregroundStyle(version.isCurrent ? .green : .secondary)
-                                    .frame(width: 20)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text("v\(version.version)")
-                                        .font(.subheadline.weight(.semibold).monospacedDigit())
-                                    Text(version.installedAt.formatted(date: .abbreviated, time: .shortened))
-                                        .font(.caption2)
-                                        .foregroundStyle(.secondary)
-                                }
-                                if version.isCurrent {
-                                    GatewayQuietBadge(text: L("Active", "当前"), tint: .green)
-                                }
-                                Spacer(minLength: 8)
-                                if !version.isCurrent {
-                                    Button(L("Activate", "切换")) {
-                                        Task { await manager.activate(version) }
-                                    }
-                                    Button(role: .destructive) {
-                                        pendingVersionDeletion = version
-                                    } label: {
-                                        Image(systemName: "trash")
-                                    }
-                                    .buttonStyle(.borderless)
-                                    .help(L("Delete", "删除"))
-                                }
+            GatewayCard(padding: 0) {
+                VStack(alignment: .leading, spacing: 0) {
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 8) {
+                            Text(L("CLIProxy (CPA) — Versions & rollback", "CLIProxy (CPA) — 版本与回退"))
+                                .font(.headline)
+                            Spacer(minLength: 8)
+                            if let current = manager.installedVersions.first(where: \.isCurrent) {
+                                GatewayQuietBadge(text: "v\(current.version)", tint: .green)
                             }
-                            .padding(.horizontal, 12)
-                            .padding(.vertical, 10)
-                            if version.id != manager.installedVersions.last?.id {
-                                Divider().padding(.leading, 42)
+                        }
+                        Text(L("Activates or rolls back the managed CLIProxyAPI runtime binary used by CPA Gateway.", "切换或回退 CPA 网关所使用的托管 CLIProxyAPI 运行时版本。"))
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 12)
+
+                    Divider().opacity(0.35)
+
+                    if manager.installedVersions.isEmpty {
+                        Text(L("No CPA versions installed.", "尚未安装 CPA。"))
+                            .font(.callout)
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, minHeight: 72)
+                    } else {
+                        VStack(spacing: 0) {
+                            ForEach(manager.installedVersions) { version in
+                                HStack(spacing: 10) {
+                                    Image(systemName: version.isCurrent ? "checkmark.seal.fill" : "shippingbox")
+                                        .foregroundStyle(version.isCurrent ? .green : .secondary)
+                                        .frame(width: 20)
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("v\(version.version)")
+                                            .font(.subheadline.weight(.semibold).monospacedDigit())
+                                        Text(version.installedAt.formatted(date: .abbreviated, time: .shortened))
+                                            .font(.caption2)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    if version.isCurrent {
+                                        GatewayQuietBadge(text: L("Active", "当前"), tint: .green)
+                                    }
+                                    Spacer(minLength: 8)
+                                    if !version.isCurrent {
+                                        Button(L("Activate", "切换")) {
+                                            Task { await manager.activate(version) }
+                                        }
+                                        Button(role: .destructive) {
+                                            pendingVersionDeletion = version
+                                        } label: {
+                                            Image(systemName: "trash")
+                                        }
+                                        .buttonStyle(.borderless)
+                                        .help(L("Delete", "删除"))
+                                    }
+                                }
+                                .padding(.horizontal, 14)
+                                .padding(.vertical, 10)
+                                if version.id != manager.installedVersions.last?.id {
+                                    Divider().opacity(0.35).padding(.leading, 44)
+                                }
                             }
                         }
                     }
                 }
             }
-            GatewayCard { RTKVersionsView() }
+            GatewayCard(padding: 0) { RTKVersionsView() }
         }
     }
 
@@ -462,10 +482,10 @@ struct SubscriptionGatewaySettingsView: View {
         switch manager.operation {
         case .idle: ""
         case .checking: L("Checking…", "检查中…")
-        case .downloading(let version): L("Downloading v\(version)…", "下载 v\(version)…")
-        case .verifying(let version): L("Verifying v\(version)…", "校验 v\(version)…")
-        case .installing(let version): L("Installing v\(version)…", "安装 v\(version)…")
-        case .activating(let version): L("Activating v\(version)…", "切换到 v\(version)…")
+        case .downloading(let version): L("Downloading v\(version)…", "下载 v\(version)…", "Đang tải v\(version)…")
+        case .verifying(let version): L("Verifying v\(version)…", "校验 v\(version)…", "Đang xác minh v\(version)…")
+        case .installing(let version): L("Installing v\(version)…", "安装 v\(version)…", "Đang cài đặt v\(version)…")
+        case .activating(let version): L("Activating v\(version)…", "切换到 v\(version)…", "Đang kích hoạt v\(version)…")
         }
     }
 }
@@ -503,7 +523,8 @@ struct TokenSaverUpdatesSection: View {
                             VStack(alignment: .leading, spacing: 4) {
                                 Text(L("GitHub checks paused", "GitHub 检查已暂停")).fontWeight(.semibold)
                                 Text(L("Try again after \(retry.formatted(date: .abbreviated, time: .standard)) (local time). Checks resume then; nothing retries automatically. This shared GitHub API limit is not your AI quota.",
-                                       "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查，不会自动重试。此共享 GitHub API 限制不是 AI 配额。"))
+                                       "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查，不会自动重试。此共享 GitHub API 限制不是 AI 配额。",
+                                       "Hãy thử lại sau \(retry.formatted(date: .abbreviated, time: .standard)) (giờ địa phương). Hệ thống chỉ kiểm tra lại sau mốc này và không tự thử lại. Giới hạn GitHub API dùng chung này không phải hạn mức AI của bạn."))
                             }
                         } icon: { Image(systemName: "clock.badge.exclamationmark") }
                         .font(.caption).padding(12)

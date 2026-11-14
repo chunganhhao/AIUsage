@@ -306,4 +306,47 @@ final class AntigravityPoolCircuitBreakerTests: XCTestCase {
         XCTAssertEqual(try Data(contentsOf: file), malformed)
     }
 
+    func testHydrogenJoinsGeminiPoolAndCarbonJoinsArgonPool() throws {
+        XCTAssertEqual(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-hydrogen-xhigh"), .gemini)
+        XCTAssertEqual(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-carbon-high"), .argon)
+        XCTAssertEqual(AntigravityPoolCircuitBreaker.Pool.quota(quota("Gemini 4 Hydrogen", 50)), .gemini)
+        XCTAssertEqual(AntigravityPoolCircuitBreaker.Pool.quota(quota("Gemini 4 Carbon", 50)), .argon)
+        XCTAssertTrue(quota("Gemini 4 Carbon", 50).isAuxiliary)
+        XCTAssertFalse(quota("Gemini 4 Hydrogen", 50).isAuxiliary)
+
+        let credentialInput: [String: Any] = [
+            "type": "antigravity",
+            "antigravity_capability_hints": [
+                "model_ids": [
+                    "gemini-4-hydrogen-xhigh",
+                    "gemini-4-carbon-high",
+                    "gemini-4-argon-high",
+                    "claude-opus-5-5-thinking"
+                ]
+            ]
+        ]
+
+        let geminiDepleted = try XCTUnwrap(try AntigravityPoolCircuitBreaker.updatedCredential(
+            credentialInput,
+            models: [quota("gemini-5h", 0), quota("gemini-argon-wtu-weekly", 100), quota("3p-5h", 100)],
+            global: []
+        ))
+        let geminiExcluded = geminiDepleted["excluded_models"] as? [String] ?? []
+        XCTAssertTrue(geminiExcluded.contains("gemini-4-hydrogen-xhigh"))
+        XCTAssertFalse(geminiExcluded.contains("gemini-4-carbon-high"))
+        XCTAssertFalse(geminiExcluded.contains("gemini-4-argon-high"))
+        XCTAssertFalse(geminiExcluded.contains("claude-opus-5-5-thinking"))
+
+        let argonDepleted = try XCTUnwrap(try AntigravityPoolCircuitBreaker.updatedCredential(
+            credentialInput,
+            models: [quota("gemini-5h", 100), quota("gemini-argon-wtu-weekly", 0), quota("3p-5h", 100)],
+            global: []
+        ))
+        let argonExcluded = argonDepleted["excluded_models"] as? [String] ?? []
+        XCTAssertTrue(argonExcluded.contains("gemini-4-carbon-high"))
+        XCTAssertTrue(argonExcluded.contains("gemini-4-argon-high"))
+        XCTAssertFalse(argonExcluded.contains("gemini-4-hydrogen-xhigh"))
+        XCTAssertFalse(argonExcluded.contains("claude-opus-5-5-thinking"))
+    }
+
 }

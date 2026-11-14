@@ -404,7 +404,7 @@ struct TokenSaverRuntimeSection: View {
                     Spacer()
                     let count = saver.settings.enabledToolCount
                     TokenSaverStatusBadge(
-                        text: count > 0 ? L("Enabled \(count)/3", "已启用 \(count)/3") : L("Off", "已关闭"),
+                        text: count > 0 ? L("Enabled \(count)/3", "已启用 \(count)/3", "Đã bật \(count)/3") : L("Off", "已关闭"),
                         tone: count > 0 ? .active : .neutral,
                         id: "token-saver-header-badge"
                     )
@@ -862,7 +862,7 @@ final class TokenSaverSettingsController: ObservableObject {
             return L("2. RTK: not verified", "2. RTK：未验证")
         default:
             let prefix = installationStatus.components(separatedBy: ";").first ?? installationStatus
-            return L("2. RTK: \(installationStatus)", "2. RTK：\(prefix)；代理 PATH 未验证")
+            return L("2. RTK: \(installationStatus)", "2. RTK：\(prefix)；代理 PATH 未验证", "2. RTK: \(installationStatus)")
         }
     }
     var localizedRulesStatus: String {
@@ -889,7 +889,7 @@ final class TokenSaverSettingsController: ObservableObject {
         }
         return count == 0
             ? L("4. Default RTK history: 0 records; no execution evidence", "4. 默认 RTK 历史记录：0 条记录；无执行证据")
-            : L("4. Default RTK history: \(count) records (all harnesses)", "4. 默认 RTK 历史记录：\(count) 条记录（涵盖所有代理）")
+            : L("4. Default RTK history: \(count) records (all harnesses)", "4. 默认 RTK 历史记录：\(count) 条记录（涵盖所有代理）", "4. Lịch sử RTK mặc định: \(count) bản ghi (mọi harness)")
     }
     var localizedError: String? { error.map(Self.localizeErrorText) }
     var localizedSetupError: String? { setupError.map(Self.localizeErrorText) }
@@ -987,7 +987,7 @@ struct SubscriptionGatewaySettingsProtectionPane: View {
                     .accessibilityLabel(L("Antigravity pool protection (opt-in)", "Antigravity 分池保护（主动开启）"))
                     .accessibilityIdentifier("antigravity-pool-protection")
                 }
-                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini, Claude/GPT or Argon pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini、Claude/GPT 或 Argon 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
+                Text(L("Off by default. Requires CPA 8.0.43+. Writes model exclusions for depleted Gemini (Flash 3.8 / Hydrogen 4), Claude/GPT or Argon/Carbon (Gemini 4 Argon / Carbon) pools, without disabling other pools. Turning off restores only unchanged protection-owned exclusions. Codex and gateway routing policy are not modified.", "默认关闭，需要 CPA 8.0.43 或更新版本。对耗尽的 Gemini (Flash 3.8 / Hydrogen 4)、Claude/GPT 或 Argon/Carbon (Gemini 4 Argon / Carbon) 池写入模型排除规则，不停用其他池。关闭时仅恢复未被外部修改的保护规则，不修改 Codex 或网关路由策略。"))
                     .font(.caption).foregroundStyle(.secondary)
                 AntigravityPerPoolControls(home: tokenSaverHome)
                 if !poolProtectionEnabled, poolProtectionResidual {

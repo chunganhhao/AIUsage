@@ -19,6 +19,7 @@ extension UsageNormalizer {
 
         let coreModels = trackedModels.filter {
             !$0.label.localizedCaseInsensitiveContains("argon")
+                && !$0.label.localizedCaseInsensitiveContains("carbon")
         }
         let primaryModels = coreModels.isEmpty ? trackedModels : coreModels
         let remainingPercent = primaryModels.map(\.remainingPercent).min() ?? pickSmallestRemaining(windows)
@@ -72,12 +73,12 @@ extension UsageNormalizer {
         if let error = extraString(usage, "circuitBreakerError"), !error.isEmpty {
             base.status = "watch"
             base.statusLabel = "Pool Protection Needs Attention"
-            base.spotlight = "Không thể đồng bộ cầu dao theo pool: \(error) Không xác nhận bảo vệ thành công."
+            base.spotlight = "Unable to sync pool circuit breaker: \(error) Pool protection was not confirmed."
         } else if (usage.extra["circuitBreakerPartialTripped"]?.value as? Bool) == true {
             let pools = extraString(usage, "circuitBreakerTrippedPool") ?? ""
             base.status = "watch"
             base.statusLabel = "Pools Paused: \(pools)"
-            base.spotlight = "🛡️ \(extraString(usage, "circuitBreakerReason") ?? "") Quota Weekly phải > 3%, 5h phải > 5% mới gỡ chặn cửa sổ tương ứng."
+            base.spotlight = "\(extraString(usage, "circuitBreakerReason") ?? "") Recovery requires weekly > 3% and five-hour > 5%."
         }
 
         return base

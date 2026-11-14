@@ -16,7 +16,8 @@ extension SettingsView {
                 CapsuleSegmentedPicker(
                     options: [
                         CapsuleSegmentOption("en", title: "English"),
-                        CapsuleSegmentOption("zh", title: "中文")
+                        CapsuleSegmentOption("zh", title: "中文"),
+                        CapsuleSegmentOption("vi", title: "Tiếng Việt")
                     ],
                     selection: $settings.language
                 )
@@ -274,8 +275,8 @@ extension SettingsView {
         let exists = FileManager.default.fileExists(atPath: path)
         let abbreviated = (path as NSString).abbreviatingWithTildeInPath
         return exists
-            ? L("Database in use: \(abbreviated)", "当前使用的数据库：\(abbreviated)")
-            : L("Database not found: \(abbreviated)", "未找到数据库：\(abbreviated)")
+            ? L("Database in use: \(abbreviated)", "当前使用的数据库：\(abbreviated)", "Cơ sở dữ liệu đang dùng: \(abbreviated)")
+            : L("Database not found: \(abbreviated)", "未找到数据库：\(abbreviated)", "Không tìm thấy cơ sở dữ liệu: \(abbreviated)")
     }
 
     private func applyCCSwitchDir() {
@@ -318,7 +319,8 @@ extension SettingsView {
                     Image(systemName: "exclamationmark.triangle.fill").font(.system(size: 9))
                     Text(L(
                         "You have \(totalPinnedCount) items pinned. More than \(StatusBarItemView.recommendedMaxAccounts) may cause the menu bar to be too wide.",
-                        "已固定 \(totalPinnedCount) 项。超过 \(StatusBarItemView.recommendedMaxAccounts) 个可能导致菜单栏过长。"
+                        "已固定 \(totalPinnedCount) 项。超过 \(StatusBarItemView.recommendedMaxAccounts) 个可能导致菜单栏过长。",
+                        "Bạn đã ghim \(totalPinnedCount) mục. Nhiều hơn \(StatusBarItemView.recommendedMaxAccounts) có thể khiến thanh menu quá rộng."
                     ))
                     .font(.caption2)
                 }
@@ -381,6 +383,29 @@ extension SettingsView {
                 ),
                 isOn: $settings.proxyAutoRestoreOnLaunch
             )
+
+            Divider()
+
+            settingsToggleRow(
+                title: L("Auto-sync models & prices", "自动同步模型与价格", "Tự động đồng bộ mô hình & giá"),
+                subtitle: L(
+                    "Every 6 hours, add newly listed upstream models to API providers and Claude Code / Codex / OpenCode nodes, and fill prices from models.dev. Manual prices and models you removed are never touched.",
+                    "每 6 小时检查一次：把上游新上架的模型加入 API 提供商与 Claude Code / Codex / OpenCode 节点，并用 models.dev 补齐价格。手动价格和你删掉的模型不会被改动。",
+                    "Mỗi 6 giờ, tự động thêm các mô hình mới từ nguồn vào nhà cung cấp API cùng các nút Claude Code / Codex / OpenCode, đồng thời điền giá từ models.dev. Giá chỉnh tay và các mô hình bạn đã xóa sẽ không bị thay đổi."
+                ),
+                isOn: $settings.modelAutoSyncEnabled
+            )
+
+            settingsBlock(
+                title: L("Sync status", "同步状态", "Trạng thái đồng bộ"),
+                subtitle: L(
+                    "Single nodes can also be synced from their right-click menu.",
+                    "也可以在节点卡片的右键菜单里单独同步。",
+                    "Bạn cũng có thể đồng bộ từng nút riêng lẻ từ menu chuột phải của thẻ nút."
+                )
+            ) {
+                ModelAutoSyncStatusControl()
+            }
 
             Divider()
 
@@ -469,6 +494,18 @@ extension SettingsView {
             Divider()
 
             settingsToggleRow(
+                title: L("Show sponsor recommendation", "显示赞助推荐", "Hiển thị đề xuất nhà tài trợ"),
+                subtitle: L(
+                    "A small partner card above the version number in the sidebar. Signing up through it supports AIUsage at no extra cost to you.",
+                    "侧边栏版本号上方的合作服务商小卡片。通过它注册可以支持 AIUsage 持续开发，你的价格不受影响。",
+                    "Thẻ đối tác nhỏ nằm trên số phiên bản ở thanh bên. Đăng ký qua thẻ này giúp hỗ trợ AIUsage mà không phát sinh thêm chi phí cho bạn."
+                ),
+                isOn: $settings.showSponsorSpot
+            )
+
+            Divider()
+
+            settingsToggleRow(
                 title: L("Automatic Updates", "自动检查更新"),
                 subtitle: L("Periodically check for new versions in the background.", "后台定期检查是否有新版本。"),
                 isOn: Binding(
@@ -500,4 +537,47 @@ extension SettingsView {
         }
     }
 
+}
+
+
+// MARK: - Model Auto Sync Status
+
+/// 设置页里的同步状态与「立即同步全部」。单独成 View，只有它订阅协调器，避免整页跟着刷新。
+private struct ModelAutoSyncStatusControl: View {
+    @ObservedObject private var coordinator = ModelAutoSyncCoordinator.shared
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Button {
+                Task { await coordinator.syncAll(interactive: true) }
+            } label: {
+                HStack(spacing: 5) {
+                    if coordinator.isSyncingAll {
+                        ProgressView().controlSize(.small)
+                    } else {
+                        Image(systemName: "arrow.triangle.2.circlepath")
+                    }
+                    Text(L("Sync All Now", "立即全部同步", "Đồng bộ tất cả ngay"))
+                }
+            }
+            .disabled(coordinator.isSyncingAll || !coordinator.syncingTargets.isEmpty)
+
+            // 结果横幅在设置页里改成行内文字：小控件上叠浮层会遮住相邻设置项。
+            Text(coordinator.flash?.message ?? lastRunText)
+                .font(.caption)
+                .foregroundStyle(coordinator.flash?.kind == .error ? Color.red : Color.secondary)
+                .lineLimit(2)
+                .animation(.easeInOut(duration: 0.2), value: coordinator.flash)
+
+            Spacer(minLength: 0)
+        }
+    }
+
+    private var lastRunText: String {
+        guard let lastRunAt = coordinator.lastRunAt else {
+            return L("Not synced yet", "尚未同步", "Chưa đồng bộ")
+        }
+        let relative = lastRunAt.formatted(.relative(presentation: .named))
+        return L("Last synced \(relative)", "上次同步：\(relative)", "Đồng bộ lần cuối \(relative)")
+    }
 }

@@ -22,6 +22,7 @@ final class ProviderRefreshCoordinator: ObservableObject {
     @Published var errorMessage: String?
     @Published var lastRefreshTime: Date?
     @Published var isRefreshingAllProviders = false
+    private var pendingRefreshAfterCurrent = false
     @Published private(set) var refreshingProviderIDs: Set<String> = []
     @Published private(set) var refreshingAccountIDs: Set<String> = []
     @Published var providerRefreshTimes: [String: Date] = [:]
@@ -70,6 +71,8 @@ final class ProviderRefreshCoordinator: ObservableObject {
         setupCallAnalyticsAutoSync()
         EnvironmentOverrideModel.shared.scan()
         WarmupController.shared.providerSnapshot = { [weak self] in self?.providers ?? [] }
+        WarmupController.shared.autoRefreshIntervalSeconds = { [weak self] in self?.settings.autoRefreshInterval ?? 300 }
+        WarmupController.shared.onWarmupDispatched = { [weak self] in self?.refreshAllProviders() }
         warmupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.settings.backendMode == "local" else { return }
             WarmupController.shared.tick(providers: self.providers)
@@ -164,10 +167,16 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     func refreshAllProviders() {
         Task { @MainActor in
-            guard !isRefreshingAllProviders else { return }
+            if isRefreshingAllProviders {
+                pendingRefreshAfterCurrent = true
+                return
+            }
             isRefreshingAllProviders = true
             defer { isRefreshingAllProviders = false }
-            _ = await fetchDashboard()
+            repeat {
+                pendingRefreshAfterCurrent = false
+                _ = await fetchDashboard()
+            } while pendingRefreshAfterCurrent
         }
     }
 

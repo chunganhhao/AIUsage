@@ -475,12 +475,13 @@ final class SessionCenterStore: ObservableObject {
         let terminal = terminal
         do {
             try await TerminalLauncher.launch(plan, in: terminal)
-            let opened = L("Opened in \(terminal.displayName)", "已在 \(terminal.displayName) 中打开")
+            let opened = L("Opened in \(terminal.displayName)", "已在 \(terminal.displayName) 中打开", "Đã mở trong \(terminal.displayName)")
             show(.success(terminal.confirmationNote.map { opened + " · " + $0 } ?? opened))
         } catch {
             copyToPasteboard(plan.commandLine)
             show(.error(L("Couldn't open \(terminal.displayName). The resume command was copied.",
-                          "无法打开 \(terminal.displayName)，已复制恢复命令。")))
+                          "无法打开 \(terminal.displayName)，已复制恢复命令。",
+                          "Không thể mở \(terminal.displayName). Đã sao chép lệnh tiếp tục.")))
         }
     }
 
@@ -548,7 +549,7 @@ final class SessionCenterStore: ObservableObject {
             return
         }
         guard let appURL = app.url else {
-            show(.error(L("\(app.name) is not installed in /Applications.", "未在 /Applications 中安装 \(app.name)。")))
+            show(.error(L("\(app.name) is not installed in /Applications.", "未在 /Applications 中安装 \(app.name)。", "\(app.name) chưa được cài đặt trong /Applications.")))
             return
         }
         let folderURL = URL(fileURLWithPath: plan.directory)
@@ -557,7 +558,7 @@ final class SessionCenterStore: ObservableObject {
         if let deepLinkURL = plan.desktopDeepLinkURL {
             do {
                 _ = try await NSWorkspace.shared.open([deepLinkURL], withApplicationAt: appURL, configuration: configuration)
-                show(.success(L("Opened session in \(app.name)", "已在 \(app.name) 中打开该会话")))
+                show(.success(L("Opened session in \(app.name)", "已在 \(app.name) 中打开该会话", "Đã mở phiên trong \(app.name)")))
                 return
             } catch {
                 // Fall back to opening the workspace folder if the custom URL scheme fails.
@@ -565,13 +566,13 @@ final class SessionCenterStore: ObservableObject {
         }
         do {
             _ = try await NSWorkspace.shared.open([folderURL], withApplicationAt: appURL, configuration: configuration)
-            show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开")))
+            show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开", "Đã mở trong \(app.name)")))
         } catch {
             do {
                 _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
-                show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开")))
+                show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开", "Đã mở trong \(app.name)")))
             } catch {
-                show(.error(L("Couldn't open \(app.name).", "无法打开 \(app.name)。")))
+                show(.error(L("Couldn't open \(app.name).", "无法打开 \(app.name)。", "Không thể mở \(app.name).")))
             }
         }
     }
@@ -584,9 +585,11 @@ final class SessionCenterStore: ObservableObject {
         alert.messageText = L("This session is still open", "这个会话还开着", key: "sessions.resume_active.title")
         alert.informativeText = activity == .waiting
             ? L("\(tool) has it open in another terminal. Resuming here means two processes write to the same session.",
-                "\(tool) 正在另一个终端里开着这个会话。在这里再继续，两边会同时写同一份记录。")
+                "\(tool) 正在另一个终端里开着这个会话。在这里再继续，两边会同时写同一份记录。",
+                "\(tool) đang mở phiên này ở một terminal khác. Tiếp tục tại đây nghĩa là hai tiến trình cùng ghi vào một phiên.")
             : L("\(tool) is still working on it. Resuming here means two processes write to the same session.",
-                "\(tool) 还在处理这个会话。在这里再继续，两边会同时写同一份记录。")
+                "\(tool) 还在处理这个会话。在这里再继续，两边会同时写同一份记录。",
+                "\(tool) vẫn đang xử lý phiên này. Tiếp tục tại đây nghĩa là hai tiến trình cùng ghi vào một phiên.")
         alert.addButton(withTitle: L("Resume Anyway", "仍然继续", key: "sessions.resume_active.confirm"))
         alert.addButton(withTitle: L("Cancel", "取消", key: "sessions.resume_active.cancel"))
         return alert.runModal() == .alertFirstButtonReturn
@@ -715,10 +718,18 @@ enum SessionDateText {
         return .earlier
     }
 
+    private static func localeIdentifier(for language: String) -> String {
+        switch language {
+        case "zh": return "zh_CN"
+        case "vi": return "vi_VN"
+        default: return "en_US"
+        }
+    }
+
     /// 今天「14:27」，昨天「昨天 22:58」，本周「周三」，今年「10月26日」，更早「2025/10/23」。
     static func short(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: AppSettings.shared.language == "zh" ? "zh_CN" : "en_US")
+        formatter.locale = Locale(identifier: localeIdentifier(for: AppSettings.shared.language))
         switch bucket(for: date, now: now, calendar: calendar) {
         case .today:
             formatter.dateFormat = "HH:mm"
@@ -738,7 +749,7 @@ enum SessionDateText {
 
     static func full(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: AppSettings.shared.language == "zh" ? "zh_CN" : "en_US")
+        formatter.locale = Locale(identifier: localeIdentifier(for: AppSettings.shared.language))
         formatter.setLocalizedDateFormatFromTemplate("yyyyMMMd HH:mm")
         return formatter.string(from: date)
     }
