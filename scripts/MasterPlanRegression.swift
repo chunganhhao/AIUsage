@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 @testable import QuotaBackend
 
 private var assertions = 0
@@ -1114,6 +1115,66 @@ private actor Attempts {
         )
         let viStrings = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Resources/vi.lproj/Localizable.strings"), encoding: .utf8)
         try check(viStrings.contains("\"Auto-sync models & prices\" ="), "vi Localizable.strings includes v0.16.1 keys")
+
+        // Verify legacy v1 call archive fixtures still migrate cleanly when written to call-analytics-archive-v1.json.
+        let fm = FileManager.default
+        let utc = TimeZone(secondsFromGMT: 0)!
+        let claudeLegacyRoot = fm.temporaryDirectory.appendingPathComponent("master-claude-v1-\(UUID())", isDirectory: true)
+        defer { try? fm.removeItem(at: claudeLegacyRoot) }
+        let claudeDay = "2026-01-02"
+        let claudeOld = CallAnalyticsEntry(source: .claude, kind: .builtin, name: "Read", server: nil, agent: "main", dayKey: claudeDay, count: 3)
+        let claudeLegacyArchive = CallAnalyticsArchive(
+            version: 1, updatedAt: "", fullHistoryImportedAt: "done",
+            days: [claudeDay: CallAnalyticsDayBucket(entries: [claudeOld], agentInvocations: [AgentInvocationCount(source: .claude, agent: "main", count: 3)])]
+        )
+        try write(String(decoding: JSONEncoder().encode(claudeLegacyArchive), as: UTF8.self), CallAnalyticsArchiveStore.fileURL(homeDirectory: claudeLegacyRoot.path, version: 1))
+        let claudeRow = try JSONSerialization.data(withJSONObject: [
+            "type": "assistant", "timestamp": "\(claudeDay)T12:00:00Z",
+            "message": [
+                "id": "existing", "model": "claude-sonnet",
+                "content": [["type": "tool_use", "id": "tool-existing", "name": "Read", "input": [:]]],
+                "usage": ["input_tokens": 10, "output_tokens": 5, "cache_read_input_tokens": 20, "cache_creation_input_tokens": 3]
+            ]
+        ])
+        var claudeBody = claudeRow; claudeBody.append(0x0A)
+        let claudeSession = claudeLegacyRoot.appendingPathComponent(".claude/projects/test/session.jsonl")
+        try fm.createDirectory(at: claudeSession.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try claudeBody.write(to: claudeSession)
+        for _ in 0..<2 {
+            let snap = await CallAnalyticsEngine(homeDirectory: claudeLegacyRoot.path, timeZone: utc, environment: [:]).computeSnapshot(rangeKey: "all", cutoff: nil)
+            try check(snap.entries.filter { $0.source == .claude }.reduce(0) { $0 + $1.count } == 3, "legacy v1 Claude residual keeps total calls = 3")
+            try check(snap.agentInvocations.filter { $0.source == .claude }.reduce(0) { $0 + $1.count } == 3, "legacy v1 Claude residual keeps agent invocations = 3")
+        }
+
+        let ocLegacyRoot = fm.temporaryDirectory.appendingPathComponent("master-opencode-v1-\(UUID())", isDirectory: true)
+        defer { try? fm.removeItem(at: ocLegacyRoot) }
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = utc
+        let ocMillis = Int64(cal.date(from: DateComponents(year: 2026, month: 1, day: 10, hour: 12))!.timeIntervalSince1970 * 1000)
+        let ocArchive = CallAnalyticsArchive(
+            version: 1, updatedAt: "", fullHistoryImportedAt: "2026-01-05T00:00:00Z",
+            days: ["2026-01-10": CallAnalyticsDayBucket(entries: [
+                CallAnalyticsEntry(source: .opencode, kind: .builtin, name: "bash", server: nil, dayKey: "2026-01-10", count: 2, outcomeKnownCount: 2, successCount: 2),
+                CallAnalyticsEntry(source: .opencode, kind: .builtin, name: "read", server: nil, dayKey: "2026-01-10", count: 1, outcomeKnownCount: 1, successCount: 1)
+            ], agentInvocations: [])]
+        )
+        try write(String(decoding: JSONEncoder().encode(ocArchive), as: UTF8.self), CallAnalyticsArchiveStore.fileURL(homeDirectory: ocLegacyRoot.path, version: 1))
+        let xdg = ocLegacyRoot.appendingPathComponent("xdg", isDirectory: true)
+        let ocDBDir = xdg.appendingPathComponent("opencode", isDirectory: true)
+        try fm.createDirectory(at: ocDBDir, withIntermediateDirectories: true)
+        let ocDBPath = ocDBDir.appendingPathComponent("opencode.db").path
+        var ocDB: OpaquePointer?
+        try check(sqlite3_open_v2(ocDBPath, &ocDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK, "open opencode regression db")
+        defer { if let ocDB { sqlite3_close(ocDB) } }
+        let ocPart = #"{"type":"tool","tool":"bash","state":{"status":"completed"}}"#
+        try check(sqlite3_exec(ocDB, "CREATE TABLE part (id TEXT, time_created INTEGER, data TEXT); INSERT INTO part VALUES ('part_1', \(ocMillis), '\(ocPart)');", nil, nil, nil) == SQLITE_OK, "seed opencode regression db")
+        let ocEngine = CallAnalyticsEngine(homeDirectory: ocLegacyRoot.path, timeZone: utc, environment: ["XDG_DATA_HOME": xdg.path])
+        let ocFirst = await ocEngine.computeSnapshot(rangeKey: "all", cutoff: nil)
+        try check(ocFirst.entries.filter { $0.name == "bash" }.reduce(0) { $0 + $1.count } == 2, "legacy v1 OpenCode preserves bash=2")
+        try check(ocFirst.entries.filter { $0.name == "read" }.reduce(0) { $0 + $1.count } == 1, "legacy v1 OpenCode preserves read=1")
+        try check(sqlite3_exec(ocDB, "INSERT INTO part VALUES ('part_2', \(Int64(Date().timeIntervalSince1970 * 1000)), '\(ocPart)');", nil, nil, nil) == SQLITE_OK, "append post-migration opencode call")
+        let ocSecond = await ocEngine.computeSnapshot(rangeKey: "all", cutoff: nil)
+        try check(ocSecond.entries.filter { $0.name == "bash" }.reduce(0) { $0 + $1.count } == 3, "post-migration OpenCode increments bash=3")
+        try check(ocSecond.entries.filter { $0.name == "read" }.reduce(0) { $0 + $1.count } == 1, "post-migration OpenCode retains deleted read=1")
     }
 
 }

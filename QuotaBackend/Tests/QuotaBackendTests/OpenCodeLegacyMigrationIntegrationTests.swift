@@ -276,7 +276,7 @@ final class OpenCodeLegacyMigrationIntegrationTests: XCTestCase {
             version: 1, updatedAt: "", fullHistoryImportedAt: "2026-01-05T00:00:00Z", days: [:]
         )
         archive.days[dayKey] = CallAnalyticsDayBucket(entries: entries, agentInvocations: [])
-        let url = CallAnalyticsArchiveStore.fileURL(homeDirectory: home.path)
+        let url = CallAnalyticsArchiveStore.fileURL(homeDirectory: home.path, version: 1)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(archive).write(to: url, options: .atomic)
     }

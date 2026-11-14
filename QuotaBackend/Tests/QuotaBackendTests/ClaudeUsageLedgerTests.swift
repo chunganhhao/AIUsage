@@ -142,7 +142,7 @@ final class ClaudeUsageLedgerTests: XCTestCase {
         let root = try home(); defer { try? FileManager.default.removeItem(at: root) }
         let old = CallAnalyticsEntry(source: .claude, kind: .builtin, name: "Read", server: nil, agent: "main", dayKey: day, count: 3)
         let archived = CallAnalyticsArchive(version: 1, updatedAt: "", fullHistoryImportedAt: "done", days: [day: CallAnalyticsDayBucket(entries: [old], agentInvocations: [AgentInvocationCount(source: .claude, agent: "main", count: 3)])])
-        let url = CallAnalyticsArchiveStore.fileURL(homeDirectory: root.path)
+        let url = CallAnalyticsArchiveStore.fileURL(homeDirectory: root.path, version: 1)
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(archived).write(to: url)
         try writeSession([assistant(id: "existing", tool: "Read")], config: root.appendingPathComponent(".claude"))
