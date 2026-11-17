@@ -83,14 +83,21 @@ extension ProviderAuthManager {
 
         let authFileURL = sessionDir.appendingPathComponent("antigravity_ide_creds.json")
 
+        let expiredISO = payload.expiryDate.map { ISO8601DateFormatter().string(from: $0) } ?? "2000-01-01T00:00:00Z"
         var authJSON: [String: Any] = [
             "access_token": payload.accessToken,
             "token_type": "Bearer",
-            "expired": "2000-01-01T00:00:00Z"
+            "expired": expiredISO
         ]
         if let email { authJSON["email"] = email }
         if let refreshToken = payload.refreshToken, !refreshToken.isEmpty {
             authJSON["refresh_token"] = refreshToken
+        }
+        if let idToken = payload.idToken, !idToken.isEmpty {
+            authJSON["id_token"] = idToken
+        }
+        if let projectId = payload.projectId, !projectId.isEmpty {
+            authJSON["project_id"] = projectId
         }
 
         guard let data = try? JSONSerialization.data(withJSONObject: authJSON, options: [.prettyPrinted, .sortedKeys]),

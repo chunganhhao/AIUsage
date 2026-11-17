@@ -119,6 +119,29 @@ enum ProviderManagedImportStore {
         pruneEmptyDirectories(under: rootDirectory)
     }
 
+    /// Runtime deletion removes only writable managed files owned by the deleted credentials
+    /// that are no longer referenced by remaining vault credentials, sparing in-flight imports.
+    static func cleanupManagedImports(
+        forDeletedCredentials deletedCredentials: [AccountCredential],
+        referencedBy remainingCredentials: [AccountCredential]
+    ) {
+        guard let rootDirectory = try? managedImportsRootDirectory(),
+              FileManager.default.fileExists(atPath: rootDirectory.path) else {
+            return
+        }
+
+        let referencedPaths = Set(remainingCredentials.flatMap { writableManagedImportPaths(for: $0) })
+        let candidatePaths = Set(deletedCredentials.flatMap { writableManagedImportPaths(for: $0) })
+            .subtracting(referencedPaths)
+        guard !candidatePaths.isEmpty else { return }
+
+        for path in candidatePaths {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        pruneEmptyDirectories(under: rootDirectory)
+    }
+
     /// 当前进程应写入的 AuthImports 根目录。
     static func managedImportsRootDirectory() throws -> URL {
         try boundary(create: true).activeRootURL

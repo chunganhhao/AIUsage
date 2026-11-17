@@ -717,7 +717,12 @@ public final class QuotaHTTPServer: @unchecked Sendable {
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            let snapshot = await engine.fetchAll(ids: ids)
+            let snapshot: DashboardSnapshot
+            if queryItems["manual"] == "1" {
+                snapshot = await engine.fetchAll(ids: ids, backgroundAutomatic: false)
+            } else {
+                snapshot = await engine.cachedDashboard(ids: ids)
+            }
             return jsonResponse(encodable: snapshot, headers: corsHeaders)
 
         case ("GET", _) where path.hasPrefix("/api/provider/"):

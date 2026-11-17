@@ -35,7 +35,7 @@ final class AppSettings: ObservableObject {
     }
     func fetchMultiAccountProvider(id: String) async -> [ProviderResult]? { await multi() }
     func fetchSingle(id: String) async -> ProviderResult? { await single() }
-    func fetchAll(ids: [String]) async -> DashboardSnapshot { await all() }
+    func fetchAll(ids: [String], useRecentResults: Bool = false, backgroundAutomatic: Bool = false) async -> DashboardSnapshot { await all() }
 }
 @MainActor final class APIService {
     static let shared = APIService()
@@ -63,7 +63,7 @@ final class AppSettings: ObservableObject {
     func completeAccountRefresh(refreshKey: String, result: ProviderRefreshResult) {}
     // 不扫描真实账号；fixture 每个原生身份只提供一个候选结果。
     func syncUnifiedManagedAccounts(for providerIds: [String]) async {}
-    func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil) -> [ProviderData] { incoming }
+    func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil, includingExistingFor: Set<String> = []) -> [ProviderData] { incoming }
     func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers }
     func timestampableProviders(for providers: [ProviderData]) -> [ProviderData] { providers }
     func selectedProviderIDList() -> [String] { ["codex"] }

@@ -18,23 +18,128 @@ public actor ProviderEngine {
     // 之后的窗口扫描通常毫秒级，远用不到这个上限。
     static let openCodeTimeoutSeconds: Double = 60
 
-    public init() {}
+    private struct AutomaticFlightKey: Hashable, Sendable {
+        let providerId: String
+        let excludedNativeKeys: Set<String>
+    }
+
+    private struct CredentialFlightKey: Hashable, Sendable {
+        let key: String
+        let version: Int
+        let localOnly: Bool
+    }
+
+    private struct AntigravityTrickleRecord: Sendable {
+        var lastCheckedAt: Date
+        var backoffUntil: Date?
+        var isTerminalStop: Bool = false
+        var version: Int
+    }
+
+    private static let antigravityAccountCooldownSeconds: TimeInterval = 15 * 60
+    private static let antigravityRemoteMinSpacingSeconds: TimeInterval = 3 * 60
+    private static let antigravityErrorBackoffSeconds: TimeInterval = 30 * 60
+    private static let antigravityPermanentStopCodes: Set<String> = [
+        "tos_violation", "account_disabled", "unsupported_client"
+    ]
+
+    private static let terminalErrorCodes: Set<String> = [
+        "tos_violation", "unsupported_client", "account_disabled", "forbidden", "rate_limited", "invalid_proxy", "local_only_unavailable"
+    ]
+
+    private var credentialFlights: [CredentialFlightKey: SingleFlight<ProviderResult>] = [:]
+    private var credentialLaneTails: [String: Task<ProviderResult, Never>] = [:]
+    private var recentCredentials: [String: (Date, ProviderResult, Int)] = [:]
+    private var lastCredentialResults: [String: (ProviderResult, Int)] = [:]
+    private var antigravityTrickleByKey: [String: AntigravityTrickleRecord] = [:]
+    private var lastAntigravityRemoteCheckAt: Date?
+    private var antigravityRemoteSlotInFlight = false
+    private var cachedProviders: [String: (Date, [ProviderResult])] = [:]
+    private var dashboardTasks: [String: Task<Void, Never>] = [:]
+
+    private let credentialStore: AccountCredentialStore
+    private let providersOverride: [any ProviderFetcher]?
+    private let nowProvider: @Sendable () -> Date
+
+    public init(
+        credentialStore: AccountCredentialStore = .shared,
+        providersOverride: [any ProviderFetcher]? = nil,
+        now: @escaping @Sendable () -> Date = { Date() }
+    ) {
+        self.credentialStore = credentialStore
+        self.providersOverride = providersOverride
+        self.nowProvider = now
+    }
+
+    private func resolvedProviders(for ids: [String]? = nil) -> [any ProviderFetcher] {
+        if let providersOverride {
+            guard let ids else { return providersOverride }
+            let wanted = Set(ids)
+            return providersOverride.filter { wanted.contains($0.id) }
+        }
+        return ids.map { ProviderRegistry.providers(for: $0) } ?? ProviderRegistry.allProviders()
+    }
+
+    private func resolvedProvider(for id: String) -> (any ProviderFetcher)? {
+        if let providersOverride {
+            return providersOverride.first { $0.id == id }
+        }
+        return ProviderRegistry.provider(for: id)
+    }
+
+    /// HTTP reads never wait behind a multi-account poll. Cold reads expose a
+    /// pending result, not a fabricated successful quota; the next read gets it.
+    public func cachedDashboard(ids: [String]? = nil) -> DashboardSnapshot {
+        let providers = resolvedProviders(for: ids)
+        var results: [ProviderResult] = []
+        for provider in providers {
+            let cached = cachedProviders[provider.id]
+            if cached == nil || nowProvider().timeIntervalSince(cached!.0) >= 90 {
+                if dashboardTasks[provider.id] == nil {
+                    dashboardTasks[provider.id] = Task {
+                        let fetched = await self.fetchAllResults(
+                            for: provider,
+                            useRecentResults: true,
+                            backgroundAutomatic: true,
+                            limitAntigravityPool: true
+                        )
+                        self.cachedProviders[provider.id] = (self.nowProvider(), fetched)
+                        self.dashboardTasks[provider.id] = nil
+                    }
+                }
+            }
+            if let cached { results += cached.1 }
+            else {
+                let error = ProviderError("refresh_pending", "Initial quota refresh is in progress. Read the dashboard again shortly.")
+                results.append(ProviderResult(id: provider.id, providerId: provider.id, ok: false,
+                    summary: UsageNormalizer.errorSummary(provider: provider, error: error), error: error.localizedDescription))
+            }
+        }
+        let date = providers.compactMap { cachedProviders[$0.id]?.0 }.min() ?? nowProvider()
+        let generated = SharedFormatters.iso8601String(from: date)
+        return DashboardSnapshot(generatedAt: generated,
+            overview: UsageNormalizer.createDashboardOverview(summaries: results.compactMap(\.summary), generatedAt: generated), providers: results)
+    }
 
     // MARK: - Fetch All
 
-    public func fetchAll(ids: [String]? = nil) async -> DashboardSnapshot {
-        let providers: [any ProviderFetcher]
-        if let ids {
-            providers = ProviderRegistry.providers(for: ids)
-        } else {
-            providers = ProviderRegistry.allProviders()
-        }
-        let generatedAt = SharedFormatters.iso8601String(from: Date())
+    public func fetchAll(
+        ids: [String]? = nil,
+        useRecentResults: Bool = false,
+        backgroundAutomatic: Bool = false
+    ) async -> DashboardSnapshot {
+        let providers = resolvedProviders(for: ids)
+        let generatedAt = SharedFormatters.iso8601String(from: nowProvider())
 
         let results: [ProviderResult] = await withTaskGroup(of: [ProviderResult].self) { group in
             for provider in providers {
                 group.addTask {
-                    await self.fetchAllResults(for: provider)
+                    await self.fetchAllResults(
+                        for: provider,
+                        useRecentResults: useRecentResults,
+                        backgroundAutomatic: backgroundAutomatic,
+                        limitAntigravityPool: true
+                    )
                 }
             }
             var collected: [ProviderResult] = []
@@ -60,23 +165,23 @@ public actor ProviderEngine {
     // MARK: - Fetch Single
 
     public func fetchSingle(id: String) async -> ProviderResult? {
-        guard let provider = ProviderRegistry.provider(for: id) else { return nil }
+        guard let provider = resolvedProvider(for: id) else { return nil }
         return await fetchOne(provider: provider)
     }
 
     // MARK: - Fetch Single Account (for multi-account providers)
 
     public func fetchMultiAccountProvider(id: String) async -> [ProviderResult]? {
-        guard let provider = ProviderRegistry.provider(for: id) else { return nil }
-        return await fetchAllResults(for: provider)
+        guard let provider = resolvedProvider(for: id) else { return nil }
+        return await fetchAllResults(for: provider, limitAntigravityPool: true)
     }
 
     // MARK: - Fetch For Specific Credential
 
     public func fetchForCredential(providerId: String, credentialId: String) async -> ProviderResult? {
-        guard let provider = ProviderRegistry.provider(for: providerId),
+        guard let provider = resolvedProvider(for: providerId),
               let credentialProvider = provider as? any CredentialAcceptingProvider,
-              let credential = AccountCredentialStore.shared.loadCredential(
+              let credential = credentialStore.loadCredential(
                 providerId: providerId,
                 credentialId: credentialId
               ) else { return nil }
@@ -85,18 +190,28 @@ public actor ProviderEngine {
 
     // MARK: - Internal: Single Account Fetch
 
-    private func fetchAllResults(for provider: any ProviderFetcher) async -> [ProviderResult] {
+    func fetchAllResults(
+        for provider: any ProviderFetcher,
+        useRecentResults: Bool = false,
+        backgroundAutomatic: Bool = false,
+        limitAntigravityPool: Bool = false
+    ) async -> [ProviderResult] {
         let isMultiAccount = provider is MultiAccountProviderFetcher
         let hasCredentials: Bool
         if let credentialProvider = provider as? CredentialAcceptingProvider {
-            let creds = AccountCredentialStore.shared.loadCredentials(for: provider.id)
+            let creds = credentialStore.loadCredentials(for: provider.id)
             hasCredentials = creds.contains { credentialProvider.supportedAuthMethods.contains($0.authMethod) }
         } else {
             hasCredentials = false
         }
 
         if hasCredentials && !isMultiAccount {
-            let results = await fetchCredentialBackedResults(for: provider)
+            let results = await fetchCredentialBackedResults(
+                for: provider,
+                useRecentResults: useRecentResults,
+                backgroundAutomatic: backgroundAutomatic,
+                limitAntigravityPool: limitAntigravityPool
+            )
             return results.isEmpty ? [await fetchOne(provider: provider)] : results
         }
 
@@ -104,11 +219,23 @@ public actor ProviderEngine {
             // Credential fetches must finish before auto-scan. Running both at
             // once lets two Codex OAuth refreshes burn the same refresh_token;
             // the failed branch then keeps stale quota in the UI.
-            let resolvedCredentialResults = await fetchCredentialBackedResults(for: provider)
+            let resolvedCredentialResults = await fetchCredentialBackedResults(
+                for: provider,
+                useRecentResults: useRecentResults,
+                backgroundAutomatic: backgroundAutomatic,
+                limitAntigravityPool: limitAntigravityPool
+            )
+            if provider.id == "antigravity", backgroundAutomatic || limitAntigravityPool {
+                return resolvedCredentialResults
+            }
             let credentialIdentityKeys = Set(
                 resolvedCredentialResults.flatMap { identityKeys(for: $0, providerId: provider.id) }
             )
-            let filteredAutomaticResults = (await fetchAutomaticResults(for: provider)).filter { result in
+            let excludedNativeKeys = Set(resolvedCredentialResults.filter(\.ok).compactMap { result in
+                CodexAccountIdentity(accountId: result.summary?.accountId, userId: result.summary?.workspaceUserId).nativeKey
+            })
+            let filteredAutomaticResults = (await fetchAutomaticResults(for: provider, useRecentResults: useRecentResults,
+                                                                         excludingNativeKeys: excludedNativeKeys)).filter { result in
                 if provider.id == "codex" {
                     return !resolvedCredentialResults.contains {
                         ($0.ok || !result.ok) && codexResultsShareIdentity($0, result)
@@ -124,14 +251,46 @@ public actor ProviderEngine {
             return merged.isEmpty ? [await fetchOne(provider: provider)] : merged
         }
 
-        return await fetchAutomaticResults(for: provider)
+        return await fetchAutomaticResults(for: provider, useRecentResults: useRecentResults)
     }
 
-    private func fetchAutomaticResults(for provider: any ProviderFetcher) async -> [ProviderResult] {
+    private var automaticFlights: [AutomaticFlightKey: SingleFlight<[ProviderResult]>] = [:]
+    private var recentAutomatic: [AutomaticFlightKey: (Date, [ProviderResult])] = [:]
+    private func fetchAutomaticResults(for provider: any ProviderFetcher, useRecentResults: Bool = false,
+                                       excludingNativeKeys: Set<String> = []) async -> [ProviderResult] {
+        if provider.id == "codex" {
+            let cacheKey = AutomaticFlightKey(providerId: provider.id, excludedNativeKeys: excludingNativeKeys)
+            recentAutomatic = recentAutomatic.filter { Date().timeIntervalSince($0.value.0) < 90 }
+            if useRecentResults, let recent = recentAutomatic[cacheKey] { return recent.1 }
+            guard !Task.isCancelled else { return [] }
+            switch reserveFlight(
+                in: &automaticFlights, key: cacheKey,
+                work: { await self.fetchMultiAccount(provider: provider as! MultiAccountProviderFetcher, excludingNativeKeys: excludingNativeKeys) },
+                onFinish: { finished, results in
+                    await self.completeAutomaticFlight(key: cacheKey, excludedNativeKeys: excludingNativeKeys, flight: finished, results: results)
+                }
+            ) {
+            case .completed(let results): return results
+            case .wait(let flight, let waiterID): return await flight.wait(waiterID: waiterID) { [] }
+            }
+        }
         if let multiProvider = provider as? MultiAccountProviderFetcher {
             return await fetchMultiAccount(provider: multiProvider)
         }
         return [await fetchOne(provider: provider)]
+    }
+
+    private func completeAutomaticFlight(
+        key: AutomaticFlightKey,
+        excludedNativeKeys: Set<String>,
+        flight: SingleFlight<[ProviderResult]>,
+        results: [ProviderResult]
+    ) {
+        if automaticFlights[key] === flight { automaticFlights[key] = nil }
+        recentAutomatic = recentAutomatic.filter { Date().timeIntervalSince($0.value.0) < 90 }
+        guard !flight.isCancelledResult else { return }
+        let cacheable = !results.isEmpty ? results.allSatisfy(\.ok) : !excludedNativeKeys.isEmpty
+        if cacheable { recentAutomatic[key] = (Date(), results) }
     }
 
     private func fetchOne(provider: any ProviderFetcher) async -> ProviderResult {
@@ -168,84 +327,495 @@ public actor ProviderEngine {
 
     // MARK: - Internal: Multi-Account Fetch
 
-    private func fetchCredentialBackedResults(for provider: any ProviderFetcher) async -> [ProviderResult] {
+    private func antigravityPollingMode(for provider: any ProviderFetcher) -> AntigravityQuotaPollingMode {
+        let home = (provider as? AntigravityProvider)?.homeDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser.path
+        return AntigravityPoolProtectionSettings.pollingMode(homeDirectory: home)
+    }
+
+    private func credentialVersion(credentialPath: String, contents: Data?) -> Int {
+        var fingerprint = Hasher()
+        fingerprint.combine(credentialPath)
+        fingerprint.combine(contents)
+        return fingerprint.finalize()
+    }
+
+    private func credentialVersion(for credential: AccountCredential) -> Int {
+        let contents = credential.authMethod == .authFile
+            ? FileManager.default.contents(atPath: NSString(string: credential.credential).expandingTildeInPath)
+            : nil
+        return credentialVersion(credentialPath: credential.credential, contents: contents)
+    }
+
+    private func normalizedCredentialEmail(for credential: AccountCredential) -> String? {
+        if credential.authMethod == .authFile {
+            let path = NSString(string: credential.credential).expandingTildeInPath
+            if let data = FileManager.default.contents(atPath: path),
+               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let email = (json["email"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !email.isEmpty {
+                return email
+            }
+        }
+        return credential.accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank
+    }
+
+    private func preservedCredentialResult(
+        key: String,
+        version: Int,
+        useRecentResults: Bool
+    ) -> ProviderResult? {
+        let now = nowProvider()
+        if useRecentResults,
+           let recent = recentCredentials[key],
+           recent.2 == version,
+           now.timeIntervalSince(recent.0) < 90 {
+            return recent.1
+        }
+        if let preserved = lastCredentialResults[key], preserved.1 == version {
+            return preserved.0
+        }
+        return nil
+    }
+
+    private func selectRandomDueAntigravityDormantID(
+        candidates: [(credential: AccountCredential, key: String, version: Int)],
+        enforceGlobalSpacing: Bool,
+        now: Date
+    ) -> String? {
+        let hasActiveRemoteFlight = credentialFlights.contains {
+            $0.key.key.hasPrefix("antigravity:") && !$0.key.localOnly
+        }
+        guard !candidates.isEmpty, !antigravityRemoteSlotInFlight, !hasActiveRemoteFlight else { return nil }
+        if enforceGlobalSpacing,
+           let lastRemote = lastAntigravityRemoteCheckAt,
+           now.timeIntervalSince(lastRemote) < Self.antigravityRemoteMinSpacingSeconds {
+            return nil
+        }
+
+        let due = candidates.filter { item in
+            guard let record = antigravityTrickleByKey[item.key], record.version == item.version else {
+                return true
+            }
+            if record.isTerminalStop {
+                return false
+            }
+            if let backoffUntil = record.backoffUntil, now < backoffUntil {
+                return false
+            }
+            return now.timeIntervalSince(record.lastCheckedAt) >= Self.antigravityAccountCooldownSeconds
+        }
+        guard !due.isEmpty else { return nil }
+
+        let unchecked = due.filter {
+            guard let record = antigravityTrickleByKey[$0.key] else { return true }
+            return record.version != $0.version
+        }
+        if let chosen = unchecked.shuffled().first {
+            return chosen.credential.id
+        }
+        return due.shuffled().first?.credential.id
+    }
+
+    func fetchCredentialBackedResults(
+        for provider: any ProviderFetcher,
+        useRecentResults: Bool = false,
+        backgroundAutomatic: Bool = false,
+        limitAntigravityPool: Bool = false
+    ) async -> [ProviderResult] {
         guard let credentialProvider = provider as? CredentialAcceptingProvider else {
             return []
         }
 
-        let credentials = AccountCredentialStore.shared
+        let credentials = credentialStore
             .loadCredentials(for: provider.id)
             .filter { credentialProvider.supportedAuthMethods.contains($0.authMethod) }
 
         guard !credentials.isEmpty else { return [] }
 
-        return await withTaskGroup(of: ProviderResult.self) { group in
-            for credential in credentials {
-                group.addTask {
-                    await self.fetchWithCredential(provider: provider, credentialProvider: credentialProvider, credential: credential)
+        if provider.id == "antigravity" || provider.id == "codex" {
+            let isAntigravityPoolManaged = provider.id == "antigravity" && (backgroundAutomatic || limitAntigravityPool)
+            let pollingMode = isAntigravityPoolManaged ? antigravityPollingMode(for: provider) : .randomTrickle
+            let localActiveEmail: String?
+            if isAntigravityPoolManaged,
+               let reader = (provider as? AntigravityProvider)?.effectiveLocalQuotaReader {
+                localActiveEmail = await reader.probeActiveEmail()?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            } else {
+                localActiveEmail = nil
+            }
+
+            let shuffledCredentials = credentials.shuffled()
+            if isAntigravityPoolManaged {
+                var localAndImmediateById: [String: ProviderResult] = [:]
+                var activeLocalCredentials: [AccountCredential] = []
+                var dormantCredentials: [AccountCredential] = []
+
+                for credential in shuffledCredentials {
+                    let key = "\(provider.id):\(credential.id)"
+                    let version = credentialVersion(for: credential)
+                    if let terminal = recentCredentials[key], terminal.2 == version, terminal.1.summary?.errorCode == "tos_violation" {
+                        localAndImmediateById[credential.id] = terminal.1
+                        continue
+                    }
+                    if let suspensionFailure = localSuspensionFailure(provider: provider, credential: credential) {
+                        localAndImmediateById[credential.id] = suspensionFailure
+                        continue
+                    }
+                    let isActiveLocal = localActiveEmail != nil && normalizedCredentialEmail(for: credential) == localActiveEmail
+                    if isActiveLocal {
+                        activeLocalCredentials.append(credential)
+                    } else {
+                        dormantCredentials.append(credential)
+                    }
                 }
+
+                for credential in activeLocalCredentials {
+                    guard !Task.isCancelled else { break }
+                    let key = "\(provider.id):\(credential.id)"
+                    let version = credentialVersion(for: credential)
+                    let result = await fetchWithCredential(
+                        provider: provider,
+                        credentialProvider: credentialProvider,
+                        credential: credential,
+                        useRecentResults: useRecentResults,
+                        localOnly: true
+                    )
+                    if result.summary?.errorCode == "local_only_unavailable" {
+                        if let preserved = preservedCredentialResult(key: key, version: version, useRecentResults: useRecentResults) {
+                            localAndImmediateById[credential.id] = preserved
+                        }
+                    } else {
+                        localAndImmediateById[credential.id] = result
+                    }
+                }
+
+                // Recompute dormant candidates synchronously after local awaits and reserve the remote
+                // slot before any await so concurrent ticks cannot bypass the 180s global spacing.
+                let dormantCandidates: [(credential: AccountCredential, key: String, version: Int)] = dormantCredentials.compactMap { credential in
+                    let key = "\(provider.id):\(credential.id)"
+                    let version = credentialVersion(for: credential)
+                    if let terminal = recentCredentials[key], terminal.2 == version, terminal.1.summary?.errorCode == "tos_violation" {
+                        localAndImmediateById[credential.id] = terminal.1
+                        return nil
+                    }
+                    if let suspensionFailure = localSuspensionFailure(provider: provider, credential: credential) {
+                        localAndImmediateById[credential.id] = suspensionFailure
+                        return nil
+                    }
+                    return (credential, key, version)
+                }
+
+                let allowRemoteDormant = !Task.isCancelled && (!backgroundAutomatic || pollingMode == .randomTrickle)
+                let dispatchNow = nowProvider()
+                let chosenDormantID = allowRemoteDormant
+                    ? selectRandomDueAntigravityDormantID(
+                        candidates: dormantCandidates,
+                        enforceGlobalSpacing: backgroundAutomatic,
+                        now: dispatchNow
+                    )
+                    : nil
+
+                var chosenRemoteResultById: [String: ProviderResult] = [:]
+                if let chosenDormantID,
+                   let chosenItem = dormantCandidates.first(where: { $0.credential.id == chosenDormantID }) {
+                    antigravityRemoteSlotInFlight = true
+                    lastAntigravityRemoteCheckAt = dispatchNow
+                    antigravityTrickleByKey[chosenItem.key] = AntigravityTrickleRecord(
+                        lastCheckedAt: dispatchNow,
+                        backoffUntil: nil,
+                        isTerminalStop: false,
+                        version: chosenItem.version
+                    )
+                    let result = await fetchWithCredential(
+                        provider: provider,
+                        credentialProvider: credentialProvider,
+                        credential: chosenItem.credential,
+                        useRecentResults: useRecentResults
+                    )
+                    antigravityRemoteSlotInFlight = false
+                    chosenRemoteResultById[chosenItem.credential.id] = result
+                }
+
+                var results: [ProviderResult] = []
+                for credential in shuffledCredentials {
+                    if let entry = localAndImmediateById[credential.id] ?? chosenRemoteResultById[credential.id] {
+                        results.append(entry)
+                        continue
+                    }
+                    guard !Task.isCancelled else { continue }
+                    let key = "\(provider.id):\(credential.id)"
+                    let version = credentialVersion(for: credential)
+                    if let preserved = preservedCredentialResult(key: key, version: version, useRecentResults: useRecentResults) {
+                        results.append(preserved)
+                    }
+                }
+                return results
             }
 
             var results: [ProviderResult] = []
-            for await result in group {
-                results.append(result)
+            for credential in shuffledCredentials {
+                guard !Task.isCancelled else { break }
+                results.append(await fetchWithCredential(
+                    provider: provider,
+                    credentialProvider: credentialProvider,
+                    credential: credential,
+                    useRecentResults: useRecentResults
+                ))
             }
             return results
         }
+        return await withTaskGroup(of: ProviderResult.self) { group in
+            for credential in credentials {
+                group.addTask {
+                    await self.fetchWithCredential(provider: provider, credentialProvider: credentialProvider, credential: credential,
+                                                   useRecentResults: useRecentResults)
+                }
+            }
+            var results: [ProviderResult] = []
+            for await result in group { results.append(result) }
+            return results
+        }
+    }
+
+    private func localSuspensionFailure(provider: any ProviderFetcher, credential: AccountCredential) -> ProviderResult? {
+        guard provider.id == "antigravity" else { return nil }
+        let data = FileManager.default.contents(atPath: NSString(string: credential.credential).expandingTildeInPath)
+        let suspension = data.flatMap { AntigravityAccountProtection.suspension(in: $0) }
+        guard let error = suspension ?? (credential.metadata["tosSuspended"] == "true"
+            ? ProviderError("tos_violation", "Antigravity account is suspended; re-authenticate to recheck.") : nil) else {
+            return nil
+        }
+        return credentialFailure(provider: provider, credential: credential, error: error)
     }
 
     private func fetchWithCredential(
         provider: any ProviderFetcher,
         credentialProvider: any CredentialAcceptingProvider,
-        credential: AccountCredential
+        credential: AccountCredential,
+        useRecentResults: Bool = false,
+        localOnly: Bool = false
+    ) async -> ProviderResult {
+        let key = "\(provider.id):\(credential.id)"
+        let version = credentialVersion(for: credential)
+        let flightKey = CredentialFlightKey(key: key, version: version, localOnly: localOnly)
+        if let terminal = recentCredentials[key], terminal.2 == version, terminal.1.summary?.errorCode == "tos_violation" { return terminal.1 }
+        if let suspensionFailure = localSuspensionFailure(provider: provider, credential: credential) { return suspensionFailure }
+        if useRecentResults, let recent = recentCredentials[key], recent.2 == version, nowProvider().timeIntervalSince(recent.0) < 90 { return recent.1 }
+        let cancelledFallback = credentialFailure(provider: provider, credential: credential, error: CancellationError())
+        guard !Task.isCancelled else { return cancelledFallback }
+        let sensitive = (provider.id == "antigravity" && !localOnly) || provider.id == "codex"
+        let previous = sensitive ? credentialLaneTails[provider.id] : nil
+        let writeRecorder = CredentialWriteRecorder()
+        switch reserveFlight(
+            in: &credentialFlights, key: flightKey,
+            work: {
+                if let previous {
+                    _ = await previous.value
+                    do { try await Task.sleep(for: .milliseconds(Int.random(in: 800...2500))) }
+                    catch { return await self.credentialFailure(provider: provider, credential: credential, error: error) }
+                }
+                guard !Task.isCancelled else { return cancelledFallback }
+                return await CredentialWriteRecorder.$current.withValue(writeRecorder) {
+                    await self.performFetchWithCredential(
+                        provider: provider,
+                        credentialProvider: credentialProvider,
+                        credential: credential,
+                        localOnly: localOnly
+                    )
+                }
+            },
+            onCreate: { if sensitive { self.credentialLaneTails[provider.id] = $0.task } },
+            onFinish: { finished, result in
+                await self.completeCredentialFlight(
+                    key: key,
+                    flightKey: flightKey,
+                    providerId: provider.id,
+                    credential: credential,
+                    preVersion: version,
+                    writtenData: writeRecorder.data(for: credential.credential),
+                    flight: finished,
+                    result: result
+                )
+            }
+        ) {
+        case .completed(let result): return result
+        case .wait(let flight, let waiterID): return await flight.wait(waiterID: waiterID) { cancelledFallback }
+        }
+    }
+
+    private func recordAntigravityRemoteOutcome(
+        key: String,
+        version: Int,
+        result: ProviderResult,
+        at now: Date
+    ) {
+        let isLoopback = (result.usage?.extra["transport"]?.value as? String) == "loopback_rpc"
+        if !isLoopback {
+            lastAntigravityRemoteCheckAt = max(lastAntigravityRemoteCheckAt ?? .distantPast, now)
+        }
+        let errorCode = result.summary?.errorCode
+        let isTerminal = errorCode.map { Self.antigravityPermanentStopCodes.contains($0) } ?? false
+        let shouldBackoff = !result.ok && !isTerminal
+        antigravityTrickleByKey[key] = AntigravityTrickleRecord(
+            lastCheckedAt: now,
+            backoffUntil: shouldBackoff ? now.addingTimeInterval(Self.antigravityErrorBackoffSeconds) : nil,
+            isTerminalStop: isTerminal,
+            version: version
+        )
+    }
+
+    private func completeCredentialFlight(
+        key: String,
+        flightKey: CredentialFlightKey,
+        providerId: String,
+        credential: AccountCredential,
+        preVersion: Int,
+        writtenData: Data?,
+        flight: SingleFlight<ProviderResult>,
+        result: ProviderResult
+    ) {
+        if credentialFlights[flightKey] === flight { credentialFlights[flightKey] = nil }
+        if !flight.isCancelledResult,
+           result.summary?.errorCode != "local_only_unavailable" {
+            // Only advance cached file version using bytes this request itself wrote under CAS;
+            // external replacements keep preVersion so the next read sees a cache miss.
+            let storedVersion = writtenData.map {
+                credentialVersion(credentialPath: credential.credential, contents: $0)
+            } ?? preVersion
+            let now = nowProvider()
+            if providerId == "antigravity" && !flightKey.localOnly {
+                recordAntigravityRemoteOutcome(key: key, version: storedVersion, result: result, at: now)
+            }
+            let code = result.summary?.errorCode
+            if result.ok || code == "tos_violation" {
+                recentCredentials[key] = (now, result, storedVersion)
+                lastCredentialResults[key] = (result, storedVersion)
+            } else if providerId == "antigravity",
+                      let code, Self.antigravityPermanentStopCodes.contains(code) {
+                lastCredentialResults[key] = (result, storedVersion)
+            }
+        }
+        // Bound stale entries when credentials are removed from the vault.
+        let currentIDs = Set(credentialStore.loadCredentials(for: providerId).map { "\(providerId):\($0.id)" })
+        let now = nowProvider()
+        recentCredentials = recentCredentials.filter {
+            ($0.value.1.summary?.errorCode == "tos_violation" && (currentIDs.contains($0.key) || !$0.key.hasPrefix(providerId + ":")))
+                || now.timeIntervalSince($0.value.0) < 90
+        }
+        lastCredentialResults = lastCredentialResults.filter {
+            currentIDs.contains($0.key) || !$0.key.hasPrefix(providerId + ":")
+        }
+        if providerId == "antigravity" {
+            antigravityTrickleByKey = antigravityTrickleByKey.filter { currentIDs.contains($0.key) }
+        }
+    }
+
+    private enum FlightReservation<Value: Sendable> { case completed(Value), wait(SingleFlight<Value>, UUID) }
+    private func reserveFlight<Key: Hashable, Value: Sendable>(
+        in storage: inout [Key: SingleFlight<Value>],
+        key: Key,
+        work: @escaping @Sendable () async -> Value,
+        onCreate: ((SingleFlight<Value>) -> Void)? = nil,
+        onFinish: @escaping @Sendable (SingleFlight<Value>, Value) async -> Void
+    ) -> FlightReservation<Value> {
+        if let existing = storage[key] {
+            switch existing.reserveWaiter() {
+            case .completed(let value): return .completed(value)
+            case .reserved(let id): return .wait(existing, id)
+            case .unavailable: break
+            }
+        }
+        let created = SingleFlight(work: work, onFinish: onFinish)
+        storage[key] = created
+        onCreate?(created)
+        switch created.reserveWaiter() {
+        case .completed(let value): return .completed(value)
+        case .reserved(let id): return .wait(created, id)
+        case .unavailable: preconditionFailure("New single-flight cannot be unavailable before reservation")
+        }
+    }
+
+    private func performFetchWithCredential(
+        provider: any ProviderFetcher,
+        credentialProvider: any CredentialAcceptingProvider,
+        credential: AccountCredential,
+        localOnly: Bool = false
     ) async -> ProviderResult {
         let label = credential.accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
         let fallbackAccountId = resolveAccountIdFromCredential(credential) ?? label ?? credential.id
         let uniqueId = "\(provider.id):cred:\(credential.id)"
 
         do {
-            let usage = try await performCredentialFetch(credentialProvider: credentialProvider, credential: credential, label: label, fallbackAccountId: fallbackAccountId)
+            let usage = try await performCredentialFetch(
+                credentialProvider: credentialProvider,
+                credential: credential,
+                label: label,
+                fallbackAccountId: fallbackAccountId,
+                localOnly: localOnly
+            )
             return buildCredentialSuccess(provider: provider, usage: usage, credential: credential, uniqueId: uniqueId, label: label)
         } catch {
             let redactedError = SensitiveDataRedactor.redactedDescription(for: error)
             engineLog.warning("\(provider.id) credential-backed fetch failed: \(redactedError)")
-            if let refreshed = await refreshFromSourceAndRetry(
+            if !localOnly,
+               !(error is CancellationError),
+               !Self.terminalErrorCodes.contains((error as? ProviderError)?.code ?? ""),
+               let refreshed = await refreshFromSourceAndRetry(
                 provider: provider, credentialProvider: credentialProvider, credential: credential,
                 uniqueId: uniqueId, label: label, fallbackAccountId: fallbackAccountId
             ) {
                 return refreshed
             }
 
-            var summary = UsageNormalizer.errorSummary(provider: provider, error: error)
-            summary.id = uniqueId
-            summary.providerId = provider.id
-            summary.accountId = fallbackAccountId
-            summary.accountLabel = label
-            if provider.id == "codex" {
-                summary.accountLabel = CodexAccountIdentity(credential: credential).email ?? label
-                summary.workspaceUserId = CodexAccountIdentity(credential: credential).userId
-            }
-            summary.sourceFilePath = credentialSourceFilePath(for: credential)
-
-            return ProviderResult(
-                id: uniqueId,
-                providerId: provider.id,
-                accountId: fallbackAccountId,
-                ok: false,
-                summary: summary,
-                error: redactedError
-            )
+            return credentialFailure(provider: provider, credential: credential, error: error)
         }
+    }
+
+    private func credentialFailure(provider: any ProviderFetcher, credential: AccountCredential, error: Error) -> ProviderResult {
+        let label = credential.accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let fallbackAccountId = resolveAccountIdFromCredential(credential) ?? label ?? credential.id
+        let uniqueId = "\(provider.id):cred:\(credential.id)"
+        let redactedError = SensitiveDataRedactor.redactedDescription(for: error)
+        var summary = UsageNormalizer.errorSummary(provider: provider, error: error)
+        summary.id = uniqueId
+        summary.providerId = provider.id
+        summary.accountId = fallbackAccountId
+        summary.accountLabel = label
+        if provider.id == "codex" {
+            summary.accountLabel = CodexAccountIdentity(credential: credential).email ?? label
+            summary.workspaceUserId = CodexAccountIdentity(credential: credential).userId
+        }
+        summary.sourceFilePath = credentialSourceFilePath(for: credential)
+
+        return ProviderResult(
+            id: uniqueId,
+            providerId: provider.id,
+            accountId: fallbackAccountId,
+            ok: false,
+            summary: summary,
+            error: redactedError
+        )
     }
 
     private func performCredentialFetch(
         credentialProvider: any CredentialAcceptingProvider,
         credential: AccountCredential,
         label: String?,
-        fallbackAccountId: String
+        fallbackAccountId: String,
+        localOnly: Bool = false
     ) async throws -> ProviderUsage {
-        var usage = try await withTimeout(seconds: Self.timeoutSeconds(for: credentialProvider)) {
-            try await credentialProvider.fetchUsage(with: credential)
+        var usage: ProviderUsage
+        if localOnly, let antigravityProvider = credentialProvider as? AntigravityProvider {
+            usage = try await withTimeout(seconds: Self.timeoutSeconds(for: credentialProvider)) {
+                try await antigravityProvider.fetchUsage(with: credential, localOnly: true)
+            }
+        } else if credentialProvider is CodexProvider {
+            usage = try await credentialProvider.fetchUsage(with: credential)
+        } else {
+            usage = try await withTimeout(seconds: Self.timeoutSeconds(for: credentialProvider)) {
+                try await credentialProvider.fetchUsage(with: credential)
+            }
         }
         if credentialProvider.id != "claude-subscription", usage.accountEmail?.nilIfBlank == nil { usage.accountEmail = label }
         if usage.accountName?.nilIfBlank == nil { usage.accountName = label }
@@ -261,7 +831,7 @@ public actor ProviderEngine {
         uniqueId: String,
         label: String?
     ) -> ProviderResult {
-        AccountCredentialStore.shared.updateLastUsed(credential, codexIdentity: provider.id == "codex"
+        credentialStore.updateLastUsed(credential, codexIdentity: provider.id == "codex"
             ? CodexAccountIdentity(accountId: usage.usageAccountId, userId: usage.extra["userId"]?.value as? String, email: usage.accountEmail)
             : nil)
 
@@ -315,23 +885,28 @@ public actor ProviderEngine {
         let copiedData = FileManager.default.contents(atPath: credentialPath)
         guard sourceData != copiedData else { return nil }
 
+        let destinationURL = URL(fileURLWithPath: credentialPath)
         do {
-            try sourceData.write(to: URL(fileURLWithPath: credentialPath), options: .atomic)
+            try sourceData.write(to: destinationURL, options: .atomic)
+            CredentialWriteRecorder.current?.record(url: destinationURL, data: sourceData)
         } catch {
             return nil
         }
 
-        guard let usage = try? await performCredentialFetch(
-            credentialProvider: credentialProvider, credential: credential,
-            label: label, fallbackAccountId: fallbackAccountId
-        ) else {
+        do {
+            let usage = try await performCredentialFetch(
+                credentialProvider: credentialProvider, credential: credential,
+                label: label, fallbackAccountId: fallbackAccountId
+            )
+            return buildCredentialSuccess(
+                provider: provider, usage: usage, credential: credential,
+                uniqueId: uniqueId, label: label
+            )
+        } catch let error as ProviderError where Self.terminalErrorCodes.contains(error.code) {
+            return credentialFailure(provider: provider, credential: credential, error: error)
+        } catch {
             return nil
         }
-
-        return buildCredentialSuccess(
-            provider: provider, usage: usage, credential: credential,
-            uniqueId: uniqueId, label: label
-        )
     }
 
     private func resolveAccountIdFromCredential(_ credential: AccountCredential) -> String? {
@@ -365,12 +940,16 @@ public actor ProviderEngine {
         return credential.credential.nilIfBlank
     }
 
-    private func fetchMultiAccount(provider: MultiAccountProviderFetcher) async -> [ProviderResult] {
+    private func fetchMultiAccount(provider: MultiAccountProviderFetcher, excludingNativeKeys: Set<String> = []) async -> [ProviderResult] {
         let start = Date()
-        let accountResults = await withTimeout(seconds: Self.timeoutSeconds * 2) {
-            await provider.fetchAllAccounts()
-        } ?? []
+        let accountResults: [AccountFetchResult]
+        if let codex = provider as? CodexProvider {
+            accountResults = await codex.fetchAllAccounts(excludingNativeKeys: excludingNativeKeys)
+        } else {
+            accountResults = await withTimeout(seconds: Self.timeoutSeconds * 2) { await provider.fetchAllAccounts() } ?? []
+        }
 
+        if provider.id == "codex", !excludingNativeKeys.isEmpty, accountResults.isEmpty { return [] }
         if accountResults.isEmpty {
             let elapsed = Date().timeIntervalSince(start)
             engineLog.debug("✗ \(provider.id): \(String(format: "%.0f", elapsed * 1000))ms - no auto-discovered accounts")
@@ -666,5 +1245,93 @@ func withTimeout<T: Sendable>(seconds: Double, operation: @escaping @Sendable ()
         }
         group.cancelAll()
         return nil
+    }
+}
+
+/// Decouples individual caller cancellation from shared single-flight tasks;
+/// the underlying task is cancelled only when every waiter has cancelled.
+private final class SingleFlight<Value: Sendable>: @unchecked Sendable {
+    enum Reservation { case completed(Value), reserved(UUID), unavailable }
+
+    private let lock = NSLock()
+    let task: Task<Value, Never>
+    private var waiters: [UUID: CheckedContinuation<Value, Never>] = [:]
+    private var activeWaiters: Set<UUID> = []
+    private var cancelledWaiters: Set<UUID> = []
+    private var completedValue: Value?
+    private var invalidated = false
+
+    var isCancelledResult: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return invalidated || task.isCancelled
+    }
+
+    init(work: @escaping @Sendable () async -> Value,
+         onFinish: @escaping @Sendable (SingleFlight<Value>, Value) async -> Void) {
+        let task = Task { await work() }
+        self.task = task
+        Task {
+            let value = await task.value
+            // Commit actor cache/state before resuming any waiters.
+            await onFinish(self, value)
+            self.finish(value)
+        }
+    }
+
+    func reserveWaiter() -> Reservation {
+        lock.lock(); defer { lock.unlock() }
+        guard !invalidated else { return .unavailable }
+        if let completedValue { return .completed(completedValue) }
+        let id = UUID()
+        activeWaiters.insert(id)
+        return .reserved(id)
+    }
+
+    func wait(waiterID: UUID, onCancelledValue: @escaping @Sendable () -> Value) async -> Value {
+        await withTaskCancellationHandler {
+            await withCheckedContinuation { continuation in
+                lock.lock()
+                if let completedValue {
+                    activeWaiters.remove(waiterID)
+                    lock.unlock()
+                    continuation.resume(returning: completedValue)
+                    return
+                }
+                if cancelledWaiters.remove(waiterID) != nil || Task.isCancelled {
+                    let hadActive = activeWaiters.remove(waiterID) != nil
+                    let cancelTask = hadActive && activeWaiters.isEmpty
+                    if cancelTask { invalidated = true }
+                    lock.unlock()
+                    if cancelTask { task.cancel() }
+                    continuation.resume(returning: onCancelledValue())
+                    return
+                }
+                waiters[waiterID] = continuation
+                lock.unlock()
+            }
+        } onCancel: {
+            lock.lock()
+            guard completedValue == nil else { lock.unlock(); return }
+            let hadActive = activeWaiters.remove(waiterID) != nil
+            let continuation = waiters.removeValue(forKey: waiterID)
+            if continuation == nil && hadActive { cancelledWaiters.insert(waiterID) }
+            let cancelTask = hadActive && activeWaiters.isEmpty
+            if cancelTask { invalidated = true }
+            lock.unlock()
+            if cancelTask { task.cancel() }
+            continuation?.resume(returning: onCancelledValue())
+        }
+    }
+
+    private func finish(_ value: Value) {
+        lock.lock()
+        guard completedValue == nil else { lock.unlock(); return }
+        completedValue = value
+        let pending = waiters
+        waiters.removeAll()
+        activeWaiters.removeAll()
+        cancelledWaiters.removeAll()
+        lock.unlock()
+        for continuation in pending.values { continuation.resume(returning: value) }
     }
 }

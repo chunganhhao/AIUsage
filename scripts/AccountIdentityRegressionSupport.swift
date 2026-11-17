@@ -60,9 +60,17 @@ final class SecureAccountVault {
 
 enum ProviderManagedImportStore {
     static var cleanupInvocations = 0
+    static var deletedCleanupCredentialIDs: [String] = []
     static func reuseManagedImportIfPossible(existingCredential: AccountCredential, incomingCredential: inout AccountCredential) {}
     static func cleanupOrphanedManagedImports(referencedBy credentials: [AccountCredential]) {
         cleanupInvocations += 1
+    }
+    static func cleanupManagedImports(
+        forDeletedCredentials deletedCredentials: [AccountCredential],
+        referencedBy remainingCredentials: [AccountCredential]
+    ) {
+        cleanupInvocations += 1
+        deletedCleanupCredentialIDs.append(contentsOf: deletedCredentials.map(\.id))
     }
 }
 

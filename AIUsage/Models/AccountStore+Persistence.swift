@@ -1256,4 +1256,13 @@ extension AccountStore {
         guard !credentials.isEmpty else { return }
         ProviderManagedImportStore.cleanupOrphanedManagedImports(referencedBy: credentials)
     }
+
+    func cleanupManagedCredentialArtifacts(forDeletedCredentials deletedCredentials: [AccountCredential]) {
+        guard !deletedCredentials.isEmpty else { return }
+        let remainingCredentials = AccountCredentialStore.shared.loadAllCredentials()
+        ProviderManagedImportStore.cleanupManagedImports(
+            forDeletedCredentials: deletedCredentials,
+            referencedBy: remainingCredentials
+        )
+    }
 }

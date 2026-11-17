@@ -68,7 +68,10 @@ extension ProviderRefreshCoordinator {
                 }
 
                 do {
-                    let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(candidate)
+                    let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
+                        candidate,
+                        localOnly: providerId == "antigravity"
+                    )
                     if shouldSuppressAutoManagedAccount(
                         providerId: providerId,
                         usage: usage,
@@ -85,6 +88,9 @@ extension ProviderRefreshCoordinator {
                         providerDisplayTitle: providerTitleForId(providerId)
                     )
                     discoveryFailureBackoff.removeValue(forKey: backoffKey)
+                } catch let error as ProviderError where error.code == "local_only_unavailable" {
+                    // Antigravity automatic discovery never sends Google HTTPS when IDE loopback is unavailable.
+                    continue
                 } catch {
                     discoveryFailureBackoff[backoffKey] = Date().addingTimeInterval(discoveryFailureCooldown)
                 }
@@ -210,22 +216,55 @@ extension ProviderRefreshCoordinator {
     }
 
     @MainActor
-    func fetchDashboardLocal() async -> ProviderRefreshResult {
+    func fetchDashboardLocal(useRecentResults: Bool = false, automatic: Bool = false) async -> ProviderRefreshResult {
         let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         await syncUnifiedManagedAccounts(for: selectedProviderIDList())
 
-        let snapshot = await engine.fetchAll(ids: selectedProviderIDList())
+        let snapshot = await engine.fetchAll(
+            ids: selectedProviderIDList(),
+            useRecentResults: useRecentResults,
+            backgroundAutomatic: automatic
+        )
         // 整批 convert + localize（含 overview）在后台执行器完成，主线程只做赋值与 UI 协调。
         let language = self.language
         let batch = await Task.detached { [self] in
             localizedDashboard(from: snapshot, language: language)
         }.value
         let localizedProviders = batch.providers
-        let stabilizedProviders = stabilizedBulkRefreshProviders(localizedProviders.map(\.provider))
+        // Antigravity never batch-polls all dormant accounts; keep existing cards when not returned in this tick.
+        let stabilizedProviders = stabilizedBulkRefreshProviders(
+            localizedProviders.map(\.provider),
+            includingExistingFor: ["antigravity"]
+        )
         await reconcileResetProtectedAccountRegistry(stabilizedProviders, since: resetGeneration)
-        providers = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
-        overview = batch.overview
+        let finalProviders = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
+        providers = finalProviders
+        let incomingIDs = Set(localizedProviders.map(\.provider.id))
+        let preserved = finalProviders.filter { $0.baseProviderId == "antigravity" && !incomingIDs.contains($0.id) }
+        if preserved.isEmpty {
+            overview = batch.overview
+        } else {
+            let extraActive = preserved.filter { $0.status != .error }.count
+            let extraAttention = preserved.filter { $0.status == .watch || $0.status == .critical }.count
+            let extraCritical = preserved.filter { $0.status == .critical }.count
+            let extraResetSoon = preserved.filter {
+                guard let raw = $0.nextResetAt, let date = SharedFormatters.parseISO8601(raw) else { return false }
+                let diff = date.timeIntervalSinceNow
+                return diff >= 0 && diff <= 86400
+            }.count
+            overview = DashboardOverview(
+                generatedAt: batch.overview.generatedAt,
+                activeProviders: batch.overview.activeProviders + extraActive,
+                attentionProviders: batch.overview.attentionProviders + extraAttention,
+                criticalProviders: batch.overview.criticalProviders + extraCritical,
+                resetSoonProviders: batch.overview.resetSoonProviders + extraResetSoon,
+                localCostMonthUsd: batch.overview.localCostMonthUsd,
+                localWeekTokens: batch.overview.localWeekTokens,
+                stats: batch.overview.stats,
+                alerts: batch.overview.alerts
+            )
+        }
         return .classified(
             totalResults: snapshot.providers.count,
             refreshedProviders: localizedProviders.filter(\.ok).map(\.provider),
@@ -239,7 +278,14 @@ extension ProviderRefreshCoordinator {
         let refreshedAt = Date()
         APIService.shared.updateBaseURL(settings.remoteBaseURL)
         do {
-            let dashboard = try await APIService.shared.fetchDashboard(providerIds: selectedProviderIDList())
+            var dashboard = try await APIService.shared.fetchDashboard(providerIds: selectedProviderIDList())
+            // Cold HTTP reads are immediate; follow pending data even when the
+            // user's auto-refresh timer is Off. This polls the cache, not Google.
+            for _ in 0..<180 {
+                guard dashboard.providers.contains(where: { $0.summary.errorCode == "refresh_pending" }) else { break }
+                try await Task.sleep(for: .seconds(2))
+                dashboard = try await APIService.shared.fetchDashboard(providerIds: selectedProviderIDList())
+            }
             // 主线程仅重组为 Sendable 元组（无正则）；providers + overview 本地化在后台执行器完成。
             let language = self.language
             let remoteItems = dashboard.providers.map { (provider: $0.summary, ok: $0.ok) }
@@ -451,10 +497,12 @@ extension ProviderRefreshCoordinator {
 
     func stabilizedBulkRefreshProviders(
         _ incomingProviders: [ProviderData],
-        preservingExistingFor targetProviderId: String? = nil
+        preservingExistingFor targetProviderId: String? = nil,
+        includingExistingFor skippedProviderIDs: Set<String> = []
     ) -> [ProviderData] {
         let groupedIncoming = Dictionary(grouping: incomingProviders, by: \.baseProviderId)
-        let providerIDs = targetProviderId.map { [$0] } ?? Array(Set(incomingProviders.map(\.baseProviderId)))
+        let providerIDs = targetProviderId.map { [$0] }
+            ?? Array(Set(incomingProviders.map(\.baseProviderId)).union(skippedProviderIDs))
 
         var stabilized: [ProviderData] = []
         for providerId in providerIDs {

@@ -431,21 +431,22 @@ struct ProviderCard: View {
 
     private func activateThisAccount() {
         guard let entry = accountEntry else { return }
-        do {
-            try activationManager.activateAccount(entry: entry)
-        } catch {
-            if activationManager.activationResult == nil {
+        Task { @MainActor in
+            do {
+                guard try await activationManager.activateAccount(entry: entry) else { return }
+            } catch {
                 activationMessage = SensitiveDataRedactor.redactedMessage(for: error)
                 showActivationAlert = true
+                return
             }
-        }
-        if let result = activationManager.activationResult {
-            switch result {
-            case .success(let msg), .failure(let msg):
-                activationMessage = msg
-                showActivationAlert = true
+            if let result = activationManager.activationResult {
+                switch result {
+                case .success(let msg), .failure(let msg):
+                    activationMessage = msg
+                    showActivationAlert = true
+                }
+                activationManager.activationResult = nil
             }
-            activationManager.activationResult = nil
         }
     }
 

@@ -355,3 +355,10 @@ struct TokenSaverUIFixtureEntry {
         TokenSaverUIFixtureApp.main()
     }
 }
+
+// UI fixture only: CPA file writes are covered by AntiBanPhase3Regression, never touch the live runtime here.
+struct CLIProxyPaths { init(root: URL? = nil) throws {} }
+struct CLIProxyConfigStore {
+    init(paths: CLIProxyPaths) {}
+    func syncPoolProtectionPause(enabled: Bool) throws {}
+}

@@ -53,6 +53,15 @@ extension ProviderAccountEditorView {
             if providerId == "gemini" {
                 geminiLogin.start()
             } else {
+                let warning = NSAlert()
+                warning.messageText = L("Prefer Import Antigravity IDE Session", "优先导入 Antigravity IDE 会话", "Ưu tiên nhập phiên Antigravity IDE")
+                warning.informativeText = L(
+                    "Browser OAuth may use an unsupported legacy client. For primary or Ultra accounts, cancel and import the signed-in IDE session. Continuing does not prevent account restrictions.",
+                    "浏览器 OAuth 可能使用不再支持的旧客户端。主账号或 Ultra 账号请取消并导入 IDE 会话。继续不能保证账号安全。",
+                    "OAuth trình duyệt có thể dùng client cũ không còn hỗ trợ. Với tài khoản chính hoặc Ultra, hãy hủy và nhập phiên IDE đã đăng nhập. Tiếp tục không bảo đảm tránh hạn chế tài khoản.")
+                warning.addButton(withTitle: L("Cancel", "取消", "Hủy"))
+                warning.addButton(withTitle: L("Continue Browser OAuth", "继续浏览器 OAuth", "Tiếp tục OAuth trình duyệt"))
+                guard warning.runModal() == .alertSecondButtonReturn else { step = .ready; return }
                 antigravityLogin.start()
             }
         case .githubDevice:

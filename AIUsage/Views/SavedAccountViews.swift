@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuotaBackend
 
 struct SavedAccountCard: View {
     let account: ProviderAccountEntry
@@ -14,6 +15,10 @@ struct SavedAccountCard: View {
     @State private var pendingAccountDeletion = false
     private var hasSecureCredential: Bool {
         account.storedAccount?.credentialId != nil
+    }
+    private var isSwitchSafePausedAntigravity: Bool {
+        hasSecureCredential
+            && account.providerId == "antigravity"
     }
 
     var body: some View {
@@ -38,7 +43,15 @@ struct SavedAccountCard: View {
                 Spacer()
 
                 HStack(spacing: 6) {
-                    if hasSecureCredential {
+                    if isSwitchSafePausedAntigravity {
+                        Text(L("Switch-Safe", "防封静默"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.teal)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.teal.opacity(0.10))
+                            .clipShape(Capsule())
+                    } else if hasSecureCredential {
                         Text(L("Offline", "离线"))
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.orange)
@@ -60,9 +73,11 @@ struct SavedAccountCard: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(
-                    hasSecureCredential
-                        ? L("Credential may have expired", "凭证可能已过期")
-                        : L("Awaiting a live session", "等待在线会话")
+                    isSwitchSafePausedAntigravity
+                        ? L("Paused in background", "后台轮询已暂停")
+                        : (hasSecureCredential
+                            ? L("Credential may have expired", "凭证可能已过期")
+                            : L("Awaiting a live session", "等待在线会话"))
                 )
                     .font(.title3)
                     .bold()
@@ -75,9 +90,13 @@ struct SavedAccountCard: View {
                 }
 
                 Text(
-                    hasSecureCredential
-                        ? L("The stored credential could not fetch live data. Try refreshing or reconnecting.", "已存储的凭证未能获取实时数据。可尝试刷新或重新连接。")
-                        : L("Account saved locally. Will auto-match when the app session appears.", "账号已保存到本地。对应应用出现在线会话后会自动匹配。")
+                    isSwitchSafePausedAntigravity
+                        ? (AntigravityPoolProtectionSettings.pollingMode() == .localOnly
+                            ? L("Background checks read only the running Antigravity IDE locally; click Refresh to inspect a random dormant account or retry this card.", "后台仅通过本地 Antigravity IDE 读取活跃账号；点击刷新可随机检查 1 个休眠账号或重试当前卡片。")
+                            : L("Queued for randomized 1-by-1 trickle checks (15m cooldown); click Retry to check this account immediately.", "已加入随机逐个检查队列（每账号 15 分钟冷却）；点击重试可立即检查此账号。"))
+                        : (hasSecureCredential
+                            ? L("The stored credential could not fetch live data. Try refreshing or reconnecting.", "已存储的凭证未能获取实时数据。可尝试刷新或重新连接。")
+                            : L("Account saved locally. Will auto-match when the app session appears.", "账号已保存到本地。对应应用出现在线会话后会自动匹配。"))
                 )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -199,6 +218,10 @@ struct SavedAccountDetailView: View {
     @State private var isRefreshing = false
     private var hasSecureCredential: Bool {
         account.storedAccount?.credentialId != nil
+    }
+    private var isSwitchSafePausedAntigravity: Bool {
+        hasSecureCredential
+            && account.providerId == "antigravity"
     }
 
     var body: some View {

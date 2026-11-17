@@ -84,10 +84,12 @@ public struct AccountFetchResult: Sendable {
 public struct ProviderError: Error, LocalizedError, Sendable {
     public let code: String
     public let message: String
+    public let metadata: [String: String]
 
-    public init(_ code: String, _ message: String) {
+    public init(_ code: String, _ message: String, metadata: [String: String] = [:]) {
         self.code = code
         self.message = message
+        self.metadata = metadata
     }
 
     public var errorDescription: String? { "[\(code)] \(message)" }

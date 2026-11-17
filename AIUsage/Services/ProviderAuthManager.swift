@@ -273,7 +273,10 @@ enum ProviderAuthManager {
         )
     }
 
-    static func authenticateCandidate(_ candidate: ProviderAuthCandidate) async throws -> (AccountCredential, ProviderUsage) {
+    static func authenticateCandidate(
+        _ candidate: ProviderAuthCandidate,
+        localOnly: Bool = false
+    ) async throws -> (AccountCredential, ProviderUsage) {
         var copiedPath: String?
         do {
             let credentialValue: String
@@ -304,7 +307,7 @@ enum ProviderAuthManager {
                 ]
             )
 
-            let usage = try await validate(credential: credential)
+            let usage = try await validate(credential: credential, localOnly: localOnly)
             return (credential, usage)
         } catch {
             if let copiedPath {
@@ -356,9 +359,12 @@ enum ProviderAuthManager {
 
     // MARK: - Validation
 
-    private static func validate(credential: AccountCredential) async throws -> ProviderUsage {
+    private static func validate(credential: AccountCredential, localOnly: Bool = false) async throws -> ProviderUsage {
         guard let provider = ProviderRegistry.provider(for: credential.providerId) as? any CredentialAcceptingProvider else {
             throw ProviderError("unsupported_provider", "\(credential.providerId) does not accept imported credentials.")
+        }
+        if localOnly, let antigravity = provider as? AntigravityProvider {
+            return try await antigravity.fetchUsage(with: credential, localOnly: true)
         }
         return try await provider.fetchUsage(with: credential)
     }
@@ -373,7 +379,7 @@ enum ProviderAuthManager {
         let sourceURL = URL(fileURLWithPath: sourcePath)
         let directory = try managedImportDirectory(for: providerId)
         let stem = sanitizedFilenameStem(suggestedName)
-        let filename = "\(stem)-\(DateFormat.string(from: Date(), format: "yyyyMMdd-HHmmss")).json"
+        let filename = "\(stem)-\(DateFormat.string(from: Date(), format: "yyyyMMdd-HHmmss"))-\(UUID().uuidString).json"
         let destinationURL = directory.appendingPathComponent(filename)
 
         let data: Data

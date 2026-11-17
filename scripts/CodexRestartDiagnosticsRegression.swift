@@ -52,6 +52,7 @@ final class ProviderActivationManager: ObservableObject {
     static func resolveInstalledCodexAppURL() -> URL? { Boundary.installed ? URL(fileURLWithPath: "/tmp/fixture-only.app") : nil }
     static func isCodexChildHelperRunning(appBundlePath: String) -> Bool { Boundary.helpers }
     static func terminateOrphanedCodexChildHelpers(appBundlePath: String) {}
+    func activateCodexAccount(entry: ProviderAccountEntry) throws { Boundary.reapplied = true }
     func reapplyCodexAccountForRestart(fallbackEntry: ProviderAccountEntry?) async throws {
         Boundary.reapplied = true
         if Boundary.reapplyFails { throw NSError(domain: "fixture-secret-domain", code: 41, userInfo: [NSLocalizedDescriptionKey: "fixture-secret-token"]) }

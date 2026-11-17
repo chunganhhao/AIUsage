@@ -443,6 +443,7 @@ final class AccountStore: ObservableObject {
 
         var allCredentialsDeleted = true
         var deletedEntries: [ProviderAccountEntry] = []
+        var deletedCredentials: [AccountCredential] = []
 
         for entry in entries {
             let matchedCredentials = matchingCredentialsImpl(for: entry)
@@ -456,6 +457,7 @@ final class AccountStore: ObservableObject {
                 continue
             }
             deletedEntries.append(entry)
+            deletedCredentials.append(contentsOf: matchedCredentials)
 
             let matchingIndices = matchingStoredAccountIndices(for: entry)
             for index in matchingIndices.sorted(by: >) {
@@ -482,7 +484,7 @@ final class AccountStore: ObservableObject {
         onPostRegistryDelete(deletedEntries)
 
         if registryPersisted, allCredentialsDeleted {
-            cleanupManagedCredentialArtifacts()
+            cleanupManagedCredentialArtifacts(forDeletedCredentials: deletedCredentials)
         }
 
         return deletedEntries

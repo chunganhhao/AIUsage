@@ -197,6 +197,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
         let key = storageKey(credential)
         // 请求完成前账号可能已删除或重新登录；只更新当前记录，不能复活旧凭据或覆盖新 token。
         guard var updated = vault[key] else { return }
+        let previousMetadata = updated.metadata
         updated.lastUsedAt = SharedFormatters.iso8601String(from: Date())
         if credential.providerId == "codex", let codexIdentity,
            updated.credential == credential.credential,
@@ -207,6 +208,11 @@ public final class AccountCredentialStore: @unchecked Sendable {
             if let email = codexIdentity.email { updated.metadata["accountEmail"] = email }
         }
         vault[key] = updated
+        // Poll recency is session-local; only a verified identity change needs a vault write.
+        guard updated.metadata != previousMetadata else {
+            cachedCredentialsByStorageKey = vault
+            return
+        }
         do {
             try saveCredentialVaultUnsafe(vault)
             cachedCredentialsByStorageKey = vault

@@ -262,7 +262,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         ModelAutoSyncCoordinator.shared.start()
 
         DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-            AppState.shared.refreshAllProviders()
+            AppState.shared.refreshAllProviders(automatic: true)
             // Claude Code 每次回传额度都会写快照；监听后卡片即时更新，不等全局刷新周期。
             ClaudeSubscriptionManager.shared.startWatching()
         }

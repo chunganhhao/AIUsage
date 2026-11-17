@@ -727,6 +727,10 @@ final class CLIProxyGatewayManager: ObservableObject {
         }
 
         authFileConnectivity[file.name] = .checking
+        let localURL = paths.authDirectory.appendingPathComponent(file.name).standardizedFileURL
+        let safeLocalFile = !file.runtimeOnly && localURL.deletingLastPathComponent() == paths.authDirectory.standardizedFileURL
+            && (try? localURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false
+        let beforeCheck = safeLocalFile ? try? Data(contentsOf: localURL) : nil
         do {
             let response = try await client.callUpstream(
                 authIndex: authIndex,
@@ -736,6 +740,17 @@ final class CLIProxyGatewayManager: ObservableObject {
                 body: request.body
             )
             let state = evaluateConnectivityResponse(response)
+            if provider == "antigravity", let data = response.body.data(using: .utf8),
+               let terminal = AntigravityAPIError.parse(statusCode: response.statusCode, data: data), terminal.code == "tos_violation" {
+                // Local CPA watches this atomic auth update. Do not disable by
+                // filename after HTTP: it may already contain a new login.
+                if let beforeCheck {
+                    do { try AntigravityAccountProtection.suspend(localURL, error: terminal, expectedData: beforeCheck) }
+                    catch { lastError = terminal.message + " Suspension could not be saved; stop CPA and check file permissions." }
+                } else {
+                    lastError = terminal.message + " Disable this runtime credential in CPA before retrying."
+                }
+            }
             authFileConnectivity[file.name] = state
             return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
         } catch {
@@ -753,6 +768,7 @@ final class CLIProxyGatewayManager: ObservableObject {
             let result = await testAccountConnectivity(for: file)
             if case .unsupported = result.state { continue }
             results.append(result)
+            if case .failed(let code, _, _) = result.state, code == "tos_violation" { break }
         }
         return results
     }
@@ -778,7 +794,7 @@ final class CLIProxyGatewayManager: ObservableObject {
             return ("GET", url, headers, "")
 
         case "antigravity":
-            guard let url = URL(string: "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels") else {
+            guard let url = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels") else {
                 throw CLIProxyGatewayError.configuration("invalid Antigravity quota URL")
             }
             return (
@@ -787,7 +803,7 @@ final class CLIProxyGatewayManager: ObservableObject {
                 [
                     "Authorization": "Bearer $TOKEN$",
                     "Content-Type": "application/json",
-                    "User-Agent": "antigravity/1.11.3 Darwin/arm64"
+                    "User-Agent": AntigravityClientIdentity.userAgent
                 ],
                 try connectivityBody(projectID: file.projectID)
             )
@@ -823,7 +839,7 @@ final class CLIProxyGatewayManager: ObservableObject {
 
     private func connectivityBody(projectID: String?) throws -> String {
         let object: [String: String]
-        if let projectID = projectID?.nilIfBlank {
+        if let projectID = projectID?.nilIfBlank, projectID != "aicode-consumers" {
             object = ["project": projectID]
         } else {
             object = [:]
@@ -836,6 +852,11 @@ final class CLIProxyGatewayManager: ObservableObject {
         _ response: CLIProxyUpstreamCallResult
     ) -> CLIProxyAccountConnectivityState {
         let now = Date()
+        if let data = response.body.data(using: .utf8),
+           let error = AntigravityAPIError.parse(statusCode: response.statusCode, data: data),
+           ["tos_violation", "unsupported_client"].contains(error.code) {
+            return .failed(code: error.code, message: error.message, checkedAt: now)
+        }
         switch response.statusCode {
         case 200..<300:
             guard let data = response.body.data(using: .utf8),

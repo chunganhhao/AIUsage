@@ -58,7 +58,7 @@ enum DefaultsKey { static let displayCurrency = "fixture-unused-currency" }
     func isRemoteViewOnly(_ entry: ProviderAccountEntry) -> Bool { entry.id == "fixture-remote" }
     func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool { false }
     func deactivateAccount(entry: ProviderAccountEntry) { preconditionFailure("Fixture activation disabled") }
-    func activateAccount(entry: ProviderAccountEntry) throws { preconditionFailure("Fixture activation disabled") }
+    func activateAccount(entry: ProviderAccountEntry) async throws -> Bool { preconditionFailure("Fixture activation disabled") }
 }
 
 struct CLIProxyAccountSyncCandidate {

@@ -735,7 +735,10 @@ final class AntigravityLoginCoordinator: ObservableObject {
                 "openid",
                 "https://www.googleapis.com/auth/cloud-platform",
                 "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile"
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/cclog",
+                "https://www.googleapis.com/auth/experimentsandconfigs",
+                "https://www.googleapis.com/auth/aicode"
             ].joined(separator: " ")),
             URLQueryItem(name: "state", value: stateToken),
             URLQueryItem(name: "response_type", value: "code"),

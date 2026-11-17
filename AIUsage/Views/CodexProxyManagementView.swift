@@ -376,6 +376,24 @@ struct CodexSubscriptionSection: View {
         .help("\(window.label): \(window.value) · \(window.note)")
     }
 
+    private func performAccountActivation(_ entry: ProviderAccountEntry) {
+        Task { @MainActor in
+            do {
+                guard try await activation.activateAccount(entry: entry) else { return }
+                onAccountSwitched?()
+                let message: String
+                if case .success(let result) = activation.activationResult {
+                    message = result
+                } else {
+                    message = L("Switched to \(entry.accountPrimaryLabel)", "已切换到 \(entry.accountPrimaryLabel)", "Đã chuyển sang \(entry.accountPrimaryLabel)")
+                }
+                onShowStatus?(message, false)
+            } catch {
+                onShowStatus?(SensitiveDataRedactor.redactedMessage(for: error), true)
+            }
+        }
+    }
+
     @ViewBuilder
     private func subscriptionRow(_ entry: ProviderAccountEntry) -> some View {
         let isActive = !proxyActive && activation.isActiveAccount(entry)
@@ -430,19 +448,7 @@ struct CodexSubscriptionSection: View {
                     get: { isActive },
                     set: { newValue in
                         if newValue {
-                            do {
-                                try activation.activateAccount(entry: entry)
-                                onAccountSwitched?()
-                                onShowStatus?(
-                                    L(
-                                        "Switched to \(entry.accountPrimaryLabel). Quit & reopen Codex to use this account.",
-                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Codex 即可生效。"
-                                    ),
-                                    false
-                                )
-                            } catch {
-                                onShowStatus?(error.localizedDescription, true)
-                            }
+                            performAccountActivation(entry)
                         } else {
                             activation.deactivateAccount(entry: entry)
                             onAccountSwitched?()
@@ -472,38 +478,12 @@ struct CodexSubscriptionSection: View {
         .contextMenu {
             if !activation.isRemoteViewOnly(entry) {
                 Button {
-                    do {
-                        try activation.activateAccount(entry: entry)
-                        onAccountSwitched?()
-                        onShowStatus?(
-                            L(
-                                "Switched to \(entry.accountPrimaryLabel). Quit & reopen Codex to use this account.",
-                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Codex 即可生效。"
-                            ),
-                            false
-                        )
-                    } catch {
-                        onShowStatus?(error.localizedDescription, true)
-                    }
+                    performAccountActivation(entry)
                 } label: {
                     Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
                 }
                 .disabled(globalProxy.isEnabled || busy)
 
-                if isAppInstalled, let onRestartApp {
-                    Button {
-                        do {
-                            try activation.activateAccount(entry: entry)
-                            onAccountSwitched?()
-                            onRestartApp()
-                        } catch {
-                            onShowStatus?(error.localizedDescription, true)
-                        }
-                    } label: {
-                        Label(L("Switch & Restart Codex", "切换并重启 Codex"), systemImage: "arrow.clockwise.circle")
-                    }
-                    .disabled(globalProxy.isEnabled || busy)
-                }
                 Divider()
             }
 

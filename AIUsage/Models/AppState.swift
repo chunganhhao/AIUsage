@@ -244,7 +244,7 @@ class AppState: ObservableObject {
             // 让热力图/费用卡尽快出现，而不必等所有网络账号刷新完成。
             refreshCoordinator.refreshLocalTokenStatsOnly()
         }
-        await refreshCoordinator.fetchDashboard()
+        await refreshCoordinator.fetchDashboard(useRecentResults: true, automatic: true)
     }
 
     var providerCatalog: [ProviderCatalogItem] {
@@ -437,8 +437,8 @@ class AppState: ObservableObject {
         refreshCoordinator.setupClaudeCodeAutoRefresh()
     }
 
-    func refreshAllProviders() {
-        refreshCoordinator.refreshAllProviders()
+    func refreshAllProviders(automatic: Bool = false) {
+        refreshCoordinator.refreshAllProviders(automatic: automatic)
     }
 
     func refreshProvider(_ providerId: String) {
@@ -469,8 +469,9 @@ class AppState: ObservableObject {
         activationManager.canActivateProvider(providerId)
     }
 
-    func activateAccount(entry: ProviderAccountEntry) throws {
-        try activationManager.activateAccount(entry: entry)
+    @MainActor
+    func activateAccount(entry: ProviderAccountEntry) async throws {
+        try await activationManager.activateAccount(entry: entry)
     }
 
     func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool {

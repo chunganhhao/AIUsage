@@ -154,12 +154,10 @@ extension MenuBarView {
                         return MenuBarTrackPanelRow(id: entry.id, name: entry.accountPrimaryLabel,
                                                     subtitle: viewOnly ? ProviderActivationManager.remoteViewOnlyLabel : nil,
                                                     isActive: isActive, isDisabled: viewOnly || switchingDisabled) {
-                            do {
-                                try ProviderActivationManager.shared.activateAccount(entry: entry)
-                                closePanel()
-                                presentRestartConfirmation(for: entry)
-                            } catch {
-                                closePanel()
+                            closePanel()
+                            Task { @MainActor in
+                                do { try await ProviderActivationManager.shared.activateAccount(entry: entry) }
+                                catch { ProviderActivationManager.shared.activationResult = .failure(SensitiveDataRedactor.redactedMessage(for: error)) }
                             }
                         }
                     }))

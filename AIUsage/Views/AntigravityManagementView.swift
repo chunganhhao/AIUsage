@@ -57,6 +57,7 @@ struct AntigravityManagementView: View {
     @State private var environmentRefreshTask: Task<Void, Never>?
     @State private var poolProtectionEnabled = false
     @State private var poolProtectionResidual = false
+    @State private var pollingMode: AntigravityQuotaPollingMode = .localOnly
     @State private var poolProtectionError: String?
 
     @State private var showingAddAccount = false
@@ -93,19 +94,10 @@ struct AntigravityManagementView: View {
                 AntigravitySubscriptionSection(
                     entries: antigravityEntries,
                     isAppInstalled: envSummary.isAppInstalled,
-                    isRestarting: isRestartingAGY || activation.isAntigravityRestarting,
+                    isRestarting: isRestartingAGY || activation.isAntigravityRestarting || activation.isAntigravitySwitching,
                     storageDisplayPath: envSummary.activeStoragePath,
                     onAddAccount: { showingAddAccount = true },
-                    onRestartApp: { restartAntigravity() },
-                    onAccountSwitched: {
-                        refreshEnvironment()
-                    },
-                    onShowStatus: { message, isError in
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            statusBannerMessage = message
-                            statusBannerIsError = isError
-                        }
-                    }
+                    onRestartApp: { restartAntigravity() }
                 )
             }
             .padding(20)
@@ -148,6 +140,7 @@ struct AntigravityManagementView: View {
         }
         refreshEnvironment()
         poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
+        pollingMode = AntigravityPoolProtectionSettings.pollingMode()
         do {
             poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection()
             poolProtectionError = nil
@@ -228,22 +221,25 @@ struct AntigravityManagementView: View {
             icon: isRestartingAGY ? nil : "arrow.clockwise.circle.fill",
             role: .secondary,
             help: L(
-                "Gracefully quit and reopen Antigravity.app to load the newly switched account.",
-                "平滑退出并重新打开 Antigravity.app 以加载新切换的账号。"
+                "Gracefully quit and reopen Antigravity.app (does not modify Keychain or switch accounts).",
+                "平滑退出并重新打开 Antigravity.app（不会修改钥匙串或切换账号）。"
             )
         ) {
             restartAntigravity()
         }
-        .disabled(isRestartingAGY || !envSummary.isAppInstalled)
+        .disabled(isRestartingAGY || activation.isAntigravityRestarting || activation.isAntigravitySwitching || !envSummary.isAppInstalled)
     }
 
     private var refreshQuotasButton: some View {
         let refreshing = refreshCoordinator.isProviderRefreshInFlight("antigravity")
         return actionBarButton(
-            title: refreshing ? L("Refreshing…", "刷新中…") : L("Refresh Quotas", "刷新配额"),
+            title: refreshing ? L("Checking…", "检查中…") : L("Check Quotas", "随机检查配额"),
             icon: refreshing ? nil : "arrow.triangle.2.circlepath",
             role: .secondary,
-            help: L("Refresh quota windows for all Antigravity accounts.", "刷新所有 Antigravity 账号的配额窗口。")
+            help: L(
+                "Reads the running Antigravity IDE locally via 127.0.0.1 and checks at most 1 random due dormant account (15m cooldown; never bursts all accounts at once).",
+                "通过本地 127.0.0.1 读取当前 Antigravity IDE，并最多随机检查 1 个已过 15 分钟冷却的休眠账号（绝不批量并发请求）。"
+            )
         ) {
             refreshCoordinator.refreshProvider("antigravity")
             refreshCoordinator.refreshProvider("antigravity-cost")
@@ -267,19 +263,14 @@ struct AntigravityManagementView: View {
         isRestartingAGY = true
         activation.isAntigravityRestarting = true
         Task { @MainActor in
-            let ok = await AntigravityAccountSwitcher.restartAntigravityApp(
-                reapplyBeforeRelaunch: {
-                    let latestActiveEntry = await MainActor.run { self.activeEntry }
-                    try await activation.reapplyAntigravityAccountForRestart(fallbackEntry: latestActiveEntry)
-                }
-            )
+            let ok = await AntigravityAccountSwitcher.restartAntigravityApp(reapplyBeforeRelaunch: nil)
             isRestartingAGY = false
             activation.isAntigravityRestarting = false
             refreshEnvironment()
             withAnimation(.easeInOut(duration: 0.2)) {
                 statusBannerIsError = !ok
                 statusBannerMessage = ok
-                    ? L("Antigravity.app restarted with the active account.", "Antigravity.app 已使用当前激活账号重启。")
+                    ? L("Antigravity.app restarted.", "Antigravity.app 已重新启动。")
                     : L("Could not restart Antigravity.app automatically. Please reopen it manually.", "无法自动重启 Antigravity.app，请手动重新打开。")
             }
         }
@@ -351,13 +342,6 @@ struct AntigravityManagementView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.primary)
             Spacer()
-            if !isError && envSummary.isAppInstalled {
-                Button(L("Restart AGY Now", "立即重启 AGY")) {
-                    restartAntigravity()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-            }
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     statusBannerMessage = nil
@@ -529,6 +513,7 @@ struct AntigravityManagementView: View {
                     set: { enabled in
                         do {
                             try AntigravityPoolProtectionSettings.setEnabled(enabled)
+                            try CLIProxyConfigStore(paths: CLIProxyPaths()).syncPoolProtectionPause(enabled: enabled)
                             reloadState()
                         } catch {
                             poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
@@ -544,6 +529,48 @@ struct AntigravityManagementView: View {
             }
 
             AntigravityPerPoolControls()
+            Divider()
+            HStack(spacing: 10) {
+                let isTrickle = pollingMode == .randomTrickle
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 8) {
+                        Text(L("Randomized Dormant Quota Trickle", "后台随机逐个检查休眠账号"))
+                            .font(.caption.weight(.semibold))
+                        TokenSaverStatusBadge(
+                            text: isTrickle
+                                ? L("Random 1-by-1 Trickle", "随机逐个轮询 · 最少间隔3分")
+                                : L("Local RPC Only (Default Safe)", "仅本地 RPC · 默认最安全"),
+                            tone: isTrickle ? .warning : .active,
+                            id: "agy-bg-poll-badge"
+                        )
+                    }
+                    Text(L(
+                        "Off by default: background ticks read only the running Antigravity IDE via local 127.0.0.1 RPC (0 Google requests for dormant accounts). When enabled, checks at most 1 random due dormant account per tick (3m min global gap, 15m per-account cooldown, 30m backoff on errors).",
+                        "默认关闭以防风控：后台定时仅通过本地 127.0.0.1 RPC 读取当前 Antigravity IDE（不对休眠账号发 Google 请求）。开启后每轮也最多随机检查 1 个已过冷却的休眠账号（全局至少间隔 3 分钟、单账号 15 分钟冷却、异常退避 30 分钟）。"
+                    ))
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Toggle("", isOn: Binding(
+                    get: { pollingMode == .randomTrickle },
+                    set: { enabled in
+                        let target: AntigravityQuotaPollingMode = enabled ? .randomTrickle : .localOnly
+                        do {
+                            try AntigravityPoolProtectionSettings.setPollingMode(target)
+                            pollingMode = AntigravityPoolProtectionSettings.pollingMode()
+                            poolProtectionError = nil
+                        } catch {
+                            pollingMode = AntigravityPoolProtectionSettings.pollingMode()
+                            poolProtectionError = error.localizedDescription
+                        }
+                    }
+                ))
+                .labelsHidden()
+                .toggleStyle(.switch)
+                .controlSize(.small)
+                .tint(.orange)
+            }
             if !poolProtectionEnabled && poolProtectionResidual {
                 HStack(spacing: 8) {
                     Image(systemName: "exclamationmark.triangle.fill")
@@ -842,7 +869,7 @@ struct AntigravityManagementView: View {
     }
 }
 
-// MARK: - Antigravity Account List Section (Unified Switcher)
+// MARK: - Antigravity Account List Section (Monitor-Only Anti-Ban)
 
 struct AntigravitySubscriptionSection: View {
     let entries: [ProviderAccountEntry]
@@ -851,8 +878,6 @@ struct AntigravitySubscriptionSection: View {
     let storageDisplayPath: String
     let onAddAccount: () -> Void
     let onRestartApp: () -> Void
-    let onAccountSwitched: () -> Void
-    let onShowStatus: (String, Bool) -> Void
 
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var refreshCoordinator: ProviderRefreshCoordinator
@@ -978,8 +1003,8 @@ struct AntigravitySubscriptionSection: View {
             Text(L("No Antigravity accounts connected yet", "尚未连接 Antigravity 账号"))
                 .font(.subheadline.weight(.semibold))
             Text(L(
-                "Add multiple Google Antigravity accounts here to monitor 5-hour / weekly model pools and switch accounts in 1 click without signing in through the browser again.",
-                "在此添加多个 Google Antigravity 账号，即可监控 5 小时/每周模型池配额，并一键切换账号，无需再次打开浏览器登录。"
+                "Add Google Antigravity accounts here to monitor 5-hour / weekly quotas locally and via randomized 1-by-1 checks (IDE account switching is disabled to protect accounts from TOS bans).",
+                "在此添加 Google Antigravity 账号，可通过本地 RPC 与随机逐个检查监控 5 小时/每周配额（已禁用自动切号以保护账号免受 TOS 封禁）。"
             ))
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1206,36 +1231,14 @@ struct AntigravitySubscriptionSection: View {
             if activation.isRemoteViewOnly(entry) {
                 GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
             } else {
-                Toggle("", isOn: Binding(
-                    get: { isActive },
-                    set: { newValue in
-                        if newValue {
-                            do {
-                                try activation.activateAccount(entry: entry)
-                                onAccountSwitched()
-                                onShowStatus(
-                                    L(
-                                        "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。",
-                                        "Đã chuyển sang \(entry.accountPrimaryLabel). Thoát và mở lại Antigravity.app để dùng tài khoản này."
-                                    ),
-                                    false
-                                )
-                            } catch {
-                                onShowStatus(error.localizedDescription, true)
-                            }
-                        } else {
-                            activation.deactivateAccount(entry: entry)
-                            onAccountSwitched()
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.antigravityBrand, isBusy: isRestarting))
-                .disabled(isRestarting)
+                GatewayQuietBadge(
+                    text: isActive
+                        ? L("IDE Active", "当前活跃")
+                        : L("Monitor Only", "仅监控 · 防封")
+                )
                 .help(L(
-                    "Switch Antigravity account in Keychain / state.vscdb without signing in via browser.",
-                    "直接写入 Keychain / state.vscdb 切换 Antigravity 账号，无需再次打开浏览器登录。"
+                    "Antigravity Keychain / state.vscdb switching is disabled to protect Google accounts. Switch inside Antigravity IDE directly.",
+                    "已禁用 Keychain / state.vscdb 自动切号以防 Google 账号封禁，请在 Antigravity IDE 内手动切换。"
                 ))
             }
         }
@@ -1250,44 +1253,6 @@ struct AntigravitySubscriptionSection: View {
                 .stroke(isActive ? Self.antigravityBrand.opacity(0.50) : Color.primary.opacity(0.06), lineWidth: 1)
         )
         .contextMenu {
-            if !activation.isRemoteViewOnly(entry) {
-                Button {
-                    do {
-                        try activation.activateAccount(entry: entry)
-                        onAccountSwitched()
-                        onShowStatus(
-                            L(
-                                "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。",
-                                "Đã chuyển sang \(entry.accountPrimaryLabel). Thoát và mở lại Antigravity.app để dùng tài khoản này."
-                            ),
-                            false
-                        )
-                    } catch {
-                        onShowStatus(error.localizedDescription, true)
-                    }
-                } label: {
-                    Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
-                }
-                .disabled(isRestarting)
-
-                if isAppInstalled {
-                    Button {
-                        do {
-                            try activation.activateAccount(entry: entry)
-                            onAccountSwitched()
-                            onRestartApp()
-                        } catch {
-                            onShowStatus(error.localizedDescription, true)
-                        }
-                    } label: {
-                        Label(L("Switch & Restart Antigravity", "切换并重启 Antigravity"), systemImage: "arrow.clockwise.circle")
-                    }
-                    .disabled(isRestarting)
-                }
-                Divider()
-            }
-
             if let provider = entry.liveProvider {
                 Button {
                     Task { await refreshCoordinator.refreshProviderCardNow(provider) }

@@ -72,7 +72,7 @@ final class ProviderRefreshCoordinator: ObservableObject {
         EnvironmentOverrideModel.shared.scan()
         WarmupController.shared.providerSnapshot = { [weak self] in self?.providers ?? [] }
         WarmupController.shared.autoRefreshIntervalSeconds = { [weak self] in self?.settings.autoRefreshInterval ?? 300 }
-        WarmupController.shared.onWarmupDispatched = { [weak self] in self?.refreshAllProviders() }
+        WarmupController.shared.onWarmupDispatched = { [weak self] in self?.refreshAllProviders(automatic: true) }
         warmupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
             guard let self, self.settings.backendMode == "local" else { return }
             WarmupController.shared.tick(providers: self.providers)
@@ -123,8 +123,8 @@ final class ProviderRefreshCoordinator: ObservableObject {
         }
 
         if settings.autoRefreshInterval > 0 {
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(settings.autoRefreshInterval), repeats: true) { [weak self] _ in
-                self?.refreshAllProviders()
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(settings.autoRefreshInterval) * Double.random(in: 0.85...1.25), repeats: false) { [weak self] _ in
+                self?.refreshAllProviders(automatic: true)
             }
         }
     }
@@ -165,17 +165,21 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     // MARK: - Public refresh API
 
-    func refreshAllProviders() {
+    func refreshAllProviders(automatic: Bool = false) {
         Task { @MainActor in
             if isRefreshingAllProviders {
-                pendingRefreshAfterCurrent = true
+                if !automatic { pendingRefreshAfterCurrent = true }
                 return
             }
             isRefreshingAllProviders = true
-            defer { isRefreshingAllProviders = false }
+            defer { isRefreshingAllProviders = false; setupAutoRefresh() }
+            var useRecentResults = automatic
+            var isAutomatic = automatic
             repeat {
                 pendingRefreshAfterCurrent = false
-                _ = await fetchDashboard()
+                _ = await fetchDashboard(useRecentResults: useRecentResults, automatic: isAutomatic)
+                useRecentResults = false
+                isAutomatic = false
             } while pendingRefreshAfterCurrent
         }
     }
@@ -307,7 +311,7 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     @MainActor
     @discardableResult
-    func fetchDashboard() async -> ProviderRefreshResult {
+    func fetchDashboard(useRecentResults: Bool = false, automatic: Bool = false) async -> ProviderRefreshResult {
         let isInitialLoad = providers.isEmpty && overview == nil
         if isInitialLoad { isLoading = true }
         errorMessage = nil
@@ -325,7 +329,7 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
         let result: ProviderRefreshResult
         if settings.backendMode == "local" {
-            result = await fetchDashboardLocal()
+            result = await fetchDashboardLocal(useRecentResults: useRecentResults, automatic: automatic)
         } else {
             result = await fetchDashboardRemote(showMessageOnFailure: providers.isEmpty)
         }

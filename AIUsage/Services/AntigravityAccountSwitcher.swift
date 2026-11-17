@@ -53,6 +53,29 @@ struct AntigravityIDECandidatePayload: Equatable {
     let accessToken: String
     let refreshToken: String?
     let databasePath: String
+    let expiryDate: Date?
+    let idToken: String?
+    let projectId: String?
+
+    init(
+        email: String?,
+        name: String?,
+        accessToken: String,
+        refreshToken: String?,
+        databasePath: String,
+        expiryDate: Date? = nil,
+        idToken: String? = nil,
+        projectId: String? = nil
+    ) {
+        self.email = email
+        self.name = name
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.databasePath = databasePath
+        self.expiryDate = expiryDate
+        self.idToken = idToken
+        self.projectId = projectId
+    }
 }
 
 struct AntigravitySwitchedIdentity: Equatable {
@@ -299,12 +322,12 @@ enum AntigravityAccountSwitcher {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private static func runSecurityCommand(
+    static func runSecurityCommand(
         arguments: [String],
         stdinString: String? = nil,
-        timeoutSeconds: TimeInterval = 5.0
+        timeoutSeconds: TimeInterval = 60.0,
+        securityPath: String = "/usr/bin/security"
     ) -> (exitCode: Int32, stdout: String)? {
-        let securityPath = "/usr/bin/security"
         guard FileManager.default.isExecutableFile(atPath: securityPath) else { return nil }
 
         let process = Process()
@@ -454,6 +477,9 @@ enum AntigravityAccountSwitcher {
         let priority: Int
         let displayPath: String
         let sourcePath: String
+        let expiryDate: Date?
+        let idToken: String?
+        let projectId: String?
     }
 
     // Authoritative storage resolution shared across detection, IDE import, and default refresh extraction:
@@ -475,7 +501,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: keyring.modifiedAt ?? .distantPast,
                 priority: 3,
                 displayPath: "Keychain (gemini/antigravity)",
-                sourcePath: "Keychain (gemini/antigravity)"
+                sourcePath: "Keychain (gemini/antigravity)",
+                expiryDate: keyring.expiryDate,
+                idToken: keyring.idToken,
+                projectId: keyring.projectId
             ))
         }
 
@@ -490,7 +519,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: mtime,
                 priority: 2,
                 displayPath: "~/.gemini/jetski-standalone-oauth-token",
-                sourcePath: standalonePath
+                sourcePath: standalonePath,
+                expiryDate: standalone.expiryDate,
+                idToken: standalone.idToken,
+                projectId: standalone.projectId
             ))
         }
 
@@ -506,7 +538,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: mtime,
                 priority: 1,
                 displayPath: "~/Library/Application Support/Antigravity/.../state.vscdb",
-                sourcePath: dbPath
+                sourcePath: dbPath,
+                expiryDate: nil,
+                idToken: nil,
+                projectId: nil
             ))
         }
 
@@ -545,9 +580,16 @@ enum AntigravityAccountSwitcher {
         }
     }
 
-    private static func parseStoredTokenJSON(
-        _ data: Data
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, expiryDate: Date?)? {
+    private struct ParsedStoredToken {
+        let account: AntigravityDetectedAccount
+        let accessToken: String
+        let refreshToken: String
+        let expiryDate: Date?
+        let idToken: String?
+        let projectId: String?
+    }
+
+    private static func parseStoredTokenJSON(_ data: Data) -> ParsedStoredToken? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -573,6 +615,10 @@ enum AntigravityAccountSwitcher {
 
         let expiryStr = (token["expiry"] as? String) ?? (token["expired"] as? String)
         let expiryDate = expiryStr.flatMap { parseISO8601($0) }
+        let rawIdToken = ((json["id_token"] as? String) ?? (token["id_token"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawProjectId = ((json["project_id"] as? String) ?? (token["project_id"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let name = email.components(separatedBy: "@").first ?? email
         let detected = AntigravityDetectedAccount(
             email: email,
@@ -580,29 +626,36 @@ enum AntigravityAccountSwitcher {
             hasAccessToken: hasAccess,
             hasRefreshToken: hasRefresh
         )
-        return (detected, access, refresh, expiryDate)
+        return ParsedStoredToken(
+            account: detected,
+            accessToken: access,
+            refreshToken: refresh,
+            expiryDate: expiryDate,
+            idToken: rawIdToken?.isEmpty == false ? rawIdToken : nil,
+            projectId: rawProjectId?.isEmpty == false ? rawProjectId : nil
+        )
     }
 
     private static func detectAccountFromKeyring(
         homeDirectory: String
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, modifiedAt: Date?)? {
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, modifiedAt: Date?, expiryDate: Date?, idToken: String?, projectId: String?)? {
         guard let entry = readKeyringRawEntry(homeDirectory: homeDirectory),
               let jsonData = decodeKeyringSecret(entry.secret),
               let parsed = parseStoredTokenJSON(jsonData) else {
             return nil
         }
         let effectiveDate = entry.modifiedAt ?? parsed.expiryDate?.addingTimeInterval(-3600)
-        return (parsed.account, parsed.accessToken, parsed.refreshToken, effectiveDate)
+        return (parsed.account, parsed.accessToken, parsed.refreshToken, effectiveDate, parsed.expiryDate, parsed.idToken, parsed.projectId)
     }
 
     private static func detectAccountFromStandaloneFile(
         at path: String
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String)? {
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, expiryDate: Date?, idToken: String?, projectId: String?)? {
         guard let data = FileManager.default.contents(atPath: path),
               let parsed = parseStoredTokenJSON(data) else {
             return nil
         }
-        return (parsed.account, parsed.accessToken, parsed.refreshToken)
+        return (parsed.account, parsed.accessToken, parsed.refreshToken, parsed.expiryDate, parsed.idToken, parsed.projectId)
     }
 
     static func extractRefreshToken(
@@ -695,7 +748,10 @@ enum AntigravityAccountSwitcher {
             name: active.account.name,
             accessToken: active.accessToken,
             refreshToken: refreshToken,
-            databasePath: active.sourcePath
+            databasePath: active.sourcePath,
+            expiryDate: active.expiryDate,
+            idToken: active.idToken,
+            projectId: active.projectId
         )
     }
 
@@ -919,7 +975,8 @@ enum AntigravityAccountSwitcher {
         authFileURL: URL,
         fallbackEmail: String? = nil,
         fallbackName: String? = nil,
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        managedAuthPaths: [String] = []
     ) throws -> AntigravitySwitchedIdentity {
         switchMutationLock.lock()
         defer { switchMutationLock.unlock() }
@@ -938,6 +995,16 @@ enum AntigravityAccountSwitcher {
 
         guard !existingDBPaths.isEmpty || hasAppStorage || hasStandaloneToken || hasKeyringToken else {
             throw AntigravitySwitchError.databaseNotFound(primaryDBPath(homeDirectory: homeDirectory))
+        }
+
+        // Capture the outgoing IDE rotation before replacing any live store.
+        if let existingKeyringEntry {
+            try flushLiveKeyringToManagedCopies(
+                secret: existingKeyringEntry.secret,
+                managedAuthPaths: managedAuthPaths,
+                homeDirectory: homeDirectory
+            )
+            parsed = try parseCredentialFile(at: authFileURL, fallbackEmail: fallbackEmail, fallbackName: fallbackName)
         }
 
         // If the stored auth file came from IDE import without a refresh_token, try recovering
@@ -1033,7 +1100,7 @@ enum AntigravityAccountSwitcher {
                 updatedAnyAuthStore = true
                 let backupDBPath = dbPath + ".backup"
                 if FileManager.default.fileExists(atPath: backupDBPath) {
-                    try? injectCredentialIntoDatabase(
+                    try injectCredentialIntoDatabase(
                         at: backupDBPath,
                         credential: parsed,
                         homeDirectory: homeDirectory,
@@ -1088,6 +1155,52 @@ enum AntigravityAccountSwitcher {
             name: parsed.name,
             sourceFilePath: authFileURL.path
         )
+    }
+
+    static func flushLiveKeyringToManagedCopies(
+        secret: String,
+        managedAuthPaths: [String],
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) throws {
+        guard let liveData = decodeKeyringSecret(secret),
+              let live = parseStoredTokenJSON(liveData),
+              let liveEmail = normalizeEmail(live.account.email),
+              !live.accessToken.isEmpty else { return }
+        let sharedPaths = Set([
+            standaloneTokenPath(homeDirectory: homeDirectory),
+            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
+        ].map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        for path in Set(managedAuthPaths.map { NSString(string: $0).expandingTildeInPath }) {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            guard !sharedPaths.contains(url.path),
+                  let original = FileManager.default.contents(atPath: url.path),
+                  var root = (try? JSONSerialization.jsonObject(with: original)) as? [String: Any],
+                  let managed = try? parseCredentialFile(at: url, fallbackEmail: nil, fallbackName: nil),
+                  normalizeEmail(managed.email) == liveEmail else { continue }
+            let recoveredRefresh = managed.refreshToken.isEmpty && !live.refreshToken.isEmpty
+            let newerAccess = live.expiryDate.map { Int64($0.timeIntervalSince1970) > managed.expirySeconds } ?? false
+            guard recoveredRefresh || newerAccess else { continue }
+            let nestedKey = root["token"] is [String: Any] ? "token" : root["tokens"] is [String: Any] ? "tokens" : nil
+            var token = nestedKey.flatMap { root[$0] as? [String: Any] } ?? root
+            if newerAccess {
+                token["access_token"] = live.accessToken
+                if let expiry = live.expiryDate {
+                    let iso = ISO8601DateFormatter().string(from: expiry)
+                    token["expiry"] = iso
+                    token["expired"] = iso
+                    token["expiry_date"] = Int64(expiry.timeIntervalSince1970 * 1000)
+                }
+            }
+            if !live.refreshToken.isEmpty { token["refresh_token"] = live.refreshToken }
+            if let nestedKey { root[nestedKey] = token } else { root = token }
+            if let idToken = live.idToken, !idToken.isEmpty { root["id_token"] = idToken }
+            let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            // Do not overwrite a provider refresh that raced our read.
+            guard FileManager.default.contents(atPath: url.path) == original else {
+                throw AntigravitySwitchError.databaseWriteFailed("Managed Antigravity credentials changed during outgoing token backfill. Retry the switch.")
+            }
+            try updated.write(to: url, options: .atomic)
+        }
     }
 
     private static func backfillRefreshTokenInAuthFile(at url: URL, refreshToken: String) {
@@ -1207,7 +1320,8 @@ enum AntigravityAccountSwitcher {
     private static func buildStoredTokenPayload(
         credential: ParsedCredential,
         writerID: String,
-        includeExtendedFields: Bool
+        includeExtendedFields: Bool,
+        includeIDToken: Bool = true
     ) -> [String: Any] {
         let expiryISO = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: TimeInterval(credential.expirySeconds))
@@ -1228,9 +1342,9 @@ enum AntigravityAccountSwitcher {
         }
         if includeExtendedFields {
             payload["email"] = credential.email
-            if let idToken = credential.idToken {
-                payload["id_token"] = idToken
-            }
+        }
+        if (includeExtendedFields || includeIDToken), let idToken = credential.idToken {
+            payload["id_token"] = idToken
         }
         return payload
     }
@@ -1239,22 +1353,26 @@ enum AntigravityAccountSwitcher {
         credential: ParsedCredential,
         writerID: String
     ) throws -> String {
-        // Keychain StoredToken JSON must be compact (no .prettyPrinted and no raw id_token JWT)
-        // so the go-keyring `security -i` command remains well below 4096 bytes.
-        let payload = buildStoredTokenPayload(
-            credential: credential,
-            writerID: writerID,
-            includeExtendedFields: false
-        )
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
-            throw AntigravitySwitchError.databaseWriteFailed("Could not encode Keychain StoredToken JSON.")
+        // Prefer retaining compact id_token in Keychain (~2.3 KB with go-keyring-base64:),
+        // dropping it automatically if an unusually large JWT would exceed the 3800-byte security -i budget.
+        let candidates: [Bool] = credential.idToken != nil ? [true, false] : [false]
+        for includeIDToken in candidates {
+            let payload = buildStoredTokenPayload(
+                credential: credential,
+                writerID: writerID,
+                includeExtendedFields: false,
+                includeIDToken: includeIDToken
+            )
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+                throw AntigravitySwitchError.databaseWriteFailed("Could not encode Keychain StoredToken JSON.")
+            }
+            let encodedSecret = encodeKeyringSecret(jsonData).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !encodedSecret.isEmpty, encodedSecret.utf8.count <= 3800,
+               !encodedSecret.contains("\"") && !encodedSecret.contains("\n") && !encodedSecret.contains("\r") {
+                return encodedSecret
+            }
         }
-        let encodedSecret = encodeKeyringSecret(jsonData).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !encodedSecret.isEmpty, encodedSecret.utf8.count <= 3800,
-              !encodedSecret.contains("\"") && !encodedSecret.contains("\n") && !encodedSecret.contains("\r") else {
-            throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
-        }
-        return encodedSecret
+        throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
     }
 
     static func syncAppStorageFile(email: String, homeDirectory: String) {
@@ -2260,6 +2378,40 @@ enum AntigravityAccountSwitcher {
             return false
         }
         return process.terminationStatus == 0
+    }
+
+    /// Detects an external standalone Antigravity CLI daemon (`agy --hub ... antigravity`)
+    /// so we refuse to race Keychain/SQLite mutations behind it.
+    static func hasExternalHubProcess() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "args="]
+        process.terminationHandler = { _ in }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return hasExternalHubProcess(inProcessListOutput: String(decoding: data, as: UTF8.self))
+    }
+
+    static func hasExternalHubProcess(inProcessListOutput output: String) -> Bool {
+        output.split(separator: "\n").contains { rawLine in
+            let line = String(rawLine)
+            guard !line.contains("/Antigravity.app/") else { return false }
+            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            let hasHubBinary = tokens.contains {
+                let name = URL(fileURLWithPath: $0).lastPathComponent
+                return name == "agy" || name.hasPrefix("agy-")
+            }
+            let hasHubFlag = tokens.contains("--hub")
+            let targetsAntigravity = tokens.contains {
+                $0 == "antigravity" || $0.localizedCaseInsensitiveContains("antigravity")
+            }
+            return hasHubBinary && hasHubFlag && targetsAntigravity
+        }
     }
 
     private static func terminateOrphanedLanguageServer() {

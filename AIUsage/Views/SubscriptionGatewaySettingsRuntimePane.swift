@@ -972,6 +972,8 @@ struct SubscriptionGatewaySettingsProtectionPane: View {
                         set: { enabled in
                             do {
                                 try AntigravityPoolProtectionSettings.setEnabled(enabled, homeDirectory: tokenSaverHome.path)
+                                let runtime = tokenSaverHome.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI")
+                                try CLIProxyConfigStore(paths: CLIProxyPaths(root: runtime)).syncPoolProtectionPause(enabled: enabled)
                                 reloadPoolProtectionState()
                             } catch {
                                 poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled(homeDirectory: tokenSaverHome.path)

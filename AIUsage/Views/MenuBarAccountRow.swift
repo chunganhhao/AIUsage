@@ -306,20 +306,18 @@ struct MenuBarAccountRow: View {
     }
 
     private func performActivation() {
-        do {
-            try activationManager.activateAccount(entry: entry)
-            if (providerId == "codex" || providerId == "antigravity"), let onRequestRestartConfirmation {
-                onRequestRestartConfirmation(entry)
-            } else {
+        Task { @MainActor in
+            do {
+                guard try await activationManager.activateAccount(entry: entry) else { return }
                 withAnimation(.easeInOut(duration: 0.3)) {
                     activationSuccess = true
                     activationMessage = L("Switched to ", "已切换至 ") + primaryLabel
                 }
-            }
-        } catch {
-            withAnimation(.easeInOut(duration: 0.3)) {
-                activationSuccess = false
-                activationMessage = L("Switch failed", "切换失败")
+            } catch {
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    activationSuccess = false
+                    activationMessage = SensitiveDataRedactor.redactedMessage(for: error)
+                }
             }
         }
     }

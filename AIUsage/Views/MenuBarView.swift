@@ -277,7 +277,7 @@ struct MenuBarView: View {
     }
 
     func presentRestartConfirmation(for entry: ProviderAccountEntry) {
-        guard entry.providerId == "codex" || entry.providerId == "antigravity" else { return }
+        guard entry.providerId == "codex" else { return }
         withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
             openPanelTrack = nil
             pendingRestartPrompt = MenuBarRestartPrompt(entry: entry)
@@ -290,16 +290,12 @@ struct MenuBarView: View {
         Task { @MainActor in
             let ok: Bool
             var restartFailure: String?
-            if prompt.providerId == "codex" {
-                do {
-                    try await ProviderActivationManager.shared.restartCodexApp(fallbackEntry: prompt.entry)
-                    ok = true
-                } catch {
-                    ok = false
-                    restartFailure = error.localizedDescription
-                }
-            } else {
-                ok = await ProviderActivationManager.shared.restartAntigravityApp(fallbackEntry: prompt.entry)
+            do {
+                try await ProviderActivationManager.shared.restartCodexApp(fallbackEntry: prompt.entry)
+                ok = true
+            } catch {
+                ok = false
+                restartFailure = error.localizedDescription
             }
             isConfirmingRestart = false
             withAnimation(.easeInOut(duration: 0.2)) {

@@ -1,6 +1,8 @@
 import Foundation
 import CoreFoundation
 import os
+import Darwin
+import AppKit
 
 // MARK: - Codex Provider
 // Reads ~/.codex/auth.json, refreshes OAuth
@@ -15,6 +17,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
     let homeDirectory: String
     let timeoutSeconds: Double
+    var desktopIsRunning: @Sendable () -> Bool = {
+        NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
+            .contains { !$0.isTerminated }
+    }
     static let refreshURL = "https://auth.openai.com/oauth/token"
     static let oauthClientId = "app_EMoamEEZ73f0CkXaXp7hrann"
     static let defaultBaseURL = "https://chatgpt.com/backend-api/"
@@ -37,6 +43,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     public func fetchUsage(with credential: AccountCredential) async throws -> ProviderUsage {
+        try await CodexQuotaPollSerializer.shared.run(timeout: timeoutSeconds) {
+            try await self.fetchCredentialUsage(with: credential)
+        }
+    }
+
+    private func fetchCredentialUsage(with credential: AccountCredential) async throws -> ProviderUsage {
         let usageURL = try resolveUsageURL()
         var usage = try await withCredential(credential) { creds, source in
             let response = try await requestUsage(creds: creds, url: usageURL)
@@ -110,7 +122,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         )
         // 有其他副本时每次都在锁内对齐一次（不需要刷新时不发网络请求），
         // 已经分叉的副本不必等到下次刷新才修好。
-        if !creds.isApiKeyMode, creds.needsRefresh || refreshPaths.count > 1 || creds.sameSecondAlternateAccess != nil, let refreshToken = creds.refreshToken {
+        if !creds.isApiKeyMode, !deferProactiveRefresh(creds: creds, paths: refreshPaths),
+           creds.needsRefresh || refreshPaths.count > 1 || creds.sameSecondAlternateAccess != nil, let refreshToken = creds.refreshToken {
             do {
                 let outcome = try await refreshCredentialsOutcome(
                     creds,
@@ -128,6 +141,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 // try its current access token and the authoritative source file
                 // before declaring the credential expired.
                 proactiveRefreshFailure = refreshError
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 proactiveRefreshFailure = CodexCredentialPolicy.refreshTransportFailure(error)
             }
@@ -167,6 +182,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                             credentialFailure = refreshError
                         }
                         break
+                    } catch is CancellationError {
+                        throw CancellationError()
                     } catch {
                         if credentialFailure == nil {
                             credentialFailure = CodexCredentialPolicy.refreshTransportFailure(error)
@@ -340,6 +357,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                 effective = outcome.credentials
                 recoveryRejectedAccess = outcome.rejectedAccessTokens
                 recoveryRejectedRefresh = outcome.rejectedRefreshTokens
+            } catch is CancellationError {
+                throw CancellationError()
             } catch {
                 codexLog.warning("Recovery refresh failed for \(expandedCredential, privacy: .private): \(error.localizedDescription)")
                 throw ProviderError("recovery_refresh_failed", "Source credential refresh failed: \(error.localizedDescription)")
@@ -353,7 +372,9 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                     guard FileManager.default.contents(atPath: expandedCredential) == targetData else {
                         throw ProviderError("account_mismatch", "The auth file changed during recovery.")
                     }
-                    try sourceData.write(to: URL(fileURLWithPath: expandedCredential), options: .atomic)
+                    let targetURL = URL(fileURLWithPath: expandedCredential)
+                    try sourceData.write(to: targetURL, options: .atomic)
+                    CredentialWriteRecorder.current?.record(url: targetURL, data: sourceData)
                 } catch let error as ProviderError {
                     throw error
                 } catch {
@@ -409,6 +430,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     public func fetchAllAccounts() async -> [AccountFetchResult] {
+        await fetchAllAccounts(excludingNativeKeys: [])
+    }
+
+    public func fetchAllAccounts(excludingNativeKeys: Set<String>) async -> [AccountFetchResult] {
         let contexts: [AuthContext]
         do {
             contexts = try resolveAllAuthContexts()
@@ -424,40 +449,19 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             )]
         }
 
-        return await withTaskGroup(of: AccountFetchResult.self) { group in
-            for context in contexts {
-                group.addTask {
-                    let accountId = context.creds.accountId
-                        ?? context.creds.accountEmail
-                        ?? context.url.lastPathComponent
-                    let filePath = context.url.path
-                    do {
-                        let usage = try await fetchForAuthContext(context)
-                        return AccountFetchResult(
-                            accountId: accountId,
-                            accountLabel: context.creds.accountEmail,
-                            result: .success(usage),
-                            sourceFilePath: filePath,
-                            workspaceUserId: context.creds.jwtUserId
-                        )
-                    } catch {
-                        return AccountFetchResult(
-                            accountId: accountId,
-                            accountLabel: context.creds.accountEmail,
-                            result: .failure(error),
-                            sourceFilePath: filePath,
-                            workspaceUserId: context.creds.jwtUserId
-                        )
-                    }
-                }
-            }
-
-            var results: [AccountFetchResult] = []
-            for await result in group {
-                results.append(result)
-            }
-            return results
+        var results: [AccountFetchResult] = []
+        for context in contexts.shuffled() {
+            guard !Task.isCancelled else { break }
+            if let key = CodexAccountIdentity(accountId: context.creds.accountId, userId: context.creds.jwtUserId).nativeKey,
+               excludingNativeKeys.contains(key) { continue }
+            let accountId = context.creds.accountId ?? context.creds.accountEmail ?? context.url.lastPathComponent
+            let result: Result<ProviderUsage, Error>
+            do { result = .success(try await fetchForAuthContext(context)) }
+            catch { result = .failure(error) }
+            results.append(AccountFetchResult(accountId: accountId, accountLabel: context.creds.accountEmail,
+                result: result, sourceFilePath: context.url.path, workspaceUserId: context.creds.jwtUserId))
         }
+        return results
     }
 
     // MARK: - Credentials
@@ -768,6 +772,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     ) async {
         let key = Self.refreshLockKey(creds: validated, path: paths.first, refreshToken: validated.refreshToken ?? "")
         _ = try? await CodexOAuthRefreshSerializer.shared.run(key: key) {
+            let lockFD = try await self.acquireRefreshFileLock(paths: paths)
+            defer { Self.releaseRefreshFileLock(lockFD) }
             let unique = self.uniqueRefreshPaths(paths)
             guard let copies = try? self.sameAccountCopies(of: validated, at: unique) else { return }
             self.syncStaleCopies(
@@ -806,6 +812,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         rejectedRefreshTokens: Set<String>
     ) async throws -> RefreshOutcome {
         let paths = uniqueRefreshPaths(paths)
+        let lockFD = try await acquireRefreshFileLock(paths: paths)
+        defer { Self.releaseRefreshFileLock(lockFD) }
         var copies = try sameAccountCopies(of: creds, at: paths)
         var rejectedAccess = rejectedAccessTokens
         var rejectedRefresh = rejectedRefreshTokens
@@ -1004,6 +1012,56 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         return unique
     }
 
+    // Advisory only: clients that do not take this lock can still rotate tokens.
+    private func acquireRefreshFileLock(paths: [String]) async throws -> Int32? {
+        guard !paths.isEmpty else { return nil }
+        let native = "\(homeDirectory)/.codex/auth.json"
+        let nativePath = AccountCredentialStore.normalizedAuthFilePath(native)
+        let nativeIsShared = paths.contains { AccountCredentialStore.normalizedAuthFilePath($0) == nativePath }
+        // Linked copies may arrive in a different order in another process.
+        let bases = (nativeIsShared ? [native] : paths).map {
+            URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path
+        }
+        let lockBase = bases.sorted()[0]
+        let fd = open(lockBase + ".lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        guard fd >= 0 else {
+            throw ProviderError("refresh_lock_failed", "Cannot open the Codex credential refresh lock.")
+        }
+        let deadline = Date().addingTimeInterval(timeoutSeconds)
+        do {
+            while true {
+                try Task.checkCancellation()
+                if flock(fd, LOCK_EX | LOCK_NB) == 0 { return fd }
+                guard errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR else {
+                    throw ProviderError("refresh_lock_failed", "Cannot acquire the Codex credential refresh lock.")
+                }
+                guard Date() < deadline else {
+                    throw ProviderError("refresh_lock_timeout", "Another process is refreshing Codex credentials. Try again shortly.")
+                }
+                try await Task.sleep(nanoseconds: 50_000_000)
+            }
+        } catch {
+            close(fd)
+            throw error
+        }
+    }
+
+    private static func releaseRefreshFileLock(_ fd: Int32?) {
+        guard let fd else { return }
+        _ = flock(fd, LOCK_UN)
+        close(fd)
+    }
+
+    func deferProactiveRefresh(creds: Credentials, paths: [String]) -> Bool {
+        let native = "\(homeDirectory)/.codex/auth.json"
+        let normalizedNative = AccountCredentialStore.normalizedAuthFilePath(native)
+        guard paths.contains(where: { AccountCredentialStore.normalizedAuthFilePath($0) == normalizedNative }),
+              desktopIsRunning(), let live = try? loadCredentials(from: native) else { return false }
+        // The eight-day heuristic is not a server rejection. Let Desktop own
+        // rotation until the current access token actually fails usage.
+        return canReuseCredentials(creds, live)
+    }
+
     private static func refreshLockKey(creds: Credentials, path: String?, refreshToken: String) -> String {
         CodexOAuthRefreshSerializer.lockKey(
             accountId: creds.accountId,
@@ -1167,7 +1225,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         if let data = try? JSONSerialization.data(withJSONObject: json, options: [.prettyPrinted]) {
             guard FileManager.default.contents(atPath: path) == originalData else { return }
-            try? data.write(to: URL(fileURLWithPath: path), options: .atomic)
+            let targetURL = URL(fileURLWithPath: path)
+            if (try? data.write(to: targetURL, options: .atomic)) != nil {
+                CredentialWriteRecorder.current?.record(url: targetURL, data: data)
+            }
         }
     }
 
@@ -1215,6 +1276,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     private func fetchForAuthContext(_ authContext: AuthContext) async throws -> ProviderUsage {
+        try await CodexQuotaPollSerializer.shared.run(timeout: timeoutSeconds) {
+            try await self.performFetchForAuthContext(authContext)
+        }
+    }
+
+    private func performFetchForAuthContext(_ authContext: AuthContext) async throws -> ProviderUsage {
         var creds = authContext.creds
         guard !creds.hasInternalIdentityConflict else {
             throw ProviderError("account_mismatch", "The auth file contains conflicting Codex account claims. Reconnect this account.")
@@ -1224,7 +1291,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         var rejectedAccessTokens = Set<String>()
         var rejectedRefreshTokens = Set<String>()
 
-        if !creds.isApiKeyMode, creds.needsRefresh, let refreshToken = creds.refreshToken {
+        if !creds.isApiKeyMode, creds.needsRefresh,
+           !deferProactiveRefresh(creds: creds, paths: refreshPaths), let refreshToken = creds.refreshToken {
             let outcome = try await refreshCredentialsOutcome(
                 creds,
                 refreshToken: refreshToken,
@@ -1282,6 +1350,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
                         credentialFailure = refreshError
                     }
                     break
+                } catch is CancellationError {
+                    throw CancellationError()
                 } catch {
                     if credentialFailure == nil {
                         credentialFailure = CodexCredentialPolicy.refreshTransportFailure(error)
@@ -1778,10 +1848,15 @@ actor CodexOAuthRefreshSerializer {
         let previous = tails[key]
         let current = Task {
             await previous?.value
+            try Task.checkCancellation()
             return try await operation()
         }
         tails[key] = Task { _ = try? await current.value }
-        return try await current.value
+        return try await withTaskCancellationHandler(operation: {
+            try await current.value
+        }, onCancel: {
+            current.cancel()
+        })
     }
 }
 
@@ -1790,5 +1865,28 @@ extension ProviderUsage {
     var accountId: String? {
         get { extra["accountId"]?.value as? String }
         set { extra["accountId"] = newValue.map { AnyCodable($0) } }
+    }
+}
+
+/// One quota lane across native discovery and managed credentials, including
+/// separate ProviderEngine instances. OAuth's account lock has a different job.
+private actor CodexQuotaPollSerializer {
+    static let shared = CodexQuotaPollSerializer()
+    private var tail: Task<Void, Never>?
+    private var finishedAt: Date?
+    func run(timeout: Double, operation: @escaping @Sendable () async throws -> ProviderUsage) async throws -> ProviderUsage {
+        let previous = tail
+        let current = Task {
+            await previous?.value
+            try Task.checkCancellation()
+            if let finishedAt = self.finishedAt {
+                let delay = Double.random(in: 0.8...2.5) - Date().timeIntervalSince(finishedAt)
+                if delay > 0 { try await Task.sleep(for: .seconds(delay)) }
+            }
+            defer { self.finishedAt = Date() }
+            return try await withTimeout(seconds: timeout) { try await operation() }
+        }
+        tail = Task { _ = try? await current.value }
+        return try await withTaskCancellationHandler { try await current.value } onCancel: { current.cancel() }
     }
 }

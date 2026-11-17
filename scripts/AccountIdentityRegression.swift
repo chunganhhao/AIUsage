@@ -172,6 +172,7 @@ struct AccountIdentityRegression {
 
         // R1: 批量删除部分失败时，回调与返回值仅包含真正删除成功的账号（C），保留失败账号（B）且不清理托管文件。
         ProviderManagedImportStore.cleanupInvocations = 0
+        ProviderManagedImportStore.deletedCleanupCredentialIDs = []
         AccountCredentialStore.shared.failedDeleteIDs = ["b"]
         var callbackDeletedIDs: [String] = []
         let returnedDeleted = store.deleteAccounts([entry(liveB, store: store), entry(liveC, store: store)]) { deletedEntries in
@@ -194,8 +195,9 @@ struct AccountIdentityRegression {
         }
         check(callbackDeletedIDs == [liveB.id] && remainingDeleted.map(\.id) == [liveB.id],
               "R1: 重试删除 B 成功后回调仅传递 B")
-        check(ProviderManagedImportStore.cleanupInvocations == 1,
-              "R1: 全部请求凭据删除成功后正常清理托管导入")
+        check(ProviderManagedImportStore.cleanupInvocations == 1
+              && ProviderManagedImportStore.deletedCleanupCredentialIDs == ["b"],
+              "R1: 全部请求凭据删除成功后仅针对被删凭据触发托管导入清理")
         check(Set(store.accountRegistry.filter { !$0.isHidden }.compactMap(\.credentialId)) == ["a", "personal"], "批量删除仅移除选中的成员与空间")
         check(Set(AccountCredentialStore.shared.credentials.map(\.id)) == ["a", "personal"], "批量删除保留未选中凭据")
 
@@ -407,6 +409,20 @@ struct AccountIdentityRegression {
               "FIX-03: authorization URL includes code_challenge_method=S256")
         check(AntigravityLoginCoordinator.queryParameter("state", in: authItems) == .single("state-123"),
               "FIX-03: authorization URL preserves state")
+        let grantedScopes = Set((AntigravityLoginCoordinator.queryParameter("scope", in: authItems) == .single("") ? "" : authItems.first(where: { $0.name == "scope" })?.value ?? "")
+            .split(separator: " ").map(String.init))
+        for requiredScope in [
+            "openid",
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs",
+            "https://www.googleapis.com/auth/aicode"
+        ] {
+            check(grantedScopes.contains(requiredScope),
+                  "AGY OAuth scope includes \(requiredScope)")
+        }
 
         let tokenReq = AntigravityLoginCoordinator.makeTokenRequest(
             clientId: "client-id-1",
@@ -1274,6 +1290,7 @@ struct AccountIdentityRegression {
             "access_token": "ya29.haindl_access",
             "refresh_token": "1//haindl_refresh",
             "id_token": sampleIDToken,
+            "project_id": "proj-haindl",
             "expiry_date": 1_893_456_000_000
         ]).write(to: haindlAuthFile)
 
@@ -1281,6 +1298,33 @@ struct AccountIdentityRegression {
         let writtenScope = (try? String(contentsOfFile: scopePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
         check(writtenScope == "uc292414f69fafb89",
               "AGY 2.0 R7: switchAccount writes u<sha256(sub)[:16]> to credential-user-scope when id_token is present")
+        let importedWithMetadata = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: scopeHome.path)
+        check(importedWithMetadata?.idToken == sampleIDToken
+                && importedWithMetadata?.projectId == "proj-haindl"
+                && importedWithMetadata?.expiryDate.map { Int64($0.timeIntervalSince1970) } == 1_893_456_000,
+              "AGY 2.0: compact Keychain StoredToken and IDE discovery preserve id_token, project_id, and real expiry")
+        let giantIDToken = "\(jwtHeader).\(jwtPayload)." + String(repeating: "z", count: 4000)
+        let oversizedCompactAuthFile = scopeHome.appendingPathComponent("oversized_compact_id_token.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "oversized@gmail.com",
+            "access_token": "ya29.over_access",
+            "refresh_token": "1//over_refresh",
+            "id_token": giantIDToken
+        ]).write(to: oversizedCompactAuthFile)
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: oversizedCompactAuthFile, homeDirectory: scopeHome.path)
+        let oversizedImported = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: scopeHome.path)
+        check(oversizedImported?.email == "oversized@gmail.com" && oversizedImported?.idToken == nil,
+              "AGY 2.0: oversized id_token gracefully omitted from compact Keychain StoredToken under 3800B limit")
+        check(AntigravityAccountSwitcher.hasExternalHubProcess(inProcessListOutput: """
+              123 /Applications/Antigravity.app/Contents/Resources/bin/language_server --app_data_dir antigravity
+              456 /Users/apple/.gemini/bin/agy --hub --app_data_dir antigravity
+              """)
+                && !AntigravityAccountSwitcher.hasExternalHubProcess(inProcessListOutput: """
+                   123 /Applications/Antigravity.app/Contents/Resources/bin/language_server --app_data_dir antigravity
+                   """),
+              "AGY Switcher: detects external agy --hub daemon while ignoring Antigravity.app")
+        // Re-apply haindl8799 cleanly for restart test below
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
 
         // Simulate running Electron + language_server clobbering Keyring, credential-user-scope, and app_storage.json on quit,
         // and verify restartAntigravityApp's reapplyBeforeRelaunch hook restores all stores after termination and before relaunch.

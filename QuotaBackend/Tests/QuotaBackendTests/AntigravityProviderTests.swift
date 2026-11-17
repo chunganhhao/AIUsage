@@ -114,6 +114,26 @@ final class AntigravityProviderTests: XCTestCase {
         super.tearDown()
     }
 
+    func testUsesDailySummaryWithoutProjectOmittingPlaceholder() async throws {
+        StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"free","name":"Free"}}"#)
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
+
+        _ = try await provider.fetchUsage(with: makeCredential(withProjectStub: false))
+
+        XCTAssertEqual(StubURLProtocol.lastRequest(to: Self.dailySummary)?.jsonBody as? [String: String], [:])
+    }
+
+    func testLoadCodeAssistFallsBackToProdOnServerError() async throws {
+        StubURLProtocol.respond(Self.loadCodeAssist, status: 500, body: "{}")
+        StubURLProtocol.respond(Self.prodLoadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-fallback"}"#)
+        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
+
+        let usage = try await provider.fetchUsage(with: makeCredential(withProjectStub: false))
+
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.prodLoadCodeAssist, Self.dailySummary])
+        XCTAssertEqual(usage.extra["projectId"]?.value as? String, "proj-fallback")
+    }
+
     func testUsesDailySummaryWithAccountProject() async throws {
         StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
 
@@ -131,14 +151,27 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertEqual(summary.headline.secondary, "lowest remaining window")
     }
 
-    func testFallsBackToProdSummaryWhenDailyIsForbidden() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 403, body: #"{"error":{"code":403}}"#)
+    func testFallsBackToProdSummaryWhenDailyReturnsNotFound() async throws {
+        StubURLProtocol.respond(Self.dailySummary, status: 404, body: #"{"error":{"code":404}}"#)
         StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
 
         let usage = try await provider.fetchUsage(with: makeCredential())
 
         XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
         XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "groups")
+    }
+
+    func testForbiddenSummaryDoesNotFallBack() async throws {
+        StubURLProtocol.respond(Self.dailySummary, status: 403, body: #"{"error":{"code":403}}"#)
+        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
+
+        do {
+            _ = try await provider.fetchUsage(with: makeCredential())
+            XCTFail("Expected forbidden")
+        } catch let error as ProviderError {
+            XCTAssertEqual(error.code, "forbidden")
+        }
+        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary])
     }
 
     func testFallsBackToProdSummaryWhenDailyHasNoUsableBuckets() async throws {
@@ -153,7 +186,7 @@ final class AntigravityProviderTests: XCTestCase {
 
     /// 免费账号拿不到分组额度时仍要显示旧的按模型配额，而不是直接报错。
     func testFallsBackToLegacyModelsWhenNoSummaryIsAvailable() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 403, body: "{}")
+        StubURLProtocol.respond(Self.dailySummary, status: 404, body: "{}")
         StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
         StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
         {"models":{"gemini-3-pro":{"displayName":"Gemini 3 Pro","modelProvider":"GOOGLE",
@@ -174,7 +207,7 @@ final class AntigravityProviderTests: XCTestCase {
 
     /// 旧接口同样按 proto3 省略零值：只有 resetTime 的模型是用尽（0%），不能被丢掉；两者都没有的才跳过。
     func testLegacyModelWithoutFractionButWithResetIsExhausted() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 403, body: "{}")
+        StubURLProtocol.respond(Self.dailySummary, status: 404, body: "{}")
         StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
         StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
         {"models":{
@@ -209,7 +242,8 @@ final class AntigravityProviderTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private static let loadCodeAssist = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+    private static let loadCodeAssist = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
+    private static let prodLoadCodeAssist = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
     private static let dailySummary = "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
     private static let prodSummary = "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
     private static let legacyModels = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
@@ -231,7 +265,7 @@ final class AntigravityProviderTests: XCTestCase {
         (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
     }
 
-    private func makeCredential() throws -> AccountCredential {
+    private func makeCredential(withProjectStub: Bool = true) throws -> AccountCredential {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("antigravity-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
@@ -239,7 +273,9 @@ final class AntigravityProviderTests: XCTestCase {
 
         let authFile = directory.appendingPathComponent("antigravity-user@example.com.json")
         try Data(#"{"access_token":"test-token","email":"user@example.com"}"#.utf8).write(to: authFile)
-        StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-123"}"#)
+        if withProjectStub {
+            StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-123"}"#)
+        }
         return AccountCredential(providerId: "antigravity", authMethod: .authFile, credential: authFile.path)
     }
 }
