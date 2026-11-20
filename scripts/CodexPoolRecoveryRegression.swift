@@ -35,7 +35,7 @@ import Foundation
         let endpoint = "https://chatgpt.com/backend-api/wham/usage"
         let credential = AccountCredential(providerId: "codex", accountLabel: "recovery@example.test", authMethod: .authFile,
             credential: auth.path, metadata: ["accountId": "recovery-workspace", "userId": "recovery-user"])
-        let provider = CodexProvider(homeDirectory: home.path)
+        let provider = CodexProvider(homeDirectory: home.path, allowCPACircuitBreakerMutation: true)
         func fetch(_ response: [String: Any]) async throws -> ProviderUsage {
             let body = String(decoding: try JSONSerialization.data(withJSONObject: response), as: UTF8.self)
             StubURLProtocol.respond(endpoint, body: body)

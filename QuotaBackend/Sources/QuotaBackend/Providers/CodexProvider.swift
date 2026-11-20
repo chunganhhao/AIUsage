@@ -17,6 +17,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
     let homeDirectory: String
     let timeoutSeconds: Double
+    private let allowCPACircuitBreakerMutation: Bool
     var desktopIsRunning: @Sendable () -> Bool = {
         NSRunningApplication.runningApplications(withBundleIdentifier: "com.openai.codex")
             .contains { !$0.isTerminated }
@@ -35,6 +36,17 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     ) {
         self.homeDirectory = homeDirectory
         self.timeoutSeconds = timeoutSeconds
+        self.allowCPACircuitBreakerMutation = false
+    }
+
+    init(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        timeoutSeconds: Double = 20,
+        allowCPACircuitBreakerMutation: Bool
+    ) {
+        self.homeDirectory = homeDirectory
+        self.timeoutSeconds = timeoutSeconds
+        self.allowCPACircuitBreakerMutation = allowCPACircuitBreakerMutation
     }
 
     public func fetchUsage() async throws -> ProviderUsage {
@@ -1797,6 +1809,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
     }
 
     private func applySmartCircuitBreaker(at fileURL: URL, usage: ProviderUsage, email: String?) -> CircuitBreakerResult? {
+        // shortcut: managed CPA subscriptions are paused (§41.3/§42); never mutate legacy CLIProxyAPI/auth in production.
+        guard allowCPACircuitBreakerMutation else { return nil }
         guard CodexPoolProtectionSettings.isEnabled(homeDirectory: homeDirectory) else { return nil }
         let configuredThreshold = CodexPoolProtectionSettings.threshold(homeDirectory: homeDirectory)
         let windowKeys = usage.extra["codexQuotaWindowKeys"]?.value as? [String: String] ?? [:]

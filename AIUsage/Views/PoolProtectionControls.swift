@@ -3,6 +3,7 @@ import QuotaBackend
 
 struct CodexPoolProtectionControls: View {
     var home: URL = FileManager.default.homeDirectoryForCurrentUser
+    var isAvailable: Bool = false
     @State private var enabled = false
     @State private var threshold = 3.0
     @State private var failure: String?
@@ -11,12 +12,20 @@ struct CodexPoolProtectionControls: View {
             Toggle("Codex Pool Protection (opt-in)", isOn: Binding(get: { enabled }, set: { save($0, threshold) }))
                 .toggleStyle(.switch)
                 .tint(.accentColor)
+                .disabled(!isAvailable)
                 .accessibilityIdentifier("codex-pool-protection")
             Picker("Pause threshold", selection: Binding(get: { threshold }, set: { save(enabled, $0) })) {
                 ForEach([1.0, 3.0, 5.0], id: \.self) { Text("\(Int($0))%").tag($0) }
-            }.pickerStyle(.menu)
-            Text("Off by default. Only Codex credentials are affected. Turning off restores breaker-owned pauses, never manually paused accounts.")
-                .font(.caption).foregroundStyle(.secondary)
+            }
+            .pickerStyle(.menu)
+            .disabled(!isAvailable)
+            Text(
+                isAvailable
+                    ? "Off by default. Only Codex credentials are affected. Turning off restores breaker-owned pauses, never manually paused accounts."
+                    : "Paused while managed CPA is held off; saved CPA credentials are left untouched."
+            )
+            .font(.caption)
+            .foregroundStyle(.secondary)
             if let failure { Text(failure).font(.caption).foregroundStyle(.red) }
         }.onAppear { reload() }
     }
@@ -25,6 +34,7 @@ struct CodexPoolProtectionControls: View {
         threshold = CodexPoolProtectionSettings.threshold(homeDirectory: home.path)
     }
     private func save(_ enabled: Bool, _ threshold: Double) {
+        guard isAvailable else { return }
         do {
             try CodexPoolProtectionSettings.setEnabled(enabled, threshold: threshold, homeDirectory: home.path)
             failure = nil
