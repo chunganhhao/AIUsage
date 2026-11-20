@@ -96,6 +96,19 @@ struct AntigravityLocalQuotaReader: Sendable {
         ) else { return nil }
 
         let payload = (summary["response"] as? [String: Any]) ?? summary
+        let embeddedEmails: [String?] = [
+            summary["email"] as? String,
+            payload["email"] as? String,
+            (summary["userStatus"] as? [String: Any])?["email"] as? String,
+            (payload["userStatus"] as? [String: Any])?["email"] as? String
+        ]
+        for rawEmbedded in embeddedEmails {
+            if let embedded = rawEmbedded?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !embedded.isEmpty,
+               embedded != lhs {
+                return nil
+            }
+        }
         guard let models = AntigravityProvider.parseQuotaSummaryPayload(payload), !models.isEmpty else {
             return nil
         }
@@ -210,14 +223,21 @@ struct AntigravityLocalQuotaReader: Sendable {
         return String(decoding: output.get(), as: UTF8.self)
     }
 
-    private final class LoopbackTrustDelegate: NSObject, URLSessionDelegate {
+    private final class LoopbackNoRedirectDelegate: NSObject, URLSessionTaskDelegate {
+        let trustAllLoopbackHTTPS: Bool
+
+        init(trustAllLoopbackHTTPS: Bool) {
+            self.trustAllLoopbackHTTPS = trustAllLoopbackHTTPS
+        }
+
         func urlSession(
             _ session: URLSession,
             didReceive challenge: URLAuthenticationChallenge,
             completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void
         ) {
             let space = challenge.protectionSpace
-            guard space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+            guard trustAllLoopbackHTTPS,
+                  space.authenticationMethod == NSURLAuthenticationMethodServerTrust,
                   space.host == "127.0.0.1" || space.host == "::1",
                   let trust = space.serverTrust else {
                 completionHandler(.performDefaultHandling, nil)
@@ -225,14 +245,38 @@ struct AntigravityLocalQuotaReader: Sendable {
             }
             completionHandler(.useCredential, URLCredential(trust: trust))
         }
+
+        func urlSession(
+            _ session: URLSession,
+            task: URLSessionTask,
+            willPerformHTTPRedirection response: HTTPURLResponse,
+            newRequest request: URLRequest,
+            completionHandler: @escaping (URLRequest?) -> Void
+        ) {
+            completionHandler(nil)
+        }
     }
+
+    private static let loopbackHTTPSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.requestCachePolicy = .reloadIgnoringLocalCacheData
+        return URLSession(configuration: config, delegate: LoopbackNoRedirectDelegate(trustAllLoopbackHTTPS: false), delegateQueue: nil)
+    }()
 
     private static let loopbackHTTPSSession: URLSession = {
         let config = URLSessionConfiguration.ephemeral
         config.urlCache = nil
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
-        return URLSession(configuration: config, delegate: LoopbackTrustDelegate(), delegateQueue: nil)
+        return URLSession(configuration: config, delegate: LoopbackNoRedirectDelegate(trustAllLoopbackHTTPS: true), delegateQueue: nil)
     }()
+
+    private static func isSameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        lhs.scheme?.lowercased() == rhs.scheme?.lowercased()
+            && lhs.host?.lowercased() == rhs.host?.lowercased()
+            && (lhs.port ?? (lhs.scheme?.lowercased() == "https" ? 443 : 80))
+                == (rhs.port ?? (rhs.scheme?.lowercased() == "https" ? 443 : 80))
+    }
 
     private static func defaultPerformRPC(
         baseURL: URL,
@@ -240,6 +284,7 @@ struct AntigravityLocalQuotaReader: Sendable {
         csrfToken: String,
         body: [String: Any]
     ) async -> [String: Any]? {
+        guard baseURL.host == "127.0.0.1" || baseURL.host == "::1" else { return nil }
         let url = baseURL.appendingPathComponent(methodPath)
         var request = QuotaHTTP.request(url: url, timeout: 1.5)
         request.httpMethod = "POST"
@@ -248,11 +293,12 @@ struct AntigravityLocalQuotaReader: Sendable {
         request.setValue(csrfToken, forHTTPHeaderField: "x-codeium-csrf-token")
         request.httpBody = try? JSONSerialization.data(withJSONObject: body)
 
-        let session: URLSession = QuotaHTTP.sessionOverride
-            ?? (baseURL.scheme == "https" ? loopbackHTTPSSession : QuotaHTTP.session)
+        let session: URLSession = (baseURL.scheme == "https" ? loopbackHTTPSSession : loopbackHTTPSession)
         guard let (data, response) = try? await session.data(for: request),
               let http = response as? HTTPURLResponse,
               (200...299).contains(http.statusCode),
+              let finalURL = http.url,
+              isSameOrigin(url, finalURL),
               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }

@@ -22,11 +22,7 @@ enum ProviderRegistry {
 
 // PRODUCTION_MANAGED_IMPORT_STORE
 
-enum CLIProxyCredentialAdapter {
-    static func normalizedProviderID(_ providerId: String) -> String { providerId }
-}
-
-enum CLIProxyGeminiCredentialBridge {
+enum GeminiCredentialBridge {
     static func makeNativePayload(from data: Data) throws -> Data { data }
 }
 
@@ -35,6 +31,7 @@ enum ProviderAuthManager {
     static func unmanagedCandidates(for _: String) -> [ProviderAuthCandidate] { [injected] }
     // PRODUCTION_AUTHENTICATE_CANDIDATE
     // PRODUCTION_VALIDATE
+    // PRODUCTION_VALIDATE_LOCAL_METADATA
     // PRODUCTION_COPY_IMPORTED_AUTH_FILE
     // PRODUCTION_MANAGED_IMPORT_DIRECTORY
     // PRODUCTION_SANITIZED_FILENAME_STEM
@@ -48,6 +45,7 @@ struct Settings { var backendMode = "local" }
     var discoveryFailureCooldown: TimeInterval = 300
     var registered = 0
     func discoveryBackoffKey(for candidate: ProviderAuthCandidate) -> String { candidate.id }
+    func shouldSuppressAutoManagedCandidate(_ candidate: ProviderAuthCandidate, providerId: String) -> Bool { false }
     func shouldSuppressAutoManagedAccount(providerId: String, usage: ProviderUsage, credential: AccountCredential) -> Bool { false }
     func registerAuthenticatedCredential(_ credential: AccountCredential, usage: ProviderUsage, note: String?, providerDisplayTitle: String) throws { registered += 1 }
     func providerTitleForId(_ id: String) -> String { id }
@@ -137,11 +135,25 @@ actor ConcurrentImportGate {
         precondition(coordinator.registered == 1 && StubURLProtocol.requests.isEmpty,
                      "Running IDE discovery registers cleanly via 127.0.0.1 RPC with 0 Google HTTP requests")
 
-        // 4. Explicit UI connect (`authenticateCandidate` without localOnly) still validates closed IDE credentials remotely when clicked by user.
+        // 4. Policy compliance: closed IDE explicit connect refuses remote Google HTTPS fallback, while metadata fallback stays strictly local (0 HTTPS).
         ProviderRegistry.injected = AntigravityProvider(homeDirectory: home.path, localQuotaReader: absent)
-        let explicit = try await ProviderAuthManager.authenticateCandidate(ProviderAuthManager.injected)
-        precondition(explicit.0.providerId == "antigravity" && StubURLProtocol.requests.count == 2,
-                     "Explicit UI connect still validates closed IDE credentials when triggered directly")
+        var absentExplicitCode: String?
+        do {
+            _ = try await ProviderAuthManager.authenticateCandidate(ProviderAuthManager.injected)
+        } catch let error as ProviderError {
+            absentExplicitCode = error.code
+        }
+        precondition(absentExplicitCode == "local_only_unavailable" && StubURLProtocol.requests.isEmpty,
+                     "Explicit closed-IDE connect fails closed locally without Google HTTPS fallback")
+        let localMeta = try await ProviderAuthManager.authenticateCandidate(
+            ProviderAuthManager.injected,
+            localOnly: true,
+            allowLocalMetadataFallback: true
+        )
+        precondition(localMeta.0.providerId == "antigravity"
+                        && (localMeta.1.extra["snapshotState"]?.value as? String) == "pending"
+                        && StubURLProtocol.requests.isEmpty,
+                     "Local metadata fallback preserves offline pending registration with 0 Google HTTPS calls")
 
         // 5. [R5 Finding 2] Concurrent same-second imports via production copyImportedAuthFile use distinct UUID files; failed cleanup cannot delete first credential.
         let concBase = home.appendingPathComponent("ConcurrentAppSupport")

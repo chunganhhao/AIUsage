@@ -20,6 +20,7 @@ public enum AntigravityPoolProtectionSettings {
     }
 
     public static let pools = ["gemini", "claude", "argon"]
+    private static let currentPollingModeVersion = 2
 
     public static func enabledPools(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> Set<String> {
         enabledPools(runtime: runtime(homeDirectory))
@@ -35,26 +36,22 @@ public enum AntigravityPoolProtectionSettings {
     public static func pollingMode(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> AntigravityQuotaPollingMode {
-        let url = runtime(homeDirectory).appendingPathComponent("pool-protection.json")
-        guard let data = try? Data(contentsOf: url),
-              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = json["polling_mode"] as? String,
-              let mode = AntigravityQuotaPollingMode(rawValue: raw) else {
-            return .localOnly
-        }
-        return mode
+        // Policy compliance: always stay local IDE RPC + cached snapshot only regardless of legacy v1/v2 files.
+        _ = homeDirectory
+        return .localOnly
     }
 
     public static func setPollingMode(
         _ mode: AntigravityQuotaPollingMode,
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) throws {
+        _ = mode
         try AntigravityCredentialFile.withLock {
             let directory = runtime(homeDirectory)
             try save(
                 enabled: isEnabled(runtime: directory),
                 pools: enabledPools(runtime: directory),
-                pollingMode: mode,
+                pollingMode: .localOnly,
                 runtime: directory
             )
         }
@@ -88,6 +85,7 @@ public enum AntigravityPoolProtectionSettings {
         var payload: [String: Any] = ["enabled": enabled, "pools": pools.sorted()]
         if pollingMode != .localOnly {
             payload["polling_mode"] = pollingMode.rawValue
+            payload["polling_mode_version"] = currentPollingModeVersion
         }
         try JSONSerialization.data(withJSONObject: payload).write(to: url, options: .atomic)
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
@@ -201,5 +199,94 @@ enum AntigravityCredentialFile {
         try data.write(to: url, options: .atomic)
         CredentialWriteRecorder.current?.record(url: url, data: data)
         return updated
+    }
+}
+
+/// Evaluates whether a single-card remote Antigravity check should ask the user
+/// to confirm first due to legacy/unknown scopes or missing `auth_source` provenance.
+public enum AntigravityCredentialCheckGuard {
+    public struct RiskAssessment: Sendable, Equatable {
+        public let isLegacyOrUnknownScope: Bool
+        public let missingAuthSource: Bool
+        public let missingOrReducedScopes: Bool
+        public let scopeCount: Int
+
+        public var requiresConfirmation: Bool { isLegacyOrUnknownScope }
+    }
+
+    public static let minimumExpectedScopeCount = 5
+
+    public static func assess(credential: AccountCredential) -> RiskAssessment {
+        guard credential.providerId.lowercased() == "antigravity" else {
+            return RiskAssessment(
+                isLegacyOrUnknownScope: false,
+                missingAuthSource: false,
+                missingOrReducedScopes: false,
+                scopeCount: 0
+            )
+        }
+
+        let json: [String: Any]?
+        if credential.authMethod == .authFile {
+            let expanded = NSString(string: credential.credential).expandingTildeInPath
+            json = FileManager.default.contents(atPath: expanded)
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+        } else {
+            json = nil
+        }
+
+        let authSource = ((json?["auth_source"] as? String) ?? credential.metadata["auth_source"])?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let missingAuthSource = authSource?.isEmpty ?? true
+        let untrustedExplicitAuthSource = authSource.map {
+            let lower = $0.lowercased()
+            return !lower.isEmpty && ["legacy", "unknown", "external", "third_party"].contains(lower)
+        } ?? false
+
+        let scopes = extractedScopes(json: json, metadata: credential.metadata)
+        let missingOrReducedScopes = scopes.count < minimumExpectedScopeCount
+
+        // Patch C ([C2]) auth_source tagging is deferred; do not require auth_source presence
+        // yet so full-scope OAuth credentials are not perpetually flagged as unverified.
+        return RiskAssessment(
+            isLegacyOrUnknownScope: missingOrReducedScopes || untrustedExplicitAuthSource,
+            missingAuthSource: missingAuthSource,
+            missingOrReducedScopes: missingOrReducedScopes,
+            scopeCount: scopes.count
+        )
+    }
+
+    public static func assess(
+        credentialId: String?,
+        store: AccountCredentialStore = .shared
+    ) -> RiskAssessment {
+        guard let credentialId = credentialId?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !credentialId.isEmpty,
+              let credential = store.loadCredential(providerId: "antigravity", credentialId: credentialId) else {
+            // Unreadable or unresolved Antigravity credential falls back to requiring confirmation.
+            return RiskAssessment(
+                isLegacyOrUnknownScope: true,
+                missingAuthSource: true,
+                missingOrReducedScopes: true,
+                scopeCount: 0
+            )
+        }
+        return assess(credential: credential)
+    }
+
+    private static func extractedScopes(json: [String: Any]?, metadata: [String: String]) -> Set<String> {
+        var rawParts: [String] = []
+        if let scopeString = json?["scope"] as? String {
+            rawParts.append(contentsOf: scopeString.split(whereSeparator: \.isWhitespace).map(String.init))
+        }
+        if let scopesString = json?["scopes"] as? String {
+            rawParts.append(contentsOf: scopesString.split(whereSeparator: \.isWhitespace).map(String.init))
+        } else if let scopesArray = json?["scopes"] as? [String] {
+            rawParts.append(contentsOf: scopesArray)
+        }
+        if let metadataScope = metadata["scope"] ?? metadata["scopes"] {
+            rawParts.append(contentsOf: metadataScope.split(whereSeparator: \.isWhitespace).map(String.init))
+        }
+        return Set(rawParts.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
     }
 }

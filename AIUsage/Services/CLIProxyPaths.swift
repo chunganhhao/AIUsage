@@ -22,6 +22,13 @@ nonisolated struct CLIProxyPaths: Sendable {
     var versionsDirectory: URL { root.appendingPathComponent("versions", isDirectory: true) }
     var currentSymlink: URL { root.appendingPathComponent("current", isDirectory: false) }
     var authDirectory: URL { root.appendingPathComponent("auth", isDirectory: true) }
+    /// Isolated, empty auth directory handed to CPA in API-key-only builds so
+    /// legacy credentials in `authDirectory` are preserved untouched outside CPA loaders.
+    var isolatedAuthDirectory: URL { root.appendingPathComponent("runtime-auth", isDirectory: true) }
+    /// Controlled empty working directory for the CPA child process so upstream
+    /// cannot read an ambient `.env` from the binary or parent working directory.
+    var runtimeWorkingDirectory: URL { root.appendingPathComponent("runtime-wd", isDirectory: true) }
+    var runtimeTempDirectory: URL { root.appendingPathComponent("runtime-tmp", isDirectory: true) }
     var pluginsDirectory: URL { root.appendingPathComponent("plugins", isDirectory: true) }
     var logsDirectory: URL { root.appendingPathComponent("logs", isDirectory: true) }
     var configURL: URL { root.appendingPathComponent("config.yaml", isDirectory: false) }
@@ -44,7 +51,16 @@ nonisolated struct CLIProxyPaths: Sendable {
     }
 
     func prepare(fileManager: FileManager = .default) throws {
-        for directory in [root, versionsDirectory, authDirectory, pluginsDirectory, logsDirectory] {
+        for directory in [
+            root,
+            versionsDirectory,
+            authDirectory,
+            isolatedAuthDirectory,
+            runtimeWorkingDirectory,
+            runtimeTempDirectory,
+            pluginsDirectory,
+            logsDirectory
+        ] {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         }

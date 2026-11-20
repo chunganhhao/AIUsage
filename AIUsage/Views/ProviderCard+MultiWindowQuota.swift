@@ -67,17 +67,30 @@ struct MultiWindowQuotaView: View {
 
     // MARK: - Ring Layout
 
+    private var ringRows: [[QuotaWindow]] {
+        let columns = displayedWindows.count == 4 ? 2 : 3
+        guard !displayedWindows.isEmpty else { return [] }
+        return stride(from: 0, to: displayedWindows.count, by: columns).map { start in
+            Array(displayedWindows[start..<min(start + columns, displayedWindows.count)])
+        }
+    }
+
     private var ringLayout: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 90))], spacing: ringSpacing) {
-            ForEach(displayedWindows) { window in
-                MultiWindowRingItem(
-                    window: window,
-                    label: windowLabel(window.label),
-                    accentColor: accentColor,
-                    ringSize: ringSize
-                )
-                    .environmentObject(appState)
-                    .environmentObject(settings)
+        VStack(spacing: 12) {
+            ForEach(Array(ringRows.enumerated()), id: \.offset) { _, row in
+                HStack(spacing: ringSpacing) {
+                    ForEach(row) { window in
+                        MultiWindowRingItem(
+                            window: window,
+                            label: windowLabel(window.label),
+                            accentColor: accentColor,
+                            ringSize: ringSize
+                        )
+                            .frame(maxWidth: .infinity)
+                            .environmentObject(appState)
+                            .environmentObject(settings)
+                    }
+                }
             }
         }
         .frame(maxWidth: .infinity)

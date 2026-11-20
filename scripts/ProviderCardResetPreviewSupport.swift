@@ -38,12 +38,19 @@ enum DefaultsKey { static let displayCurrency = "fixture-unused-currency" }
     func updateAccountNote(for account: ProviderAccountEntry, note: String) { preconditionFailure("Fixture writes disabled") }
 }
 
+struct AccountCheckError: Equatable {
+    let message: String
+    let errorCode: String?
+    let failedAt: Date
+}
+
 @MainActor final class ProviderRefreshCoordinator: ObservableObject {
     func refreshCodexAccountAfterReset(credentialId: String, identity: CodexAccountIdentity) async -> Bool {
         preconditionFailure("Fixture account refresh disabled")
     }
     func isRefreshInProgress(for provider: ProviderData) -> Bool { false }
     func accountRefreshDate(for provider: ProviderData) -> Date? { provider.fetchedAt.flatMap(SharedFormatters.parseISO8601) }
+    func lastCheckError(for provider: ProviderData) -> AccountCheckError? { nil }
     func refreshProviderCardNow(_ provider: ProviderData) async { preconditionFailure("Fixture refresh disabled") }
     func credentialID(for provider: ProviderData) -> String? { FixtureResetEnvironment.credentialIDs[provider.id] }
 }
@@ -61,25 +68,6 @@ enum DefaultsKey { static let displayCurrency = "fixture-unused-currency" }
     func activateAccount(entry: ProviderAccountEntry) async throws -> Bool { preconditionFailure("Fixture activation disabled") }
 }
 
-struct CLIProxyAccountSyncCandidate {
-    enum Compatibility { case compatible }
-    let compatibility: Compatibility = .compatible
-}
-@MainActor final class CLIProxyGatewayManager: ObservableObject {
-    static let shared = CLIProxyGatewayManager() // 内存 mock，不是生产 manager。
-    struct Runtime {
-        struct State { let isRunning = false }
-        let state = State()
-    }
-    let runtime = Runtime()
-    func syncCandidate(providerId: String, label: String, credentialId: String) -> CLIProxyAccountSyncCandidate? { nil }
-    func syncAccount(_ candidate: CLIProxyAccountSyncCandidate) async { preconditionFailure("Fixture sync disabled") }
-    func isSynced(_ candidate: CLIProxyAccountSyncCandidate) -> Bool { false }
-}
-@MainActor final class CLIProxyGatewayNavigation {
-    static let shared = CLIProxyGatewayNavigation()
-    func showAccounts() { preconditionFailure("Fixture navigation disabled") }
-}
 struct ProviderDetailView: View {
     let provider: ProviderData
     let titleOverride: String?
@@ -110,6 +98,9 @@ extension View {
 }
 enum SensitiveDataRedactor {
     static func redactedMessage(for error: Error) -> String { "Fixture action disabled" }
+}
+enum AntigravityAccountSwitcher {
+    static func openAntigravityApp(homeDirectory: String = "") { preconditionFailure("Fixture app launch disabled") }
 }
 
 // RefreshableTimeView 保持正式实现，仅时钟源无 timer。
@@ -143,4 +134,25 @@ final class AccountCredentialStore {
     static let shared = CodexSubscriptionOrderStore()
     func ordered(_ entries: [ProviderAccountEntry]) -> [ProviderAccountEntry] { entries }
     func reorder(_ ids: [String]) { preconditionFailure("Fixture reorder disabled") }
+}
+struct CLIProxyAccountSyncCandidate {
+    enum Compatibility { case compatible, incompatible }
+    var compatibility: Compatibility = .compatible
+}
+@MainActor
+final class CLIProxyGatewayNavigation {
+    static let shared = CLIProxyGatewayNavigation()
+    func showAccounts() {}
+}
+@MainActor
+final class CLIProxyGatewayManager: ObservableObject {
+    struct Runtime {
+        struct State { var isRunning: Bool = false }
+        var state = State()
+    }
+    static let shared = CLIProxyGatewayManager()
+    let runtime = Runtime()
+    func syncCandidate(providerId: String, label: String, credentialId: String) -> CLIProxyAccountSyncCandidate? { nil }
+    func isSynced(_ candidate: CLIProxyAccountSyncCandidate) -> Bool { false }
+    func syncAccount(_ candidate: CLIProxyAccountSyncCandidate) async {}
 }

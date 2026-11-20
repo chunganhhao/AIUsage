@@ -10,6 +10,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case menuBar
     case cardAppearance
     case proxy
+    case tokenSaver
     case notifications
     case about
 
@@ -22,6 +23,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return L("Menu Bar", "菜单栏")
         case .cardAppearance: return L("Card Appearance", "卡片外观")
         case .proxy: return L("Proxy", "代理")
+        case .tokenSaver: return L("Token Saver", "Token 节省")
         case .notifications: return L("Notifications", "通知")
         case .about: return L("About", "关于")
         }
@@ -34,6 +36,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return "menubar.rectangle"
         case .cardAppearance: return "rectangle.on.rectangle"
         case .proxy: return "server.rack"
+        case .tokenSaver: return "bolt.fill"
         case .notifications: return "bell"
         case .about: return "info.circle"
         }
@@ -47,6 +50,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return .indigo
         case .cardAppearance: return .teal
         case .proxy: return .orange
+        case .tokenSaver: return .purple
         case .notifications: return .red
         case .about: return .gray
         }
@@ -143,6 +147,10 @@ struct SettingsView: View {
             remoteTokenInput = QuotaShareTokenStore.load(.remote) ?? ""
             sharePortInput = "\(settings.shareQuotaPort)"
             shareAddresses = QuotaShareService.shareAddresses()
+            consumeRequestedSettingsCategory()
+        }
+        .onChange(of: appState.requestedSettingsCategory) { _, _ in
+            consumeRequestedSettingsCategory()
         }
         .onChange(of: hideDockIcon) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.hideDockIcon)
@@ -294,6 +302,8 @@ struct SettingsView: View {
                     cardAppearanceSection
                 case .proxy:
                     proxySection
+                case .tokenSaver:
+                    TokenSaverSettingsPane()
                 case .notifications:
                     notificationsSection
                 case .about:
@@ -318,6 +328,13 @@ struct SettingsView: View {
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
+    }
+
+    func consumeRequestedSettingsCategory() {
+        if let requested = appState.requestedSettingsCategory {
+            selectedCategory = requested
+            appState.requestedSettingsCategory = nil
+        }
     }
 
     func updateDockIconVisibility(hidden: Bool) {

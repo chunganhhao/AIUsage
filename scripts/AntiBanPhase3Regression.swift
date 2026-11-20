@@ -74,7 +74,7 @@ struct AntiBanPhase3Regression {
         enabledSettings.enablePlugins = true
         try store.writeRuntimeConfig(settings: enabledSettings, secrets: secrets)
         let generated = try String(contentsOf: paths.configURL, encoding: .utf8)
-        check(generated.contains("plugins:\n  enabled: true\n  dir: \"\(paths.pluginsDirectory.path)\""), "generated plugin block must stay compatible with legacy migration fixtures")
+        check(generated.contains("plugins:\n  enabled: false\n  dir: \"\(paths.pluginsDirectory.path)\""), "[§39.3] API-key-only build must keep plugins disabled while stabilizing plugin dir")
         let alias = "oauth-model-alias:\n  antigravity:\n    - name: original\n      alias: retained\n"
         try ("antigravity:\n  tos-pause-window: \"2h\"\n  sensitive-words:\n    - kept\n" + alias).write(to: paths.configURL, atomically: true, encoding: .utf8)
         try store.writeRuntimeConfig(settings: .default, secrets: secrets)

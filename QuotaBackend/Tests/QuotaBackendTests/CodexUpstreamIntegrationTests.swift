@@ -133,7 +133,7 @@ final class CodexUpstreamIntegrationTests: XCTestCase {
         }
     }
 
-    func testUsageStillTripsMonthlyCircuitBreakerWhileResetReadDoesNotChangeIt() async throws {
+    func testUsageAndResetReadNeverMutateLegacyCPAAuthFiles() async throws {
         let folder = "Library/Application Support/AIUsage/CLIProxyAPI/auth"
         try FileManager.default.createDirectory(at: directory.appendingPathComponent(folder), withIntermediateDirectories: true)
         let own = try write(folder + "/aiusage-codex-fixture.json", access: token("monthly", issuedAt: Int(Date().timeIntervalSince1970)))
@@ -147,14 +147,11 @@ final class CodexUpstreamIntegrationTests: XCTestCase {
         StubURLProtocol.respond(endpoint, body: list)
         let before = try Data(contentsOf: own)
         _ = try await provider.fetchResetCredits(with: credential(own), identity: identity)
-        XCTAssertEqual(try Data(contentsOf: own), before, "Reset-card reads must not recover or trip the quota breaker")
+        XCTAssertEqual(try Data(contentsOf: own), before, "Reset-card reads must not mutate legacy CPA files")
         StubURLProtocol.respond("https://chatgpt.com/backend-api/wham/usage", body: #"{"plan_type":"self_serve_business_usage_based","spend_control":{"individual_limit":{"limit":"1000","used":"980","used_percent":98}}}"#)
         let usage = try await provider.fetchUsage(with: credential(own))
-        XCTAssertEqual(usage.extra["circuitBreakerTripped"]?.value as? Bool, true)
-        let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: own)) as? [String: Any])
-        XCTAssertEqual(persisted["disabled"] as? Bool, true)
-        XCTAssertEqual(persisted["circuit_breaker_tripped"] as? Bool, true)
-        XCTAssertTrue((persisted["circuit_breaker_reason"] as? String)?.contains("Monthly") == true)
+        XCTAssertNil(usage.extra["circuitBreakerTripped"])
+        XCTAssertEqual(try Data(contentsOf: own), before, "Codex usage fetch must not mutate legacy CPA files")
     }
 
     func testNativeUserAndLegacySubjectUseSeparateNamespacesInEitherDirection() throws {

@@ -154,10 +154,15 @@ struct SubscriptionGatewayOverviewView: View {
                 icon: "person.badge.plus",
                 tint: .indigo,
                 title: L("Add your first upstream", "添加第一个上游"),
-                detail: L(
-                    "Use CPA OAuth, an official plugin, a compatible AIUsage account, an API key, or a migrated auth file.",
-                    "可通过 CPA OAuth、官方插件、兼容的 AIUsage 账号、API Key 或迁移认证文件添加上游。"
-                ),
+                detail: CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                    ? L(
+                        "Use CPA OAuth, an official plugin, a compatible AIUsage account, an API key, or a migrated auth file.",
+                        "可通过 CPA OAuth、官方插件、兼容的 AIUsage 账号、API Key 或迁移认证文件添加上游。"
+                    )
+                    : L(
+                        "Configure an official OpenAI-compatible API-key upstream. CPA subscription accounts are unavailable in this build.",
+                        "请配置官方 OpenAI 兼容 API Key 上游；当前构建不提供 CPA 订阅账号接入。"
+                    ),
                 actionTitle: L("Add upstream", "添加上游")
             ) {
                 navigation.showAccounts(openAddAccount: true)
@@ -399,9 +404,13 @@ struct SubscriptionGatewayOverviewView: View {
     private var compactServiceBar: some View {
         HStack(spacing: 10) {
             Circle()
-                .fill(runtime.state.isRunning ? Color.green : Color.secondary.opacity(0.45))
+                .fill(runtime.state.isRunning ? Color.green : (runtime.hasUnconfirmedListener ? Color.orange : Color.secondary.opacity(0.45)))
                 .frame(width: 8, height: 8)
-            Text(runtime.state.isRunning ? L("CPA running", "CPA 运行中") : L("CPA stopped", "CPA 已停止"))
+            Text(
+                runtime.state.isRunning
+                    ? L("CPA running", "CPA 运行中")
+                    : (runtime.hasUnconfirmedListener ? L("CPA stop unconfirmed", "CPA 停止未确认") : L("CPA stopped", "CPA 已停止"))
+            )
                 .font(.caption.weight(.semibold))
             Text(runtime.baseURL.absoluteString)
                 .font(.caption.monospaced())
@@ -415,16 +424,19 @@ struct SubscriptionGatewayOverviewView: View {
             Spacer(minLength: 8)
             Button {
                 Task {
-                    if runtime.state.isRunning { await runtime.stop() }
-                    else {
+                    if runtime.state.isRunning || runtime.hasUnconfirmedListener {
+                        await runtime.stop()
+                    } else {
                         await runtime.start()
                         if runtime.state.isRunning { await manager.refreshAccounts() }
                     }
                 }
             } label: {
                 Label(
-                    runtime.state.isRunning ? L("Stop", "停止") : L("Start", "启动"),
-                    systemImage: runtime.state.isRunning ? "stop.fill" : "play.fill"
+                    runtime.state.isRunning
+                        ? L("Stop", "停止")
+                        : (runtime.hasUnconfirmedListener ? L("Verify Stop", "验证停止") : L("Start", "启动")),
+                    systemImage: (runtime.state.isRunning || runtime.hasUnconfirmedListener) ? "stop.fill" : "play.fill"
                 )
                 .font(.caption.weight(.semibold))
             }

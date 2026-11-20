@@ -8,6 +8,7 @@ BIN="$(swift build --package-path "$ROOT/QuotaBackend" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$TEMP/objects.txt"
 swiftc -parse-as-library -swift-version 5 -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$TEMP/objects.txt" -lsqlite3 \
   "$ROOT/AIUsage/Models/CLIProxyGatewayModels.swift" \
+  "$ROOT/AIUsage/Models/CLIProxyUpstreamCapability.swift" \
   "$ROOT/AIUsage/Services/CLIProxyPaths.swift" \
   "$ROOT/AIUsage/Services/CLIProxyConfigStore.swift" \
   "$ROOT/scripts/AntiBanPhase3Regression.swift" -o "$TEMP/regression"

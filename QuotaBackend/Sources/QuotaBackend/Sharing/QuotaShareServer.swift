@@ -1,6 +1,20 @@
+import CryptoKit
 import Foundation
 import Network
 import os.log
+
+public enum QuotaServerHealthProof {
+    public static let challengeHeader = "X-AIUsage-Health-Challenge"
+
+    public static func compute(challenge: String, startupToken: String) -> String? {
+        let trimmedChallenge = challenge.trimmingCharacters(in: .whitespacesAndNewlines)
+        let trimmedToken = startupToken.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmedChallenge.isEmpty, !trimmedToken.isEmpty else { return nil }
+        let key = SymmetricKey(data: Data(trimmedToken.utf8))
+        let mac = HMAC<SHA256>.authenticationCode(for: Data(trimmedChallenge.utf8), using: key)
+        return mac.map { String(format: "%02x", $0) }.joined()
+    }
+}
 
 private let shareLog = Logger(subsystem: "com.aiusage.desktop", category: "QuotaShare")
 
@@ -28,14 +42,24 @@ public final class QuotaShareServer: @unchecked Sendable {
 
     private let requestedPort: Int
     private let token: String
+    private let tlsOptions: NWProtocolTLS.Options?
+    private let allowPlaintextPrivateLAN: Bool
     private let snapshotProvider: SnapshotProvider
     private let queue = DispatchQueue(label: "com.aiusage.quotashare")
     private var listener: NWListener?
     private var onStateChange: (@Sendable (State) -> Void)?
 
-    public init(port: Int, token: String, snapshotProvider: @escaping SnapshotProvider) {
+    public init(
+        port: Int,
+        token: String,
+        tlsOptions: NWProtocolTLS.Options? = nil,
+        allowPlaintextPrivateLAN: Bool = false,
+        snapshotProvider: @escaping SnapshotProvider
+    ) {
         self.requestedPort = port
         self.token = token
+        self.tlsOptions = tlsOptions
+        self.allowPlaintextPrivateLAN = allowPlaintextPrivateLAN
         self.snapshotProvider = snapshotProvider
     }
 
@@ -56,7 +80,7 @@ public final class QuotaShareServer: @unchecked Sendable {
                 return
             }
 
-            let params = NWParameters.tcp
+            let params = tlsOptions.map { NWParameters(tls: $0, tcp: .init()) } ?? NWParameters.tcp
             params.allowLocalEndpointReuse = true
             let listener: NWListener
             do {
@@ -113,7 +137,9 @@ public final class QuotaShareServer: @unchecked Sendable {
     // MARK: - Connection Handling
 
     private func accept(_ connection: NWConnection) {
-        guard case .hostPort(let host, _) = connection.endpoint, Self.isAllowedPeer(host) else {
+        let allowPrivateLAN = tlsOptions != nil || allowPlaintextPrivateLAN
+        guard case .hostPort(let host, _) = connection.endpoint,
+              Self.isAllowedPeer(host, allowPrivateLAN: allowPrivateLAN) else {
             shareLog.notice("Quota share rejected connection from \(String(describing: connection.endpoint), privacy: .private)")
             connection.cancel()
             return
@@ -195,7 +221,7 @@ public final class QuotaShareServer: @unchecked Sendable {
         )
     }
 
-    static func constantTimeEquals(_ lhs: [UInt8], _ rhs: [UInt8]) -> Bool {
+    public static func constantTimeEquals(_ lhs: [UInt8], _ rhs: [UInt8]) -> Bool {
         guard !rhs.isEmpty, lhs.count == rhs.count else { return false }
         var difference: UInt8 = 0
         for index in lhs.indices {
@@ -206,39 +232,41 @@ public final class QuotaShareServer: @unchecked Sendable {
 
     // MARK: - Peer Policy
 
-    /// 只放行回环、Tailscale 与私有局域网来源；公网来源即使带对令牌也拒绝。
-    public static func isAllowedPeer(_ host: NWEndpoint.Host) -> Bool {
+    /// Plaintext defaults allow loopback (`127.0.0.0/8`, `::1`) ONLY; shared CGNAT (`100.64.0.0/10`,
+    /// which can overlap with non-Tailscale VPNs) and RFC1918/link-local peers require TLS (`tlsOptions != nil`).
+    public static func isAllowedPeer(_ host: NWEndpoint.Host, allowPrivateLAN: Bool = false) -> Bool {
         switch host {
         case .ipv4(let address):
-            return isAllowedIPv4(Array(address.rawValue))
+            return isAllowedIPv4(Array(address.rawValue), allowPrivateLAN: allowPrivateLAN)
         case .ipv6(let address):
             if let mapped = address.asIPv4 {
-                return isAllowedIPv4(Array(mapped.rawValue))
+                return isAllowedIPv4(Array(mapped.rawValue), allowPrivateLAN: allowPrivateLAN)
             }
-            return isAllowedIPv6(Array(address.rawValue))
+            return isAllowedIPv6(Array(address.rawValue), allowPrivateLAN: allowPrivateLAN)
         default:
             return false
         }
     }
 
-    private static func isAllowedIPv4(_ bytes: [UInt8]) -> Bool {
+    private static func isAllowedIPv4(_ bytes: [UInt8], allowPrivateLAN: Bool) -> Bool {
         guard bytes.count == 4 else { return false }
         switch (bytes[0], bytes[1]) {
         case (127, _): return true                      // loopback
-        case (10, _): return true                       // 10.0.0.0/8
-        case (172, 16...31): return true                // 172.16.0.0/12
-        case (192, 168): return true                    // 192.168.0.0/16
-        case (169, 254): return true                    // link-local
-        case (100, 64...127): return true               // Tailscale CGNAT 100.64.0.0/10
+        case (100, 64...127), (10, _), (172, 16...31), (192, 168), (169, 254):
+            return allowPrivateLAN
         default: return false
         }
     }
 
-    private static func isAllowedIPv6(_ bytes: [UInt8]) -> Bool {
+    private static func isAllowedIPv6(_ bytes: [UInt8], allowPrivateLAN: Bool) -> Bool {
         guard bytes.count == 16 else { return false }
         if bytes[0..<15].allSatisfy({ $0 == 0 }) && bytes[15] == 1 { return true }      // ::1
-        if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 { return true }                // fe80::/10
-        if (bytes[0] & 0xfe) == 0xfc { return true }                                     // fc00::/7（含 Tailscale fd7a:115c:a1e0::/48）
+        if bytes[0] == 0xfd && bytes[1] == 0x7a && bytes[2] == 0x11
+            && bytes[3] == 0x5c && bytes[4] == 0xa1 && bytes[5] == 0xe0 {
+            return allowPrivateLAN                                                       // ULA fd7a:115c:a1e0::/48 requires TLS
+        }
+        if bytes[0] == 0xfe && (bytes[1] & 0xc0) == 0x80 { return allowPrivateLAN }     // fe80::/10 link-local
+        if (bytes[0] & 0xfe) == 0xfc { return allowPrivateLAN }                          // fc00::/7 ULA
         return false
     }
 

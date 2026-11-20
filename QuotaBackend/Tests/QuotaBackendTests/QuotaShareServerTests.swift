@@ -7,18 +7,25 @@ final class QuotaShareServerTests: XCTestCase {
 
     // MARK: - Peer policy
 
-    func testPeerPolicyAllowsLoopbackTailscaleAndPrivateNetworksOnly() {
-        let allowed = ["127.0.0.1", "100.67.230.7", "100.64.0.1", "100.127.255.254", "10.1.2.3",
-                       "172.16.0.9", "172.31.255.1", "192.168.1.20", "169.254.3.4",
-                       "::1", "fd7a:115c:a1e0::1234", "fe80::1", "::ffff:100.79.99.84"]
-        for raw in allowed {
-            XCTAssertTrue(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw)), raw)
-        }
-
+    func testPeerPolicyAllowsLoopbackOnlyOnPlaintextAndPrivateCGNATWithTLS() {
+        let loopbackAllowed = ["127.0.0.1", "::1", "::ffff:127.0.0.1"]
+        let tlsOnlyRemote = ["100.67.230.7", "100.64.0.1", "100.127.255.254", "fd7a:115c:a1e0::1234", "::ffff:100.79.99.84",
+                             "10.1.2.3", "172.16.0.9", "172.31.255.1", "192.168.1.20", "169.254.3.4", "fe80::1"]
         let rejected = ["8.8.8.8", "100.63.255.255", "100.128.0.1", "172.32.0.1", "11.0.0.1",
                         "2001:4860:4860::8888", "::ffff:8.8.8.8"]
+
+        // Plaintext default allows loopback ONLY; shared CGNAT/VPN (100.64.0.0/10) and RFC1918 LAN require TLS.
+        for raw in loopbackAllowed {
+            XCTAssertTrue(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw)), raw)
+            XCTAssertTrue(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw), allowPrivateLAN: true), raw)
+        }
+        for raw in tlsOnlyRemote {
+            XCTAssertFalse(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw)), raw)
+            XCTAssertTrue(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw), allowPrivateLAN: true), raw)
+        }
         for raw in rejected {
             XCTAssertFalse(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw)), raw)
+            XCTAssertFalse(QuotaShareServer.isAllowedPeer(NWEndpoint.Host(raw), allowPrivateLAN: true), raw)
         }
     }
 

@@ -15,7 +15,19 @@ final class QuotaHTTPServerProxyIntegrationTests: XCTestCase {
         try await server.start()
         defer { server.stop() }
 
-        let (data, response) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(proxyPort)/health")!)
+        let (publicData, publicResponse) = try await URLSession.shared.data(from: URL(string: "http://127.0.0.1:\(proxyPort)/health")!)
+        XCTAssertEqual((publicResponse as? HTTPURLResponse)?.statusCode, 200)
+        let publicJSON = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: publicData) as? [String: Any]
+        )
+        XCTAssertEqual(publicJSON["ok"] as? Bool, true)
+        XCTAssertFalse((publicJSON["generatedAt"] as? String ?? "").isEmpty)
+        XCTAssertNil(publicJSON["instanceToken"])
+
+        let challenge = "probe-nonce-123"
+        var authedReq = URLRequest(url: URL(string: "http://127.0.0.1:\(proxyPort)/health")!)
+        authedReq.setValue(challenge, forHTTPHeaderField: QuotaServerHealthProof.challengeHeader)
+        let (data, response) = try await URLSession.shared.data(for: authedReq)
         XCTAssertEqual((response as? HTTPURLResponse)?.statusCode, 200)
 
         let json = try XCTUnwrap(
@@ -23,7 +35,11 @@ final class QuotaHTTPServerProxyIntegrationTests: XCTestCase {
         )
         XCTAssertEqual(json["ok"] as? Bool, true)
         XCTAssertFalse((json["generatedAt"] as? String ?? "").isEmpty)
-        XCTAssertEqual(json["instanceToken"] as? String, "test-instance-token")
+        XCTAssertNil(json["instanceToken"])
+        XCTAssertEqual(
+            json["instanceProof"] as? String,
+            QuotaServerHealthProof.compute(challenge: challenge, startupToken: "test-instance-token")
+        )
     }
 
     func testGlobalProxyPublishesOnlyConfiguredClientModelAcrossHotSwitches() async throws {

@@ -46,7 +46,7 @@ extension UsageNormalizer {
             secondary: remainingPercent == nil
                 ? "Antigravity quota snapshot"
                 : (isGrouped ? "lowest remaining window" : "lowest remaining model"),
-            supporting: usage.accountEmail ?? projectId ?? "CLIProxy auth file"
+            supporting: usage.accountEmail ?? projectId ?? "Auth file"
         )
         base.metrics = [
             MetricInfo(label: "Account", value: usage.accountEmail ?? "Unknown"),

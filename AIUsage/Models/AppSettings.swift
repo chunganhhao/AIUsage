@@ -11,7 +11,7 @@ enum AppSection: String, Hashable {
     case sessions
     /// 订阅账号：监控登录类账号（Claude / Codex / Cursor 等）的订阅额度与用量。
     case providerAccounts
-    /// CPA 网关：管理官方 CLIProxyAPI sidecar、版本更新与多订阅账号池。
+    /// CPA 网关：管理官方 CLIProxyAPI sidecar、版本更新与多订阅账号池（仅 Codex Go/Free）。
     case subscriptionGateway
     /// API 提供商：统一上游配置，分发到三套代理。
     case apiProviders
@@ -282,10 +282,12 @@ final class AppSettings: ObservableObject {
     }
 
     static func remoteBaseURL(host rawHost: String, port: Int) -> String {
-        var host = parseRemoteAddress(rawHost).host
+        let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scheme = trimmed.lowercased().hasPrefix("https://") ? "https" : "http"
+        var host = parseRemoteAddress(trimmed).host
         if host.isEmpty { host = "127.0.0.1" }
         let formattedHost = host.contains(":") ? "[\(host)]" : host
-        return "http://\(formattedHost):\(port)"
+        return "\(scheme)://\(formattedHost):\(port)"
     }
 
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。

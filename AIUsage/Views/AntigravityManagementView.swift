@@ -55,10 +55,6 @@ struct AntigravityManagementView: View {
     @StateObject private var tokenSaver = TokenSaverSettingsController()
     @State private var envSummary = AntigravityEnvironmentSummary.empty
     @State private var environmentRefreshTask: Task<Void, Never>?
-    @State private var poolProtectionEnabled = false
-    @State private var poolProtectionResidual = false
-    @State private var pollingMode: AntigravityQuotaPollingMode = .localOnly
-    @State private var poolProtectionError: String?
 
     @State private var showingAddAccount = false
     @State private var editingConfigFile: AntigravityEditableFile?
@@ -139,14 +135,6 @@ struct AntigravityManagementView: View {
             tokenSaver.selectHarness(.antigravity)
         }
         refreshEnvironment()
-        poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
-        pollingMode = AntigravityPoolProtectionSettings.pollingMode()
-        do {
-            poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection()
-            poolProtectionError = nil
-        } catch {
-            poolProtectionError = error.localizedDescription
-        }
     }
 
     // MARK: - Action Bar
@@ -233,14 +221,17 @@ struct AntigravityManagementView: View {
     private var refreshQuotasButton: some View {
         let refreshing = refreshCoordinator.isProviderRefreshInFlight("antigravity")
         return actionBarButton(
-            title: refreshing ? L("Checking…", "检查中…") : L("Check Quotas", "随机检查配额"),
-            icon: refreshing ? nil : "arrow.triangle.2.circlepath",
+            title: refreshing
+                ? L("Refreshing…", "刷新中…")
+                : L("Open Antigravity", "打开 Antigravity"),
+            icon: refreshing ? nil : "arrow.up.forward.app.fill",
             role: .secondary,
             help: L(
-                "Reads the running Antigravity IDE locally via 127.0.0.1 and checks at most 1 random due dormant account (15m cooldown; never bursts all accounts at once).",
-                "通过本地 127.0.0.1 读取当前 Antigravity IDE，并最多随机检查 1 个已过 15 分钟冷却的休眠账号（绝不批量并发请求）。"
+                "Snapshot-only mode: opens the official Antigravity app for fresh quota and reloads saved local snapshots (0 active quota RPC or remote Google API calls).",
+                "仅快照模式：打开官方 Antigravity 应用查看最新配额并重载本地缓存快照（0 次主动配额 RPC 或 Google 远端请求）。"
             )
         ) {
+            AntigravityAccountSwitcher.openAntigravityApp()
             refreshCoordinator.refreshProvider("antigravity")
             refreshCoordinator.refreshProvider("antigravity-cost")
         }
@@ -252,7 +243,7 @@ struct AntigravityManagementView: View {
             title: L("Add Account", "添加账号"),
             icon: "plus.circle.fill",
             role: .primary,
-            help: L("Connect a Google Antigravity account via OAuth, IDE session, or auth file.", "通过 Google OAuth、IDE 会话或认证文件添加 Antigravity 账号。")
+            help: L("Add an Antigravity account from the running IDE session or a local auth file.", "通过正在运行的本地 IDE 会话或本地认证文件添加 Antigravity 账号。")
         ) {
             showingAddAccount = true
         }
@@ -487,115 +478,29 @@ struct AntigravityManagementView: View {
     private var poolProtectionCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                Image(systemName: "checkmark.shield.fill")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(.teal)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
-                        Text(L("Smart Pool Protection & TOS Safety", "智能分池保护与账号安全策略"))
+                        Text(L("Snapshot-Only Quota Policy", "仅快照配额策略"))
                             .font(.subheadline.weight(.semibold))
-                        poolProtectionBadge
-                        tosSafeBadge
-                    }
-                    Text(L(
-                        "Isolates depleted Claude/GPT, Gemini (Flash 3.8 / Hydrogen 4), or Argon/Carbon pools without locking the whole account. TOS-safe defaults keep project-switching and credit flags disabled.",
-                        "当 Claude/GPT、Gemini (Flash 3.8 / Hydrogen 4) 或 Argon/Carbon 模型池耗尽时仅隔离该池，不停用整号；默认关闭跨项目切换与积分实验标志以保护账号安全。"
-                    ))
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                }
-
-                Spacer()
-
-                Toggle("", isOn: Binding(
-                    get: { poolProtectionEnabled },
-                    set: { enabled in
-                        do {
-                            try AntigravityPoolProtectionSettings.setEnabled(enabled)
-                            try CLIProxyConfigStore(paths: CLIProxyPaths()).syncPoolProtectionPause(enabled: enabled)
-                            reloadState()
-                        } catch {
-                            poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
-                            poolProtectionResidual = (try? AntigravityPoolProtectionSettings.hasResidualProtection()) ?? poolProtectionResidual
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .tint(.purple)
-            }
-
-            AntigravityPerPoolControls()
-            Divider()
-            HStack(spacing: 10) {
-                let isTrickle = pollingMode == .randomTrickle
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 8) {
-                        Text(L("Randomized Dormant Quota Trickle", "后台随机逐个检查休眠账号"))
-                            .font(.caption.weight(.semibold))
                         TokenSaverStatusBadge(
-                            text: isTrickle
-                                ? L("Random 1-by-1 Trickle", "随机逐个轮询 · 最少间隔3分")
-                                : L("Local RPC Only (Default Safe)", "仅本地 RPC · 默认最安全"),
-                            tone: isTrickle ? .warning : .active,
-                            id: "agy-bg-poll-badge"
+                            text: L("Snapshot Only (0 active RPC)", "仅本地快照（0 主动请求）"),
+                            tone: .active,
+                            id: "agy-tos-safe-badge"
                         )
                     }
                     Text(L(
-                        "Off by default: background ticks read only the running Antigravity IDE via local 127.0.0.1 RPC (0 Google requests for dormant accounts). When enabled, checks at most 1 random due dormant account per tick (3m min global gap, 15m per-account cooldown, 30m backoff on errors).",
-                        "默认关闭以防风控：后台定时仅通过本地 127.0.0.1 RPC 读取当前 Antigravity IDE（不对休眠账号发 Google 请求）。开启后每轮也最多随机检查 1 个已过冷却的休眠账号（全局至少间隔 3 分钟、单账号 15 分钟冷却、异常退避 30 分钟）。"
+                        "Displays last-known saved quota snapshots and local token stats. Direct third-party Google consumer API checks, private IDE quota RPC, browser OAuth, and background remote polling are disabled — open the official Antigravity app for live quota.",
+                        "仅展示已保存的本地配额快照与本地 Token 统计；已禁用第三方 Google 消费者接口检查、私有 IDE 配额 RPC、浏览器 OAuth 与后台远程轮询——请打开官方 Antigravity 应用查看实时配额。"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 }
-                Spacer()
-                Toggle("", isOn: Binding(
-                    get: { pollingMode == .randomTrickle },
-                    set: { enabled in
-                        let target: AntigravityQuotaPollingMode = enabled ? .randomTrickle : .localOnly
-                        do {
-                            try AntigravityPoolProtectionSettings.setPollingMode(target)
-                            pollingMode = AntigravityPoolProtectionSettings.pollingMode()
-                            poolProtectionError = nil
-                        } catch {
-                            pollingMode = AntigravityPoolProtectionSettings.pollingMode()
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .tint(.orange)
-            }
-            if !poolProtectionEnabled && poolProtectionResidual {
-                HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                    Text(L("Previous pool protection exclusions remain on disk.", "磁盘上仍保留有之前的分池排除规则。"))
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Button(L("Restore Exclusions", "清理残留规则")) {
-                        do {
-                            try AntigravityPoolProtectionSettings.restorePreviousExclusions()
-                            reloadState()
-                        } catch {
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
-                }
-            }
 
-            if let poolProtectionError {
-                Text(poolProtectionError)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
+                Spacer()
             }
 
             Divider()
@@ -673,27 +578,6 @@ struct AntigravityManagementView: View {
         .padding(.vertical, 3.5)
         .background(Capsule().fill(tint.opacity(0.11)))
         .overlay(Capsule().stroke(tint.opacity(0.24), lineWidth: 0.5))
-    }
-
-    @ViewBuilder
-    private var poolProtectionBadge: some View {
-        if poolProtectionError != nil {
-            TokenSaverStatusBadge(text: L("Issue", "异常"), tone: .danger, id: "agy-pool-protection-badge")
-        } else if poolProtectionEnabled {
-            TokenSaverStatusBadge(text: L("Pool Breaker ON", "分池保护已开启"), tone: .active, id: "agy-pool-protection-badge")
-        } else if poolProtectionResidual {
-            TokenSaverStatusBadge(text: L("Off · Residual", "已关 · 有残留"), tone: .warning, id: "agy-pool-protection-badge")
-        } else {
-            TokenSaverStatusBadge(text: L("Pool Breaker OFF", "分池保护关闭"), tone: .neutral, id: "agy-pool-protection-badge")
-        }
-    }
-
-    private var tosSafeBadge: some View {
-        TokenSaverStatusBadge(
-            text: L("TOS-Safe Defaults", "防封安全策略已锁"),
-            tone: .active,
-            id: "agy-tos-safe-badge"
-        )
     }
 
     // MARK: - Token Saver & AGY Customization Card
@@ -914,6 +798,22 @@ struct AntigravitySubscriptionSection: View {
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.primary.opacity(0.06)))
                 }
+                if ordered.count >= 2,
+                   let bestNext = ordered.bestNextQuotaCandidate(isActive: { activation.isActiveAccount($0) }) {
+                    Label(
+                        L(
+                            "Best next: \(bestNext.label) · \(Int(bestNext.remainingPercent.rounded()))%",
+                            "推荐备用: \(bestNext.label) · \(Int(bestNext.remainingPercent.rounded()))%"
+                        ),
+                        systemImage: "sparkles"
+                    )
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.teal)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.teal.opacity(0.12)))
+                    .help(L("Read-only suggestion from cached snapshots (no auto-switch or network call).", "基于本地缓存快照的只读建议（不会自动切号，也不发起网络请求）。"))
+                }
                 Spacer()
                 Text(storageDisplayPath)
                     .font(.system(size: 10, design: .monospaced))
@@ -1003,8 +903,8 @@ struct AntigravitySubscriptionSection: View {
             Text(L("No Antigravity accounts connected yet", "尚未连接 Antigravity 账号"))
                 .font(.subheadline.weight(.semibold))
             Text(L(
-                "Add Google Antigravity accounts here to monitor 5-hour / weekly quotas locally and via randomized 1-by-1 checks (IDE account switching is disabled to protect accounts from TOS bans).",
-                "在此添加 Google Antigravity 账号，可通过本地 RPC 与随机逐个检查监控 5 小时/每周配额（已禁用自动切号以保护账号免受 TOS 封禁）。"
+                "Add Google Antigravity accounts here to view 5-hour / weekly quotas locally or reload saved snapshots (IDE account switching is disabled; remote consumer API checks carry TOS restriction risk).",
+                "在此添加 Google Antigravity 账号，可在本地查看 5 小时/每周配额或重新加载已保存的快照（已禁用自动切号；远程消费者接口请求存在 TOS 限制风险）。"
             ))
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1223,6 +1123,37 @@ struct AntigravitySubscriptionSection: View {
                     }
                 }
                 noteRow(entry)
+                if let live = entry.liveProvider {
+                    if live.status != .error,
+                       let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                        for: QuotaResetFormatter.snapshotHealth(for: live),
+                        language: appState.language
+                       ) {
+                        Text(healthBanner)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
+                    if let checkError = refreshCoordinator.lastCheckError(for: live) {
+                        Text(L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"))
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                    if let fetchedAt = refreshCoordinator.accountRefreshDate(for: live) {
+                        HStack(spacing: 4) {
+                            Text(L("Last known ·", "上次已知 ·"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            RefreshableTimeView(
+                                date: fetchedAt,
+                                language: appState.language,
+                                font: .caption2,
+                                foregroundStyle: .secondary,
+                                style: .relativeOnly
+                            )
+                        }
+                    }
+                }
                 usageWindowPills(entry)
             }
 
@@ -1253,11 +1184,17 @@ struct AntigravitySubscriptionSection: View {
                 .stroke(isActive ? Self.antigravityBrand.opacity(0.50) : Color.primary.opacity(0.06), lineWidth: 1)
         )
         .contextMenu {
+            Button {
+                AntigravityAccountSwitcher.openAntigravityApp()
+            } label: {
+                Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
+            }
+
             if let provider = entry.liveProvider {
                 Button {
                     Task { await refreshCoordinator.refreshProviderCardNow(provider) }
                 } label: {
-                    Label(L("Refresh Quota", "刷新配额"), systemImage: "arrow.clockwise")
+                    Label(L("Reload Saved Snapshot", "重载已存快照"), systemImage: "arrow.clockwise")
                 }
             }
 

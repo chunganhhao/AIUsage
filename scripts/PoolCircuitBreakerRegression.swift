@@ -133,11 +133,22 @@ struct PoolCircuitBreakerRegression {
         try FileManager.default.createDirectory(at: imports, withIntermediateDirectories: true)
         let source = imports.appendingPathComponent("fixture.json")
         try data.write(to: source)
-        StubURLProtocol.install(hosts: ["googleapis.com"])
-        defer { StubURLProtocol.uninstall() }
-        StubURLProtocol.respond(AntigravityProvider.loadCodeAssistURL, body: "{}")
-        StubURLProtocol.respond(AntigravityProvider.quotaSummaryURLs[0], body: #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","resetTime":"2026-10-26T00:00:00Z"}]},{"displayName":"Gemini 4 Argon","buckets":[{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.0,"resetTime":"2026-10-26T00:00:00Z"}]}]}"#)
-        let provider = AntigravityProvider(homeDirectory: home.path)
+        let summaryJSON = #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99}]},{"displayName":"Claude and GPT models","buckets":[{"bucketId":"3p-5h","window":"5h","resetTime":"2026-10-26T00:00:00Z"}]},{"displayName":"Gemini 4 Argon","buckets":[{"bucketId":"gemini-argon-wtu-weekly","window":"weekly","remainingFraction":0.0,"resetTime":"2026-10-26T00:00:00Z"}]}]}"#
+        let summaryObject = try JSONSerialization.jsonObject(with: Data(summaryJSON.utf8)) as! [String: Any]
+        let localReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 1, csrfToken: "csrf-fixture")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "fixture@example.invalid", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return summaryObject
+                }
+                return nil
+            }
+        )
+        let provider = AntigravityProvider(homeDirectory: home.path, localQuotaReader: localReader)
         try FileManager.default.removeItem(at: runtime.appendingPathComponent("current"))
         try FileManager.default.createSymbolicLink(atPath: runtime.appendingPathComponent("current").path, withDestinationPath: "versions/v7.2.67")
         let offUsage = try await provider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: source.path))
@@ -148,12 +159,11 @@ struct PoolCircuitBreakerRegression {
         try FileManager.default.createSymbolicLink(atPath: runtime.appendingPathComponent("current").path, withDestinationPath: "versions/v8.0.43")
         try AntigravityPoolProtectionSettings.setEnabled(true, homeDirectory: home.path)
         let usage = try await provider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: source.path))
-        try check(usage.extra["circuitBreakerPartialTripped"]?.value as? Bool == true, "Provider propagates partial state")
+        try check(usage.extra["circuitBreakerPartialTripped"] == nil && Data(contentsOf: destination) == data, "[§30.1 + §34.1] AntigravityProvider fetchUsage stays decoupled from CPA auth files")
+        _ = try AntigravityPoolCircuitBreaker.sync(targets: [destination], models: screenshot, runtime: runtime)
         let payload = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
-        try check(excluded(payload) == [ids[1], ids[2], ids[3]].sorted(), "AuthImports matches CPA account")
+        try check(excluded(payload) == [ids[1], ids[2], ids[3]].sorted(), "Direct AntigravityPoolCircuitBreaker sync updates target file")
         try check(try Data(contentsOf: source) == data, "Do not alter imported credential")
-        let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
-        try check(summary.statusLabel == "Pools Paused: argon, claude", "Normalizer reports exact pools")
         try AntigravityPoolProtectionSettings.setEnabled(false, homeDirectory: home.path)
         let disabled = try JSONSerialization.jsonObject(with: Data(contentsOf: destination)) as! [String: Any]
         try check(disabled["excluded_models"] == nil && disabled["aiusage_pool_breaker"] == nil, "Disable restores original inheritance")
@@ -231,7 +241,7 @@ struct PoolCircuitBreakerRegression {
         try FileManager.default.removeItem(at: migrationFile)
         try check(try !AntigravityPoolProtectionSettings.hasResidualProtection(homeDirectory: migrationHome.path), "Clean migration reports no residual protection")
 
-        // Real provider flow, with every HTTP response intercepted by StubURLProtocol.
+        // Policy check (§30.1): default AntigravityProvider fails closed locally with 0 HTTP requests
         let tokenHome = root.appendingPathComponent("token-home")
         try FileManager.default.createDirectory(at: tokenHome, withIntermediateDirectories: true)
         let tokenFile = tokenHome.appendingPathComponent("antigravity.json")
@@ -240,47 +250,18 @@ struct PoolCircuitBreakerRegression {
         expired["refresh_token"] = "refresh-fixture"
         expired["expired"] = "2020-01-01T00:00:00Z"
         let expiredData = try JSONSerialization.data(withJSONObject: expired)
-        let envKeys = ["AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID", "AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET"]
-        let savedEnvironment = envKeys.map { ProcessInfo.processInfo.environment[$0] }
-        for key in envKeys { setenv(key, "offline-fixture", 1) }
-        defer {
-            for (key, value) in zip(envKeys, savedEnvironment) {
-                if let value { setenv(key, value, 1) } else { unsetenv(key) }
-            }
+        try expiredData.write(to: tokenFile)
+        StubURLProtocol.install(hosts: ["googleapis.com"])
+        defer { StubURLProtocol.uninstall() }
+        let defaultProvider = AntigravityProvider(homeDirectory: tokenHome.path)
+        do {
+            _ = try await defaultProvider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: tokenFile.path))
+            throw NSError(domain: "[§30.1] Default AntigravityProvider must fail closed locally without third-party consumer HTTPS requests", code: 1)
+        } catch let error as ProviderError {
+            try check(error.code == "local_only_unavailable", "[§30.1] Default AntigravityProvider throws local_only_unavailable")
         }
-        let healthyBody = #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.99}]}]}"#
-        StubURLProtocol.respond(AntigravityProvider.quotaSummaryURLs[0]) { request in
-            let token = request.headers.first { $0.key.lowercased() == "authorization" }?.value
-            return token == "Bearer token-B" ? (401, "{}") : (200, healthyBody)
-        }
-        for externalWrite in [false, true] {
-            try expiredData.write(to: tokenFile)
-            var refreshes = 0
-            StubURLProtocol.respond(AntigravityProvider.oauthRefreshURL) { _ in
-                refreshes += 1
-                if refreshes == 2 && externalWrite {
-                    var external = expired
-                    external["access_token"] = "external-token"
-                    external["refresh_token"] = "external-refresh"
-                    external["manual-field"] = "preserved"
-                    try! JSONSerialization.data(withJSONObject: external).write(to: tokenFile, options: .atomic)
-                }
-                return (200, refreshes == 1
-                    ? #"{"access_token":"token-B","expires_in":3600}"#
-                    : #"{"access_token":"token-C","expires_in":3600}"#)
-            }
-            let tokenProvider = AntigravityProvider(homeDirectory: tokenHome.path)
-            _ = try await tokenProvider.fetchUsage(with: .init(providerId: "antigravity", authMethod: .authFile, credential: tokenFile.path))
-            let saved = try JSONSerialization.jsonObject(with: Data(contentsOf: tokenFile)) as! [String: Any]
-            try check(refreshes == 2, "Expired A refreshes B then retries unauthorized B with C")
-            if externalWrite {
-                try check(saved["access_token"] as? String == "external-token" && saved["refresh_token"] as? String == "external-refresh", "Retry persistence preserves external token replacement")
-                try check(saved["manual-field"] as? String == "preserved", "Retry persistence preserves external metadata")
-            } else {
-                try check(saved["access_token"] as? String == "token-C", "Second successful refresh commits C after its own B write")
-                try check(saved["project_id"] as? String == "fixture-project", "Two refreshes preserve unrelated credential metadata")
-            }
-        }
+        try check(StubURLProtocol.requests.isEmpty, "[§30.1] Default AntigravityProvider sends 0 third-party HTTP requests")
+        try check(try Data(contentsOf: tokenFile) == expiredData, "[§30.1] Local-only fail-closed check leaves credential file byte-identical")
         try check(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-hydrogen-xhigh") == .gemini, "Gemini 4 Hydrogen maps to core Gemini pool")
         try check(AntigravityPoolCircuitBreaker.Pool.model("gemini-4-carbon-high") == .argon, "Gemini 4 Carbon maps to Argon/Carbon pool")
         try check(AntigravityPoolCircuitBreaker.Pool.quota(q("Gemini 4 Hydrogen", 50)) == .gemini, "Gemini 4 Hydrogen quota label maps to core Gemini pool")

@@ -121,13 +121,18 @@ enum ProductionCodexStorageParser {
     // PRODUCTION_CODEX_KEYRING
 }
 @MainActor final class ProductionCoordinatorFlowFixture {
+    struct AccountCheckError: Equatable { let message: String; let errorCode: String?; let failedAt: Date }
     struct ProviderData: Identifiable {
+        struct Headline { var primary = ""; var supporting = "" }
         let id: String
         let baseProviderId: String
         let accountId: String?
         let status: Status
         let needsCredentialConnection: Bool
         let sourceFilePath: String?
+        let headline = Headline()
+        let errorCode: String? = nil
+        let fetchedAt: String? = nil
         enum Status { case healthy, error }
     }
     struct StoredAccount { let providerId: String; let isHidden: Bool }
@@ -157,6 +162,13 @@ enum ProductionCodexStorageParser {
     func preferredLiveProvider(among list: [ProviderData], storedAccount: StoredAccount?) -> ProviderData? { list.first }
     func liveProviderIdentity(_ provider: ProviderData) -> String { provider.id }
     func providerSort(_ lhs: ProviderData, _ rhs: ProviderData) -> Bool { lhs.id < rhs.id }
+    func credentialID(for provider: ProviderData) -> String? { nil }
+    func resolvedFetchedDate(for provider: ProviderData) -> Date? { nil }
+    func lastCheckError(for provider: ProviderData) -> AccountCheckError? { nil }
+    func isLastKnownErrorPreservable(_ provider: ProviderData) -> Bool { provider.status != .error }
+    func isTerminalStopFailure(_ provider: ProviderData) -> Bool { false }
+    func clearAccountCheckError(for provider: ProviderData, credentialId: String? = nil) {}
+    func recordAccountCheckError(for provider: ProviderData, credentialId: String? = nil, message: String, errorCode: String?) {}
     // PRODUCTION_COORDINATOR_FLOW
 }
 struct NativeToggleFixture: View {

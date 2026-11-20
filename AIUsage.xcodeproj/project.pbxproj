@@ -185,6 +185,8 @@
 		C1CPA0152FD000B000B26789 /* THIRD_PARTY_NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = C1CPA0142FD000B000B26789 /* THIRD_PARTY_NOTICES.md */; };
 		C1CPA0172FD000C000B26789 /* CLIProxyCredentialAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */; };
 		C1CPA0592FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */; };
+		C1CPA0612FD0035000B26789 /* TokenSaverSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */; };
+		C1CPA0632FD0036000B26789 /* GeminiCredentialBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */; };
 		C1CPA0312FD0020000B26789 /* CLIProxyUpstreamCapability.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0302FD0020000B26789 /* CLIProxyUpstreamCapability.swift */; };
 		C1CPA0332FD0021000B26789 /* CLIProxyAuthImportPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0322FD0021000B26789 /* CLIProxyAuthImportPlanner.swift */; };
 		C1CPA0352FD0022000B26789 /* CLIProxyGatewayManager+Import.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0342FD0022000B26789 /* CLIProxyGatewayManager+Import.swift */; };
@@ -443,6 +445,8 @@
 		C1CPA0142FD000B000B26789 /* THIRD_PARTY_NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = THIRD_PARTY_NOTICES.md; sourceTree = SOURCE_ROOT; };
 		C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIProxyCredentialAdapter.swift; sourceTree = "<group>"; };
 		C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIProxyGeminiCredentialBridge.swift; sourceTree = "<group>"; };
+		C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenSaverSettingsView.swift; sourceTree = "<group>"; };
+		C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiCredentialBridge.swift; sourceTree = "<group>"; };
 		C1CG10002FB0001000B26789 /* CodexGlobalConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexGlobalConfig.swift; sourceTree = "<group>"; };
 		C1CX00002FB0000100B26789 /* CodexConfigManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexConfigManager.swift; sourceTree = "<group>"; };
 		C1CX00022FB0000200B26789 /* CodexProxyManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexProxyManagementView.swift; sourceTree = "<group>"; };
@@ -638,6 +642,7 @@
 				C1CPA0122FD000A000B26789 /* CLIProxyManagementClient.swift */,
 				C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */,
 				C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */,
+				C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */,
 				5EFAD7442F87AC7100A15674 /* APIService.swift */,
 				A5A0E1C02F9A001000A15674 /* QuotaShareService.swift */,
 				B1REFA002F97002000A15674 /* ProxyRuntimeService.swift */,
@@ -681,6 +686,7 @@
 				C1CPA03A2FD0025000B26789 /* SubscriptionGatewayAccountDetailSheet.swift */,
 				C1CPA01E2FD0010000B26789 /* SubscriptionGatewayConnectionsView.swift */,
 				C1CPA0202FD0011000B26789 /* SubscriptionGatewaySettingsView.swift */,
+				C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */,
 				C1CPA0542FD0032000B26789 /* SubscriptionGatewaySettingsRuntimePane.swift */,
 				7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */,
 				1C73CAB12A82429690ADA677 /* AgentToolsView.swift */,
@@ -982,6 +988,8 @@
 				C1CPA0132FD000A000B26789 /* CLIProxyManagementClient.swift in Sources */,
 				C1CPA0172FD000C000B26789 /* CLIProxyCredentialAdapter.swift in Sources */,
 				C1CPA0592FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift in Sources */,
+				C1CPA0612FD0035000B26789 /* TokenSaverSettingsView.swift in Sources */,
+				C1CPA0632FD0036000B26789 /* GeminiCredentialBridge.swift in Sources */,
 				C1CPA0312FD0020000B26789 /* CLIProxyUpstreamCapability.swift in Sources */,
 				C1CPA0332FD0021000B26789 /* CLIProxyAuthImportPlanner.swift in Sources */,
 				C1CPA0352FD0022000B26789 /* CLIProxyGatewayManager+Import.swift in Sources */,

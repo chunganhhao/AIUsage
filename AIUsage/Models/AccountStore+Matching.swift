@@ -111,7 +111,10 @@ extension AccountStore {
             note: note,
             accountId: entry.liveProvider?.accountId?.nilIfBlank ?? entry.storedAccount?.accountId,
             providerResultId: entry.liveProvider?.id ?? entry.storedAccount?.providerResultId,
-            credentialId: isPermanentlyRemoved ? nil : entry.storedAccount?.credentialId,
+            credentialId: isPermanentlyRemoved
+                ? nil
+                : (entry.storedAccount?.credentialId?.nilIfBlank
+                    ?? entry.liveProvider.flatMap { AccountIdentityPolicy.extractCredentialId(from: $0.id) }),
             createdAt: entry.storedAccount?.createdAt ?? now,
             lastSeenAt: lastSeenAt ?? entry.storedAccount?.lastSeenAt,
             isHidden: isHidden || isPermanentlyRemoved,

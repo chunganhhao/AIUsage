@@ -149,11 +149,23 @@ struct ProviderDetailView: View {
             Spacer(minLength: 0)
 
             Menu {
+                if provider.baseProviderId == "antigravity" {
+                    Button {
+                        AntigravityAccountSwitcher.openAntigravityApp()
+                    } label: {
+                        Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
+                    }
+                }
+
                 Button {
                     Task { await refreshCoordinator.refreshProviderCardNow(provider) }
                 } label: {
                     Label(
-                        isRefreshing ? L("Refreshing…", "刷新中…") : L("Refresh Account", "刷新账号"),
+                        isRefreshing
+                            ? L("Refreshing…", "刷新中…")
+                            : (provider.baseProviderId == "antigravity"
+                                ? L("Reload Saved Snapshot", "重载已存快照")
+                                : L("Refresh Account", "刷新账号")),
                         systemImage: "arrow.clockwise"
                     )
                 }
@@ -256,6 +268,26 @@ struct ProviderDetailView: View {
                 Text(supporting)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if provider.status != .error,
+               provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex",
+               let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                for: QuotaResetFormatter.snapshotHealth(for: provider),
+                language: appState.language
+               ) {
+                Label(healthBanner, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+
+            if let checkError = refreshCoordinator.lastCheckError(for: provider) {
+                Label(
+                    L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
 
             if let copiedMessage {

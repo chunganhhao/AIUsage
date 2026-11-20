@@ -66,11 +66,24 @@ final class AntigravityProviderTests: XCTestCase {
           ]}
         ]}
         """
-        StubURLProtocol.respond(Self.dailySummary, status: 200, body: summaryWithExhaustedArgon)
+        let localReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 1, csrfToken: "csrf-argon")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "user@example.com", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return Self.json(summaryWithExhaustedArgon)
+                }
+                return nil
+            }
+        )
+        let localProvider = AntigravityProvider(homeDirectory: "/tmp/agy-test", localQuotaReader: localReader)
+        let usage = try await localProvider.fetchUsage(with: makeCredential(withProjectStub: false))
+        let normalized = UsageNormalizer.normalize(provider: localProvider, usage: usage)
 
-        let usage = try await provider.fetchUsage(with: makeCredential())
-        let normalized = UsageNormalizer.normalize(provider: provider, usage: usage)
-
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
         XCTAssertEqual(normalized.windows.count, 5)
         XCTAssertEqual(normalized.windows.last?.label, "Gemini 4 Argon · Weekly")
         XCTAssertEqual(normalized.windows.last?.remainingPercent ?? -1, 0.08, accuracy: 0.001)
@@ -102,11 +115,11 @@ final class AntigravityProviderTests: XCTestCase {
         """)))
     }
 
-    // MARK: - Endpoint fallback
+    // MARK: - Policy-compliant local IDE RPC & zero remote Google HTTPS
 
     override func setUp() {
         super.setUp()
-        StubURLProtocol.install(hosts: ["googleapis.com"])
+        StubURLProtocol.install(hosts: ["googleapis.com", "cloudcode-pa.googleapis.com", "daily-cloudcode-pa.googleapis.com", "oauth2.googleapis.com"])
     }
 
     override func tearDown() {
@@ -114,130 +127,75 @@ final class AntigravityProviderTests: XCTestCase {
         super.tearDown()
     }
 
-    func testUsesDailySummaryWithoutProjectOmittingPlaceholder() async throws {
-        StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"free","name":"Free"}}"#)
-        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
-
-        _ = try await provider.fetchUsage(with: makeCredential(withProjectStub: false))
-
-        XCTAssertEqual(StubURLProtocol.lastRequest(to: Self.dailySummary)?.jsonBody as? [String: String], [:])
+    func testDefaultProductionProviderDisablesLiveIDEReaderevenForRealHomeDirectory() async throws {
+        let prodProvider = AntigravityProvider(homeDirectory: NSHomeDirectory())
+        XCTAssertNil(prodProvider.effectiveLocalQuotaReader)
+        do {
+            _ = try await prodProvider.fetchUsage(with: makeCredential(withProjectStub: false))
+            XCTFail("Expected local_only_unavailable when default production provider has live IDE RPC disabled")
+        } catch let error as ProviderError {
+            XCTAssertEqual(error.code, "local_only_unavailable")
+        }
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
-    func testLoadCodeAssistFallsBackToProdOnServerError() async throws {
-        StubURLProtocol.respond(Self.loadCodeAssist, status: 500, body: "{}")
-        StubURLProtocol.respond(Self.prodLoadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-fallback"}"#)
-        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
+    func testFetchUsageFailsClosedLocallyWhenIDEAbsentWithZeroHTTPS() async throws {
+        let absentReader = AntigravityLocalQuotaReader(listProcesses: { [] }, listPorts: { _ in [] }, callRPC: { _, _, _, _ in nil })
+        let absentProvider = AntigravityProvider(homeDirectory: "/tmp/agy-absent", localQuotaReader: absentReader)
 
-        let usage = try await provider.fetchUsage(with: makeCredential(withProjectStub: false))
-
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.prodLoadCodeAssist, Self.dailySummary])
-        XCTAssertEqual(usage.extra["projectId"]?.value as? String, "proj-fallback")
+        do {
+            _ = try await absentProvider.fetchUsage(with: makeCredential(withProjectStub: false))
+            XCTFail("Expected local_only_unavailable when local IDE is absent")
+        } catch let error as ProviderError {
+            XCTAssertEqual(error.code, "local_only_unavailable")
+        }
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
-    func testUsesDailySummaryWithAccountProject() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 200, body: Self.fullSummary)
+    func testFetchUsageReadsMatchingLocalIDERPCWithZeroHTTPS() async throws {
+        let localReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 42, csrfToken: "csrf-local")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "user@example.com", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return Self.json(Self.fullSummary)
+                }
+                return nil
+            }
+        )
+        let localProvider = AntigravityProvider(homeDirectory: "/tmp/agy-local", localQuotaReader: localReader)
+        let usage = try await localProvider.fetchUsage(with: makeCredential(withProjectStub: false))
 
-        let usage = try await provider.fetchUsage(with: makeCredential())
-
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary])
-        XCTAssertEqual(StubURLProtocol.lastRequest(to: Self.dailySummary)?.jsonBody as? [String: String], ["project": "proj-123"])
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+        XCTAssertEqual(usage.extra["transport"]?.value as? String, "loopback_rpc")
         XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "groups")
         XCTAssertEqual(usage.primary?.label, "Gemini · Weekly")
         XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 27.25, accuracy: 0.001)
 
-        let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
+        let summary = UsageNormalizer.normalize(provider: localProvider, usage: usage)
         XCTAssertEqual(summary.windows.count, 4)
         XCTAssertNil(summary.models)
         XCTAssertEqual(summary.headline.secondary, "lowest remaining window")
     }
 
-    func testFallsBackToProdSummaryWhenDailyReturnsNotFound() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 404, body: #"{"error":{"code":404}}"#)
-        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
-
-        let usage = try await provider.fetchUsage(with: makeCredential())
-
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
-        XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "groups")
-    }
-
-    func testForbiddenSummaryDoesNotFallBack() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 403, body: #"{"error":{"code":403}}"#)
-        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
+    func testPreSuspendedCredentialReturnsTosViolationWithZeroHTTPS() async throws {
+        let absentReader = AntigravityLocalQuotaReader(listProcesses: { [] }, listPorts: { _ in [] }, callRPC: { _, _, _, _ in nil })
+        let localProvider = AntigravityProvider(homeDirectory: "/tmp/agy-susp", localQuotaReader: absentReader)
+        let cred = try makeCredential(withProjectStub: false)
+        let url = URL(fileURLWithPath: cred.credential)
+        let raw = try Data(contentsOf: url)
+        try AntigravityAccountProtection.suspend(url, error: ProviderError("tos_violation", "Suspended"), expectedData: raw)
 
         do {
-            _ = try await provider.fetchUsage(with: makeCredential())
-            XCTFail("Expected forbidden")
+            _ = try await localProvider.fetchUsage(with: cred)
+            XCTFail("Expected tos_violation")
         } catch let error as ProviderError {
-            XCTAssertEqual(error.code, "forbidden")
+            XCTAssertEqual(error.code, "tos_violation")
         }
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary])
-    }
-
-    func testFallsBackToProdSummaryWhenDailyHasNoUsableBuckets() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 200, body: #"{"groups":[]}"#)
-        StubURLProtocol.respond(Self.prodSummary, status: 200, body: Self.fullSummary)
-
-        let usage = try await provider.fetchUsage(with: makeCredential())
-
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary])
-        XCTAssertEqual(usage.extra["modelCount"]?.value as? Int, 4)
-    }
-
-    /// 免费账号拿不到分组额度时仍要显示旧的按模型配额，而不是直接报错。
-    func testFallsBackToLegacyModelsWhenNoSummaryIsAvailable() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 404, body: "{}")
-        StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
-        StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
-        {"models":{"gemini-3-pro":{"displayName":"Gemini 3 Pro","modelProvider":"GOOGLE",
-          "quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-10-20T15:00:00Z"}}}}
-        """)
-
-        let usage = try await provider.fetchUsage(with: makeCredential())
-
-        XCTAssertEqual(StubURLProtocol.requestedURLs, [Self.loadCodeAssist, Self.dailySummary, Self.prodSummary, Self.legacyModels])
-        XCTAssertEqual(usage.extra["quotaSource"]?.value as? String, "models")
-        XCTAssertEqual(usage.primary?.label, "Gemini 3 Pro")
-        XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 40, accuracy: 0.001)
-
-        let summary = UsageNormalizer.normalize(provider: provider, usage: usage)
-        XCTAssertEqual(summary.models?.count, 1)
-        XCTAssertEqual(summary.headline.secondary, "lowest remaining model")
-    }
-
-    /// 旧接口同样按 proto3 省略零值：只有 resetTime 的模型是用尽（0%），不能被丢掉；两者都没有的才跳过。
-    func testLegacyModelWithoutFractionButWithResetIsExhausted() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 404, body: "{}")
-        StubURLProtocol.respond(Self.prodSummary, status: 404, body: "{}")
-        StubURLProtocol.respond(Self.legacyModels, status: 200, body: """
-        {"models":{
-          "gemini-3-pro":{"displayName":"Gemini 3 Pro","quotaInfo":{"remainingFraction":0.4,"resetTime":"2026-10-20T15:00:00Z"}},
-          "claude-sonnet":{"displayName":"Claude Sonnet","quotaInfo":{"resetTime":"2026-10-20T15:00:00Z"}},
-          "unmetered":{"displayName":"Unmetered","quotaInfo":{}},
-          "blank-reset":{"displayName":"Blank Reset","quotaInfo":{"resetTime":"   "}}
-        }}
-        """)
-
-        let usage = try await provider.fetchUsage(with: makeCredential())
-
-        XCTAssertEqual(usage.extra["modelCount"]?.value as? Int, 2)
-        XCTAssertEqual(usage.primary?.label, "Claude Sonnet")
-        XCTAssertEqual(usage.primary?.remainingPercent ?? -1, 0, accuracy: 0.001)
-        XCTAssertEqual(usage.primary?.resetAt, "2026-10-20T15:00:00Z")
-    }
-
-    /// 401 必须走令牌刷新，不能被当成「这份部署不可用」吞掉后去读旧接口。
-    func testUnauthorizedSummaryIsNotSwallowedByFallback() async throws {
-        StubURLProtocol.respond(Self.dailySummary, status: 401, body: "{}")
-        StubURLProtocol.respond(Self.legacyModels, status: 200, body: #"{"models":{}}"#)
-
-        do {
-            _ = try await provider.fetchUsage(with: makeCredential())
-            XCTFail("Expected unauthorized")
-        } catch let error as ProviderError {
-            XCTAssertEqual(error.code, "unauthorized")
-        }
-        XCTAssertFalse(StubURLProtocol.requestedURLs.contains(Self.legacyModels))
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
     // MARK: - Fixtures

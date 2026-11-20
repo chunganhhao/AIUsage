@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import QuotaBackend
 
 // MARK: - Subscription Account List Models
 // 订阅账号页的状态筛选与派生计数（仿 GatewayAccountListModels）。
@@ -163,5 +164,31 @@ enum SubscriptionAccountListLogic {
                 accounts: filteredAccounts
             )
         }
+    }
+}
+
+extension Array where Element == ProviderAccountEntry {
+    func bestNextQuotaCandidate(
+        isActive: (ProviderAccountEntry) -> Bool,
+        now: Date = Date()
+    ) -> QuotaSnapshotBestNextCandidate? {
+        let inputs: [QuotaSnapshotAdvisor.CandidateInput] = compactMap { entry in
+            guard let live = entry.liveProvider, live.status != .error else { return nil }
+            let windows = live.windows.map {
+                QuotaSnapshotWindowInput(label: $0.label, remainingPercent: $0.remainingPercent, resetAt: $0.resetAt)
+            }
+            let fetchedAt = live.fetchedAt.flatMap { SharedFormatters.parseISO8601($0) }
+            return QuotaSnapshotAdvisor.CandidateInput(
+                id: entry.id,
+                providerId: entry.providerId,
+                label: entry.accountPrimaryLabel,
+                remainingPercent: live.remainingPercent,
+                fetchedAt: fetchedAt,
+                isActive: isActive(entry),
+                isTerminalSuspended: live.errorCode == "tos_violation" || live.errorCode == "account_disabled",
+                windows: windows
+            )
+        }
+        return QuotaSnapshotAdvisor.bestNextCandidate(from: inputs, now: now)
     }
 }

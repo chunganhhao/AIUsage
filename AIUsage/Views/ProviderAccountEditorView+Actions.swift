@@ -49,20 +49,19 @@ extension ProviderAccountEditorView {
             step = .signingIn
             codexLogin.start(executable: codexExecutable)
         case .googleOAuth:
-            step = .signingIn
             if providerId == "gemini" {
+                step = .signingIn
                 geminiLogin.start()
             } else {
-                let warning = NSAlert()
-                warning.messageText = L("Prefer Import Antigravity IDE Session", "优先导入 Antigravity IDE 会话", "Ưu tiên nhập phiên Antigravity IDE")
-                warning.informativeText = L(
-                    "Browser OAuth may use an unsupported legacy client. For primary or Ultra accounts, cancel and import the signed-in IDE session. Continuing does not prevent account restrictions.",
-                    "浏览器 OAuth 可能使用不再支持的旧客户端。主账号或 Ultra 账号请取消并导入 IDE 会话。继续不能保证账号安全。",
-                    "OAuth trình duyệt có thể dùng client cũ không còn hỗ trợ. Với tài khoản chính hoặc Ultra, hãy hủy và nhập phiên IDE đã đăng nhập. Tiếp tục không bảo đảm tránh hạn chế tài khoản.")
-                warning.addButton(withTitle: L("Cancel", "取消", "Hủy"))
-                warning.addButton(withTitle: L("Continue Browser OAuth", "继续浏览器 OAuth", "Tiếp tục OAuth trình duyệt"))
-                guard warning.runModal() == .alertSecondButtonReturn else { step = .ready; return }
-                antigravityLogin.start()
+                let notice = NSAlert()
+                notice.messageText = L("Antigravity Browser OAuth Disabled", "已禁用 Antigravity 浏览器 OAuth", "Đã tắt OAuth trình duyệt Antigravity")
+                notice.informativeText = L(
+                    "Direct third-party Google OAuth for Antigravity is disabled for policy compliance (Google Antigravity Terms §6). AIUsage only reads your local Antigravity IDE session and saved snapshots.",
+                    "为遵守策略（Google Antigravity Terms §6），已禁用 Antigravity 第三方浏览器 OAuth。AIUsage 仅读取本地 Antigravity IDE 会话和已保存快照。",
+                    "OAuth Google bên thứ ba cho Antigravity đã được tắt để tuân thủ chính sách (Google Antigravity Terms §6). AIUsage chỉ đọc phiên Antigravity IDE cục bộ và snapshot đã lưu.")
+                notice.addButton(withTitle: L("OK", "好", "OK"))
+                _ = notice.runModal()
+                step = .ready
             }
         case .githubDevice:
             step = .signingIn
@@ -122,7 +121,6 @@ extension ProviderAccountEditorView {
         switch providerId {
         case "codex": await handleCodexLoginSuccess()
         case "gemini": await handleGeminiLoginSuccess()
-        case "antigravity": await handleAntigravityLoginSuccess()
         case "copilot": await handleCopilotLoginSuccess()
         case "kiro": await handleKiroLoginSuccess()
         default: break
@@ -188,7 +186,19 @@ extension ProviderAccountEditorView {
         errorMessage = nil
         step = .connecting
         do {
-            let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(candidate)
+            let isAntigravityLocal = candidate.providerId == "antigravity"
+                && (candidate.sourceIdentifier.hasPrefix("antigravity-ide:") || candidate.authMethod == .authFile)
+            let isCodexLocalMetadataOnly: Bool = {
+                guard candidate.providerId == "codex", candidate.authMethod == .authFile else { return false }
+                if appState.settings.autoRefreshInterval == 0 { return true }
+                guard let activeKey = CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey else { return true }
+                return CodexQuotaPollingPolicy.verifiedNativeIdentity(atPath: candidate.credentialValue)?.nativeKey != activeKey
+            }()
+            let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
+                candidate,
+                localOnly: isAntigravityLocal || isCodexLocalMetadataOnly,
+                allowLocalMetadataFallback: isCodexLocalMetadataOnly || isAntigravityLocal
+            )
             let resultId = try appState.registerAuthenticatedCredential(credential, usage: usage, note: nil)
             finishConnection(resultId: resultId, usage: usage, fallbackTitle: candidate.title)
         } catch {
@@ -275,9 +285,7 @@ extension ProviderAccountEditorView {
     }
 
     private func shouldSkipImmediateProviderRefresh(for providerId: String) -> Bool {
-        providerId == "codex"
-            || providerId == "gemini"
-            || providerId == "cursor"
+        ProviderRefreshCoordinator.shouldSkipImmediateProviderRefresh(for: providerId)
     }
 
     private func cancelLogins() {
@@ -344,33 +352,6 @@ extension ProviderAccountEditorView {
 
         await importCandidate(candidate)
         geminiLogin.discardImportedSession()
-    }
-
-    private func handleAntigravityLoginSuccess() async {
-        guard let authFileURL = antigravityLogin.importedAuthFileURL else {
-            fail(L("Google sign-in succeeded, but AIUsage could not find the Antigravity auth file.",
-                   "Google 登录已经成功，但 AIUsage 没有找到 Antigravity 的认证文件。"))
-            return
-        }
-
-        let candidate = ProviderAuthCandidate(
-            id: "antigravity-oauth:\(authFileURL.path)",
-            providerId: "antigravity",
-            sourceIdentifier: "antigravity-oauth:\(antigravityLogin.accountEmail?.lowercased() ?? authFileURL.path)",
-            sessionFingerprint: nil,
-            title: antigravityLogin.accountEmail ?? "Antigravity Google Login",
-            subtitle: L("Fresh Google login", "新的 Google 登录"),
-            detail: authFileURL.lastPathComponent,
-            modifiedAt: Date(),
-            authMethod: .authFile,
-            credentialValue: authFileURL.path,
-            sourcePath: authFileURL.path,
-            shouldCopyFile: true,
-            identityScope: .sharedSource
-        )
-
-        await importCandidate(candidate)
-        antigravityLogin.discardImportedSession()
     }
 
     private func handleKiroLoginSuccess() async {

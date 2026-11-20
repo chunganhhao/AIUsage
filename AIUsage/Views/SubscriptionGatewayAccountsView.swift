@@ -16,7 +16,7 @@ struct SubscriptionGatewayAccountsView: View {
     @State private var filter: GatewayAccountFilter = .all
     @State private var selectedDetail: CLIProxyAuthFile?
     @State private var pendingForceSync: CLIProxyAccountSyncCandidate?
-    @State private var upstreamSection: GatewayUpstreamSection = .oauth
+    @State private var upstreamSection: GatewayUpstreamSection = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild ? .oauth : .apiKey
     @State private var subscriptionFlash: AppFlash?
     @State private var expandedAccountFamilies: Set<String> = []
     @State private var collapsedAccountFamilies: Set<String> = []
@@ -506,15 +506,9 @@ struct SubscriptionGatewayAccountsView: View {
 
     private func testConnectivity(_ family: GatewayAccountFamily) async {
         let targets = family.loginFiles.isEmpty ? family.files : family.loginFiles
-        var connected = 0
-        var failed = 0
-        for file in targets {
-            switch await manager.testAccountConnectivity(for: file).state {
-            case .connected: connected += 1
-            case .failed: failed += 1
-            case .checking, .unsupported: break
-            }
-        }
+        let results = await manager.testFamilyAccountConnectivity(targets)
+        let connected = results.filter { $0.state.isConnected }.count
+        let failed = results.filter { $0.state.needsAttention }.count
         if connected > 0, failed == 0 {
             subscriptionFlash = .success(L(
                 "\(family.accountLabel) · connected · no model inference",
@@ -631,13 +625,15 @@ struct SubscriptionGatewayAccountsView: View {
                      : L("No matching accounts", "没有匹配的账号"))
                     .font(.headline)
                 Text(query.isEmpty
-                     ? L("Add an account with web sign-in, an official plugin, a Subscription account, an API key, or an account file.", "可通过网页登录、官方插件、订阅账号、API Key 或账号文件添加。")
+                     ? (CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                        ? L("Add an account with web sign-in, an official plugin, a Subscription account, an API key, or an account file.", "可通过网页登录、官方插件、订阅账号、API Key 或账号文件添加。")
+                        : L("CPA subscription accounts are unavailable in this build. Add an official OpenAI-compatible API-key upstream instead.", "当前构建已停用 CPA 订阅账号；请改为配置官方 OpenAI 兼容 API Key 上游。"))
                      : L("Try a different search or status filter.", "请尝试其他搜索词或状态筛选。"))
                     .font(.callout)
                     .foregroundStyle(.secondary)
                 if query.isEmpty {
                     Button(L("Add Account", "添加账号")) {
-                        upstreamSection = .oauth
+                        upstreamSection = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild ? .oauth : .apiKey
                         showAddAccount = true
                     }
                     .buttonStyle(.borderedProminent)

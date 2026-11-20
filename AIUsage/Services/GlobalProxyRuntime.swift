@@ -162,6 +162,10 @@ final class GlobalProxyRuntime: ObservableObject {
         }
         guard generation == startGeneration else { throw CancellationError() }
 
+        if httpsPort != nil || tlsIdentityPath != nil {
+            try TLSCertificateManager.requireMemoryOnlyTLSRuntimeSupport()
+        }
+
         let admin = UUID().uuidString
         var environment = ProcessInfo.processInfo.environment
         for (key, value) in baseEnv { environment[key] = value }

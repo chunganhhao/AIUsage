@@ -105,27 +105,43 @@ public enum UsageNormalizer {
             raw: usage
         )
 
+        var normalized: ProviderSummary
         switch provider.id {
-        case "warp":    return normalizeWarp(base: &base, usage: usage)
-        case "antigravity": return normalizeAntigravity(base: &base, usage: usage)
-        case "antigravity-cost": return normalizeAntigravityCost(base: &base, usage: usage)
-        case "claude":  return normalizeClaude(base: &base, usage: usage)
-        case "claude-subscription": return normalizeClaudeSubscription(base: &base, usage: usage)
-        case "codex-cost": return normalizeCodexCost(base: &base, usage: usage)
-        case "copilot": return normalizeCopilot(base: &base, usage: usage)
-        case "codex":   return normalizeCodex(base: &base, usage: usage)
-        case "gemini":  return normalizeGemini(base: &base, usage: usage)
-        case "kimi":    return normalizeKimi(base: &base, usage: usage)
-        case "kiro":    return normalizeKiro(base: &base, usage: usage)
-        case "minimax": return normalizeMiniMax(base: &base, usage: usage)
-        case "opencode": return normalizeOpenCode(base: &base, usage: usage)
-        case "cursor":  return normalizeCursor(base: &base, usage: usage)
-        case "droid":   return normalizeDroid(base: &base, usage: usage)
+        case "warp":    normalized = normalizeWarp(base: &base, usage: usage)
+        case "antigravity": normalized = normalizeAntigravity(base: &base, usage: usage)
+        case "antigravity-cost": normalized = normalizeAntigravityCost(base: &base, usage: usage)
+        case "claude":  normalized = normalizeClaude(base: &base, usage: usage)
+        case "claude-subscription": normalized = normalizeClaudeSubscription(base: &base, usage: usage)
+        case "codex-cost": normalized = normalizeCodexCost(base: &base, usage: usage)
+        case "copilot": normalized = normalizeCopilot(base: &base, usage: usage)
+        case "codex":   normalized = normalizeCodex(base: &base, usage: usage)
+        case "gemini":  normalized = normalizeGemini(base: &base, usage: usage)
+        case "kimi":    normalized = normalizeKimi(base: &base, usage: usage)
+        case "kiro":    normalized = normalizeKiro(base: &base, usage: usage)
+        case "minimax": normalized = normalizeMiniMax(base: &base, usage: usage)
+        case "opencode": normalized = normalizeOpenCode(base: &base, usage: usage)
+        case "cursor":  normalized = normalizeCursor(base: &base, usage: usage)
+        case "droid":   normalized = normalizeDroid(base: &base, usage: usage)
         default:
             base.headline = HeadlineInfo(eyebrow: "Live snapshot", primary: base.label, secondary: "Fetched successfully", supporting: sourceLabel)
             base.spotlight = "This provider is connected."
-            return base
+            normalized = base
         }
+
+        if (usage.extra["snapshotState"]?.value as? String) == "pending" {
+            normalized.fetchedAt = nil
+            normalized.status = "idle"
+            normalized.statusLabel = "Waiting"
+            if normalized.remainingPercent == nil && normalized.windows.isEmpty {
+                normalized.headline = HeadlineInfo(
+                    eyebrow: normalized.headline.eyebrow,
+                    primary: "Waiting for first sync",
+                    secondary: "Local metadata only — awaiting quota sync",
+                    supporting: normalized.headline.supporting
+                )
+            }
+        }
+        return normalized
     }
 
     public static func errorSummary(provider: any ProviderFetcher, error: Error) -> ProviderSummary {

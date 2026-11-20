@@ -140,9 +140,18 @@ final class CLIProxyGatewayManager: ObservableObject {
     private var modelCatalogRefreshID: UUID?
     private var modelCatalogRuntimePID: Int32?
     private var managedProviderCredentialRefreshTask: Task<Void, Never>?
+    private var managedProviderCredentialRefreshID: UUID?
+    private var managedDistributionTask: Task<Void, Never>?
+    private var managedDistributionTaskID: UUID?
+    private var containmentGeneration: UInt64 = 0
+    private var isManagedDistributionContainmentActive = false
+    private var isContainmentInProgress = false
+    private var lastObservedRuntimeRunning = false
     private var isCheckingRelease = false
+    /// Test-only hook for verifying bulk/family connectivity stop-on-429 logic offline.
+    var connectivityProbeOverride: ((CLIProxyAuthFile) async -> CLIProxyAccountConnectivityState)?
 
-    static let maxAuthFileImportBytes = 5 * 1_048_576
+    nonisolated static let maxAuthFileImportBytes = 5 * 1_048_576
 
     var hasUpdate: Bool {
         guard let currentVersion, let latestRelease else { return false }
@@ -207,14 +216,20 @@ final class CLIProxyGatewayManager: ObservableObject {
                 )
             }
         // 定时刷新本地模型目录，不依赖 Accounts 页生命周期，也不访问账号上游。
+        lastObservedRuntimeRunning = self.runtime.state.isRunning
         Publishers.CombineLatest(self.runtime.$state, self.runtime.$settings)
             .receive(on: RunLoop.main)
             .sink { [weak self] state, settings in
-                self?.syncAccountProbeLoop(
+                guard let self else { return }
+                self.syncAccountProbeLoop(
                     isRunning: state.isRunning,
                     settings: settings.normalized
                 )
-                self?.refreshDistributionState()
+                if state.isRunning, !self.lastObservedRuntimeRunning {
+                    self.releaseManagedDistributionContainmentIfHealthy()
+                }
+                self.lastObservedRuntimeRunning = state.isRunning
+                self.refreshDistributionState()
             }
             .store(in: &accountProbeCancellables)
     }
@@ -304,6 +319,10 @@ final class CLIProxyGatewayManager: ObservableObject {
 
     func installOrUpdateLatest() async {
         guard !operation.isBusy else { return }
+        guard CLIProxyRuntimeController.managedRuntimeAvailable else {
+            lastError = CLIProxyRuntimeController.managedRuntimeHoldMessage
+            return
+        }
         lastError = nil
         do {
             let release: CLIProxyRelease
@@ -401,10 +420,9 @@ final class CLIProxyGatewayManager: ObservableObject {
         defer { isManagingAccounts = false }
         do {
             retrySyncManifestLoadIfNeeded()
-            async let files = loadAuthPool(using: client)
-            async let catalogRefresh: Void = refreshModelCatalog(using: client)
-            authFiles = try await files
-            await catalogRefresh
+            let files = try await loadAuthPool(using: client)
+            authFiles = files
+            await refreshModelCatalog(using: client)
             let validNames = Set(authFiles.map(\.name))
             authFileModels = authFileModels.filter { validNames.contains($0.key) }
             authFileModelErrors = authFileModelErrors.filter { validNames.contains($0.key) }
@@ -568,10 +586,20 @@ final class CLIProxyGatewayManager: ObservableObject {
     nonisolated private static func syncCandidateSources(
         from accounts: [StoredProviderAccount]
     ) -> [CLIProxySyncCandidateSource] {
+        let excludedCredentialIDs = Set(
+            accounts
+                .filter { $0.isHidden || $0.isPermanentlyRemoved }
+                .compactMap { $0.credentialId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() }
+                .filter { !$0.isEmpty }
+        )
         var seen = Set<String>()
         return accounts.compactMap { account in
-            guard let credentialID = account.credentialId else { return nil }
-            let identity = "\(account.providerId.lowercased()):\(credentialID.lowercased())"
+            guard !account.isHidden, !account.isPermanentlyRemoved,
+                  let credentialID = account.credentialId else { return nil }
+            let normalizedCredentialID = credentialID.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            guard !normalizedCredentialID.isEmpty,
+                  !excludedCredentialIDs.contains(normalizedCredentialID) else { return nil }
+            let identity = "\(account.providerId.lowercased()):\(normalizedCredentialID)"
             guard seen.insert(identity).inserted else { return nil }
             return CLIProxySyncCandidateSource(
                 providerID: account.providerId,
@@ -600,10 +628,12 @@ final class CLIProxyGatewayManager: ObservableObject {
         case .requiresCPAOAuth, .notAnUpstream:
             isSyncable = false
         }
-        guard isSyncable else {
-            // Downstream/monitoring-only providers disappear entirely;
+        guard isSyncable,
+              !CLIProxyCapabilityMatrix.isDisallowedCPAProvider(normalizedProviderID) else {
+            // Downstream/monitoring-only and policy-blocked providers disappear entirely;
             // OAuth/plugin-capable providers become non-credential hints.
             if case .notAnUpstream = capability { return nil }
+            if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(normalizedProviderID) { return nil }
             return CLIProxySyncCandidateResult(source: source, evaluation: .notACandidate(capability))
         }
         guard let credential = AccountCredentialStore.shared.loadCredential(
@@ -624,21 +654,26 @@ final class CLIProxyGatewayManager: ObservableObject {
                     contentsOf: URL(fileURLWithPath: credential.credential),
                     options: .mappedIfSafe
                 )
-                let copiedData = try CLIProxyCredentialAdapter.convert(
-                    providerId: credential.providerId,
-                    credentialId: credential.id,
-                    accountLabel: credential.accountLabel,
-                    metadata: credential.metadata,
-                    sourceData: sourceData
-                )
-                let identity = try CLIProxyAccountIdentity.parse(
-                    data: copiedData,
-                    providerHint: source.providerID
-                )
-                let modifiedAt = try? URL(fileURLWithPath: credential.credential)
-                    .resourceValues(forKeys: [.contentModificationDateKey])
-                    .contentModificationDate
-                evaluation = .compatible(identity: identity, modifiedAt: modifiedAt)
+                if normalizedProviderID == "antigravity",
+                   let suspension = AntigravityAccountProtection.suspension(in: sourceData) {
+                    evaluation = .conversionFailed(suspension.message)
+                } else {
+                    let copiedData = try CLIProxyCredentialAdapter.convert(
+                        providerId: credential.providerId,
+                        credentialId: credential.id,
+                        accountLabel: credential.accountLabel,
+                        metadata: credential.metadata,
+                        sourceData: sourceData
+                    )
+                    let identity = try CLIProxyAccountIdentity.parse(
+                        data: copiedData,
+                        providerHint: source.providerID
+                    )
+                    let modifiedAt = try? URL(fileURLWithPath: credential.credential)
+                        .resourceValues(forKeys: [.contentModificationDateKey])
+                        .contentModificationDate
+                    evaluation = .compatible(identity: identity, modifiedAt: modifiedAt)
+                }
             } catch {
                 evaluation = .conversionFailed(error.localizedDescription)
             }
@@ -685,247 +720,125 @@ final class CLIProxyGatewayManager: ObservableObject {
         authFileConnectivity[file.name]
     }
 
-    /// Performs an explicit, credential-scoped upstream quota/usage request via
-    /// CPA. These endpoints do not run model inference and therefore consume no
-    /// model tokens. Automatic model-catalog refresh never calls this method.
-    func testAccountConnectivity(for file: CLIProxyAuthFile) async -> CLIProxyAccountConnectivityResult {
-        guard runtime.state.isRunning, let client = managementClient() else {
+    nonisolated static func shouldStopBulkConnectivityCheck(after state: CLIProxyAccountConnectivityState) -> Bool {
+        guard case .failed(let code, _, _) = state else { return false }
+        let normalized = code.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let stopCodes: Set<String> = [
+            "tos_violation",
+            "upstream_rate_limited",
+            "rate_limited",
+            "quota_exhausted",
+            "account_suspended",
+            "unsupported_client",
+            "oauth_access_token_rejected",
+            "policy_rejected"
+        ]
+        return stopCodes.contains(normalized) || normalized.contains("429")
+    }
+
+    /// Evaluates credential policy and connectivity without invoking unsupported
+    /// consumer quota endpoints. Consumer subscription probes always fail closed or
+    /// return `.unsupported` with local status guidance and zero outbound HTTP requests.
+    func testAccountConnectivity(
+        for file: CLIProxyAuthFile,
+        trustedCodexIssuerKeys: [CLIProxyTrustedJWSKey] = CLIProxyCapabilityMatrix.defaultTrustedCodexIssuerKeys
+    ) async -> CLIProxyAccountConnectivityResult {
+        let excludedIDs = AccountStore.shared.excludedEngineAccountFilters().credentialIDs
+        let activeAuthDir = (CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild || !trustedCodexIssuerKeys.isEmpty)
+            ? paths.authDirectory
+            : paths.isolatedAuthDirectory
+        if let policyRejection = CLIProxyRuntimeController.reEnableRejectionReason(
+            for: file,
+            in: activeAuthDir,
+            excludedCredentialIDs: excludedIDs,
+            trustedCodexIssuerKeys: trustedCodexIssuerKeys,
+            allowLocalDisabledFlag: false
+        ) {
             let state = CLIProxyAccountConnectivityState.failed(
-                code: "cpa_not_running",
-                message: L("Start CPA before checking this account.", "请先启动 CPA，再检测账号连通性。"),
+                code: "policy_rejected",
+                message: policyRejection,
                 checkedAt: Date()
             )
             authFileConnectivity[file.name] = state
             return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
         }
-        guard let authIndex = file.authIndex?.nilIfBlank else {
-            let state = CLIProxyAccountConnectivityState.unsupported(
-                reason: L("This account has no CPA runtime credential index.", "该账号没有 CPA 运行时凭据索引，无法执行上游检测。")
+
+        if file.disabled {
+            let state = CLIProxyAccountConnectivityState.failed(
+                code: "account_disabled",
+                message: L("Enable this account in CPA before checking upstream connectivity.", "该账号已在 CPA 中停用，未发起上游检测。"),
+                checkedAt: Date()
             )
             authFileConnectivity[file.name] = state
             return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
         }
 
         let provider = file.gatewayProviderID.lowercased()
-        let request: (method: String, url: URL, headers: [String: String], body: String)
-        do {
-            guard let built = try await connectivityRequest(for: file, provider: provider, client: client) else {
-                let state = CLIProxyAccountConnectivityState.unsupported(
-                    reason: L(
-                        "This provider has no inference-free upstream account check.",
-                        "该服务商暂没有不调用模型的上游账号检测方式。"
-                    )
+        if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(file.provider)
+            || CLIProxyCapabilityMatrix.isDisallowedCPAProvider(file.type)
+            || CLIProxyCapabilityMatrix.isDisallowedCPAProvider(provider) {
+            let state = CLIProxyAccountConnectivityState.unsupported(
+                reason: L(
+                    "Consumer \(provider.isEmpty ? "subscription" : provider) upstream connectivity checks are disabled in CPA Gateway.",
+                    "CPA 网关已禁用该订阅账号的上游连通性检测。"
                 )
-                authFileConnectivity[file.name] = state
-                return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
-            }
-            request = built
-        } catch {
-            let state = connectivityFailureState(error)
+            )
             authFileConnectivity[file.name] = state
             return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
         }
 
-        authFileConnectivity[file.name] = .checking
-        let localURL = paths.authDirectory.appendingPathComponent(file.name).standardizedFileURL
-        let safeLocalFile = !file.runtimeOnly && localURL.deletingLastPathComponent() == paths.authDirectory.standardizedFileURL
-            && (try? localURL.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == false
-        let beforeCheck = safeLocalFile ? try? Data(contentsOf: localURL) : nil
-        do {
-            let response = try await client.callUpstream(
-                authIndex: authIndex,
-                method: request.method,
-                url: request.url,
-                headers: request.headers,
-                body: request.body
-            )
-            let state = evaluateConnectivityResponse(response)
-            if provider == "antigravity", let data = response.body.data(using: .utf8),
-               let terminal = AntigravityAPIError.parse(statusCode: response.statusCode, data: data), terminal.code == "tos_violation" {
-                // Local CPA watches this atomic auth update. Do not disable by
-                // filename after HTTP: it may already contain a new login.
-                if let beforeCheck {
-                    do { try AntigravityAccountProtection.suspend(localURL, error: terminal, expectedData: beforeCheck) }
-                    catch { lastError = terminal.message + " Suspension could not be saved; stop CPA and check file permissions." }
-                } else {
-                    lastError = terminal.message + " Disable this runtime credential in CPA before retrying."
-                }
-            }
-            authFileConnectivity[file.name] = state
-            return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
-        } catch {
-            let state = connectivityFailureState(error)
+        if let connectivityProbeOverride {
+            let state = await connectivityProbeOverride(file)
             authFileConnectivity[file.name] = state
             return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
         }
+
+        let state = CLIProxyAccountConnectivityState.unsupported(
+            reason: L(
+                "Live consumer upstream probes are disabled by policy; inspect local status and saved snapshots instead.",
+                "策略已禁用订阅账号实时上游探测，请改用本地状态与已保存快照检查。"
+            )
+        )
+        authFileConnectivity[file.name] = state
+        return CLIProxyAccountConnectivityResult(state: state, detail: connectivityDetail(for: state))
     }
 
-    /// User-triggered only. Keep checks serial to avoid creating an upstream
-    /// burst across a large account pool.
-    func testAllAccountConnectivity() async -> [CLIProxyAccountConnectivityResult] {
+    func testFamilyAccountConnectivity(
+        _ files: [CLIProxyAuthFile],
+        trustedCodexIssuerKeys: [CLIProxyTrustedJWSKey] = CLIProxyCapabilityMatrix.defaultTrustedCodexIssuerKeys
+    ) async -> [CLIProxyAccountConnectivityResult] {
+        await runBulkConnectivityChecks(
+            for: files.filter { !$0.disabled },
+            trustedCodexIssuerKeys: trustedCodexIssuerKeys
+        )
+    }
+
+    /// User-triggered only. Keep checks serial and stop immediately on rate limit,
+    /// quota exhaustion, suspension, or policy rejection.
+    func testAllAccountConnectivity(
+        trustedCodexIssuerKeys: [CLIProxyTrustedJWSKey] = CLIProxyCapabilityMatrix.defaultTrustedCodexIssuerKeys
+    ) async -> [CLIProxyAccountConnectivityResult] {
+        await runBulkConnectivityChecks(
+            for: authFiles.filter { !$0.disabled },
+            trustedCodexIssuerKeys: trustedCodexIssuerKeys
+        )
+    }
+
+    private func runBulkConnectivityChecks(
+        for files: [CLIProxyAuthFile],
+        trustedCodexIssuerKeys: [CLIProxyTrustedJWSKey]
+    ) async -> [CLIProxyAccountConnectivityResult] {
         var results: [CLIProxyAccountConnectivityResult] = []
-        for file in authFiles where !file.disabled {
-            let result = await testAccountConnectivity(for: file)
+        for file in files {
+            if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(file.gatewayProviderID) { continue }
+            let result = await testAccountConnectivity(for: file, trustedCodexIssuerKeys: trustedCodexIssuerKeys)
             if case .unsupported = result.state { continue }
             results.append(result)
-            if case .failed(let code, _, _) = result.state, code == "tos_violation" { break }
+            if Self.shouldStopBulkConnectivityCheck(after: result.state) {
+                break
+            }
         }
         return results
-    }
-
-    private func connectivityRequest(
-        for file: CLIProxyAuthFile,
-        provider: String,
-        client: CLIProxyManagementClient
-    ) async throws -> (method: String, url: URL, headers: [String: String], body: String)? {
-        switch provider {
-        case "codex":
-            guard let url = URL(string: "https://chatgpt.com/backend-api/wham/usage") else {
-                throw CLIProxyGatewayError.configuration("invalid Codex usage URL")
-            }
-            var headers = [
-                "Authorization": "Bearer $TOKEN$",
-                "Accept": "application/json",
-                "User-Agent": "AIUsage"
-            ]
-            if let accountID = try await codexAccountID(for: file, client: client) {
-                headers["ChatGPT-Account-Id"] = accountID
-            }
-            return ("GET", url, headers, "")
-
-        case "antigravity":
-            guard let url = URL(string: "https://daily-cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels") else {
-                throw CLIProxyGatewayError.configuration("invalid Antigravity quota URL")
-            }
-            return (
-                "POST",
-                url,
-                [
-                    "Authorization": "Bearer $TOKEN$",
-                    "Content-Type": "application/json",
-                    "User-Agent": AntigravityClientIdentity.userAgent
-                ],
-                try connectivityBody(projectID: file.projectID)
-            )
-
-        case "gemini", "gemini-cli":
-            guard let url = URL(string: "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuota") else {
-                throw CLIProxyGatewayError.configuration("invalid Gemini quota URL")
-            }
-            return (
-                "POST",
-                url,
-                [
-                    "Authorization": "Bearer $TOKEN$",
-                    "Content-Type": "application/json"
-                ],
-                try connectivityBody(projectID: file.projectID)
-            )
-
-        default:
-            return nil
-        }
-    }
-
-    private func codexAccountID(
-        for file: CLIProxyAuthFile,
-        client: CLIProxyManagementClient
-    ) async throws -> String? {
-        if let cached = accountIdentity(for: file)?.accountID?.nilIfBlank { return cached }
-        guard !file.runtimeOnly else { return file.account?.nilIfBlank }
-        let data = try await client.downloadAuthFile(name: file.name)
-        return try CLIProxyAccountIdentity.parse(data: data, providerHint: "codex").accountID?.nilIfBlank
-    }
-
-    private func connectivityBody(projectID: String?) throws -> String {
-        let object: [String: String]
-        if let projectID = projectID?.nilIfBlank, projectID != "aicode-consumers" {
-            object = ["project": projectID]
-        } else {
-            object = [:]
-        }
-        let data = try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
-        return String(decoding: data, as: UTF8.self)
-    }
-
-    private func evaluateConnectivityResponse(
-        _ response: CLIProxyUpstreamCallResult
-    ) -> CLIProxyAccountConnectivityState {
-        let now = Date()
-        if let data = response.body.data(using: .utf8),
-           let error = AntigravityAPIError.parse(statusCode: response.statusCode, data: data),
-           ["tos_violation", "unsupported_client"].contains(error.code) {
-            return .failed(code: error.code, message: error.message, checkedAt: now)
-        }
-        switch response.statusCode {
-        case 200..<300:
-            guard let data = response.body.data(using: .utf8),
-                  (try? JSONSerialization.jsonObject(with: data)) != nil else {
-                return .failed(
-                    code: "upstream_invalid_response",
-                    message: L("The account endpoint returned invalid data.", "账号接口返回了无法解析的数据。"),
-                    checkedAt: now
-                )
-            }
-            return .connected(checkedAt: now)
-        case 401, 403:
-            return .failed(
-                code: "oauth_access_token_rejected",
-                message: L(
-                    "The upstream rejected CPA's current access token. Retry after the credential refreshes, or sign in again if it persists.",
-                    "上游拒绝了 CPA 当前的访问令牌。请在凭据刷新后重试；若持续出现，再重新登录。"
-                ),
-                checkedAt: now
-            )
-        case 429:
-            return .failed(
-                code: "upstream_rate_limited",
-                message: L("The account endpoint is temporarily rate limited.", "账号接口当前触发频率限制，请稍后重试。"),
-                checkedAt: now
-            )
-        case 500...599:
-            return .failed(
-                code: "upstream_server_error",
-                message: L("The upstream account service is temporarily unavailable.", "上游账号服务暂时不可用。"),
-                checkedAt: now
-            )
-        default:
-            return .failed(
-                code: "upstream_http_\(response.statusCode)",
-                message: L(
-                    "The account endpoint returned HTTP \(response.statusCode).",
-                    "账号接口返回 HTTP \(response.statusCode)。"
-                ),
-                checkedAt: now
-            )
-        }
-    }
-
-    private func connectivityFailureState(_ error: Error) -> CLIProxyAccountConnectivityState {
-        let now = Date()
-        if let gatewayError = error as? CLIProxyGatewayError,
-           case .managementAPI(let status, let reason) = gatewayError {
-            let normalized = reason.lowercased()
-            if normalized.contains("token refresh failed") {
-                return .failed(
-                    code: "oauth_refresh_failed",
-                    message: L("CPA could not refresh this account's access token.", "CPA 无法刷新该账号的访问令牌。"),
-                    checkedAt: now
-                )
-            }
-            if status == 502 {
-                return .failed(
-                    code: "upstream_network_error",
-                    message: L("CPA could not reach the upstream account service.", "CPA 无法连接上游账号服务。"),
-                    checkedAt: now
-                )
-            }
-        }
-        return .failed(
-            code: "connectivity_check_failed",
-            message: SensitiveDataRedactor.redactedMessage(for: error),
-            checkedAt: now
-        )
     }
 
     private func connectivityDetail(for state: CLIProxyAccountConnectivityState) -> String {
@@ -989,6 +902,342 @@ final class CLIProxyGatewayManager: ObservableObject {
         await setAuthFiles([file], disabled: disabled)
     }
 
+    struct ManagedPauseOutcome: Equatable {
+        let pausedFiles: [String]
+        let unconfirmedFiles: [String]
+        let externalActiveFiles: [String]
+        let verificationError: String?
+
+        init(
+            pausedFiles: [String] = [],
+            unconfirmedFiles: [String] = [],
+            externalActiveFiles: [String] = [],
+            verificationError: String? = nil
+        ) {
+            self.pausedFiles = pausedFiles
+            self.unconfirmedFiles = unconfirmedFiles
+            self.externalActiveFiles = externalActiveFiles
+            self.verificationError = verificationError
+        }
+    }
+
+    struct PauseAccountHint: Equatable {
+        let providerId: String
+        let email: String?
+        let accountId: String?
+    }
+
+    /// Pauses AIUsage-owned managed CPA auth copies (`aiusage-*.json`) bound to the given
+    /// dashboard `credentialIDs` via `syncManifest` ONLY after verifying current file
+    /// ownership markers (`aiusage_credential_id` and provider). Never falls back to stale caches.
+    @discardableResult
+    func pauseManagedAuthFiles(
+        forCredentialIDs credentialIDs: Set<String>,
+        accountHints: [PauseAccountHint] = []
+    ) async -> ManagedPauseOutcome {
+        if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+            guard !credentialIDs.isEmpty || !accountHints.isEmpty else { return .init() }
+            // An archived copy is not a live credential. Verify the held runtime without editing the archive.
+            if !CLIProxyRuntimeController.managedRuntimeAvailable, !(await runtime.stop()) {
+                return .init(verificationError: runtime.unconfirmedListenerMessage ?? L(
+                    "The previous managed CPA listener could not be confirmed stopped.",
+                    "无法确认旧的托管 CPA 监听服务已停止。"
+                ))
+            }
+            return .init()
+        }
+        func normalizeID(_ raw: String?) -> String? {
+            let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? ""
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        func normalizeProvider(_ raw: String?) -> String? {
+            guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                  !trimmed.isEmpty else {
+                return nil
+            }
+            return CLIProxyCredentialAdapter.normalizedProviderID(trimmed)
+        }
+        func matchesManagedOwnership(
+            in object: [String: Any],
+            expectedCredentialIDs: Set<String>,
+            expectedProviders: Set<String>
+        ) -> Bool {
+            let tokens = (object["tokens"] as? [String: Any]) ?? (object["token"] as? [String: Any])
+            guard let embeddedCredID = normalizeID(
+                (object["aiusage_credential_id"] as? String)
+                    ?? (tokens?["aiusage_credential_id"] as? String)
+            ), expectedCredentialIDs.contains(embeddedCredID) else {
+                return false
+            }
+            guard let embeddedProvider = normalizeProvider(
+                (object["type"] as? String) ?? (object["provider"] as? String)
+            ), expectedProviders.contains(embeddedProvider) else {
+                return false
+            }
+            return true
+        }
+
+        let normalizedIDs = Set(credentialIDs.compactMap(normalizeID))
+
+        struct ManagedTarget {
+            let name: String
+            var expectedCredentialIDs: Set<String>
+            var expectedProviders: Set<String>
+        }
+
+        var targetsByKey: [String: ManagedTarget] = [:]
+        var targetOrder: [String] = []
+        var nonManagedSyncNames: [String] = []
+        for record in syncManifest.records {
+            guard let credID = normalizeID(record.credentialId),
+                  normalizedIDs.contains(credID) else {
+                continue
+            }
+            let lowerName = record.authFileName.lowercased()
+            let normalizedProvider = normalizeProvider(record.providerId) ?? record.providerId.lowercased()
+            if lowerName.hasPrefix("aiusage-") {
+                if var existing = targetsByKey[lowerName] {
+                    existing.expectedCredentialIDs.insert(credID)
+                    existing.expectedProviders.insert(normalizedProvider)
+                    targetsByKey[lowerName] = existing
+                } else {
+                    targetsByKey[lowerName] = ManagedTarget(
+                        name: record.authFileName,
+                        expectedCredentialIDs: [credID],
+                        expectedProviders: [normalizedProvider]
+                    )
+                    targetOrder.append(lowerName)
+                }
+            } else if !nonManagedSyncNames.contains(record.authFileName) {
+                nonManagedSyncNames.append(record.authFileName)
+            }
+        }
+        let matchedTargets = targetOrder.compactMap { targetsByKey[$0] }
+
+        var disabledNames: [String] = []
+        var unconfirmedNames: [String] = []
+        func appendUnconfirmed(_ name: String) {
+            if !unconfirmedNames.contains(where: { $0.caseInsensitiveCompare(name) == .orderedSame }) {
+                unconfirmedNames.append(name)
+            }
+        }
+
+        var runtimeTargets: [ManagedTarget] = []
+        let authDir = paths.authDirectory.standardizedFileURL
+        for target in matchedTargets {
+            let name = target.name
+            guard (try? CLIProxyManagementClient.validateAuthFileName(name)) != nil else {
+                appendUnconfirmed(name)
+                continue
+            }
+            let localURL = authDir.appendingPathComponent(name).standardizedFileURL
+            guard localURL.deletingLastPathComponent() == authDir else {
+                appendUnconfirmed(name)
+                continue
+            }
+            let fileExists = FileManager.default.fileExists(atPath: localURL.path)
+            if fileExists {
+                guard let values = try? localURL.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
+                      values.isRegularFile == true,
+                      values.isSymbolicLink != true,
+                      let data = try? Data(contentsOf: localURL),
+                      var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                      matchesManagedOwnership(
+                          in: object,
+                          expectedCredentialIDs: target.expectedCredentialIDs,
+                          expectedProviders: target.expectedProviders
+                      ) else {
+                    // Stale manifest or replaced credential: do not mutate disk or CPA runtime copy.
+                    appendUnconfirmed(name)
+                    continue
+                }
+                if object["disabled"] as? Bool != true {
+                    object["disabled"] = true
+                    if let updated = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]) {
+                        try? updated.write(to: localURL, options: .atomic)
+                        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: localURL.path)
+                    }
+                }
+                if !runtime.state.isRunning {
+                    let persisted = (try? Data(contentsOf: localURL))
+                        .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
+                    if let persisted,
+                       persisted["disabled"] as? Bool == true,
+                       matchesManagedOwnership(
+                           in: persisted,
+                           expectedCredentialIDs: target.expectedCredentialIDs,
+                           expectedProviders: target.expectedProviders
+                       ) {
+                        disabledNames.append(name)
+                    } else {
+                        appendUnconfirmed(name)
+                    }
+                } else {
+                    runtimeTargets.append(target)
+                }
+            } else if !runtime.state.isRunning {
+                appendUnconfirmed(name)
+            } else {
+                runtimeTargets.append(target)
+            }
+        }
+
+        var externalActiveFiles: [String] = []
+        var verificationError: String?
+        if runtime.state.isRunning {
+            guard let client = managementClient() else {
+                for target in runtimeTargets {
+                    appendUnconfirmed(target.name)
+                }
+                for name in nonManagedSyncNames {
+                    appendUnconfirmed(name)
+                }
+                let message = L(
+                    "CPA gateway is running, but its management client is unavailable; runtime pause could not be verified.",
+                    "CPA 网关正在运行，但管理端不可用，未能确认运行态暂停。"
+                )
+                verificationError = message
+                lastError = message
+                return ManagedPauseOutcome(
+                    pausedFiles: disabledNames,
+                    unconfirmedFiles: unconfirmedNames,
+                    externalActiveFiles: externalActiveFiles,
+                    verificationError: verificationError
+                )
+            }
+
+            var updateError: Error?
+            var apiUpdatedNames: [String] = []
+            for target in runtimeTargets {
+                let name = target.name
+                do {
+                    let liveData = try await client.downloadAuthFile(name: name)
+                    guard let liveObject = (try? JSONSerialization.jsonObject(with: liveData)) as? [String: Any],
+                          matchesManagedOwnership(
+                              in: liveObject,
+                              expectedCredentialIDs: target.expectedCredentialIDs,
+                              expectedProviders: target.expectedProviders
+                          ) else {
+                        appendUnconfirmed(name)
+                        continue
+                    }
+                    try await client.setDisabled(true, name: name)
+                    apiUpdatedNames.append(name)
+                } catch CLIProxyGatewayError.managementAPI(let status, _) where status == 404 {
+                    appendUnconfirmed(name)
+                } catch {
+                    appendUnconfirmed(name)
+                    if updateError == nil { updateError = error }
+                }
+            }
+
+            var freshPool: [CLIProxyAuthFile]?
+            if !matchedTargets.isEmpty || !nonManagedSyncNames.isEmpty || !accountHints.isEmpty {
+                do {
+                    if !isManagingAccounts {
+                        isManagingAccounts = true
+                        defer { isManagingAccounts = false }
+                        let loaded = try await loadAuthPool(using: client)
+                        authFiles = loaded
+                        freshPool = loaded
+                        await refreshModelCatalogAndDistribution(using: client)
+                    } else {
+                        // Even if another management pass owns the UI lock, confirm state directly against fresh CPA inventory.
+                        freshPool = try await client.listAuthFiles()
+                    }
+                } catch {
+                    if updateError == nil { updateError = error }
+                }
+            }
+
+            if let freshPool {
+                let confirmedDisabled = Set(freshPool.filter(\.disabled).map { $0.name.lowercased() })
+                for name in apiUpdatedNames {
+                    if confirmedDisabled.contains(name.lowercased()) {
+                        disabledNames.append(name)
+                    } else {
+                        appendUnconfirmed(name)
+                    }
+                }
+
+                let pausedLowerSet = Set(disabledNames.map { $0.lowercased() })
+                let activeNonManaged = freshPool.filter { file in
+                    !file.disabled && !pausedLowerSet.contains(file.name.lowercased())
+                }
+                for name in nonManagedSyncNames {
+                    if activeNonManaged.contains(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }),
+                       !externalActiveFiles.contains(name) {
+                        externalActiveFiles.append(name)
+                    }
+                }
+                if !accountHints.isEmpty {
+                    for file in activeNonManaged where !file.name.lowercased().hasPrefix("aiusage-") {
+                        let fileProvider = CLIProxyCredentialAdapter.normalizedProviderID(file.gatewayProviderID)
+                        let fileEmail = file.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        let fileAccount = file.account?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                        let matchesHint = accountHints.contains { hint in
+                            let hintProvider = CLIProxyCredentialAdapter.normalizedProviderID(hint.providerId)
+                            guard fileProvider == hintProvider else { return false }
+                            if let hintAcc = hint.accountId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                               !hintAcc.isEmpty,
+                               fileAccount == hintAcc {
+                                return true
+                            }
+                            if let hintEmail = hint.email?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                               !hintEmail.isEmpty,
+                               fileEmail == hintEmail {
+                                return true
+                            }
+                            return false
+                        }
+                        if matchesHint && !externalActiveFiles.contains(file.name) {
+                            externalActiveFiles.append(file.name)
+                        }
+                    }
+                }
+                if let updateError {
+                    verificationError = updateError.localizedDescription
+                    lastError = verificationError
+                }
+            } else {
+                for name in apiUpdatedNames {
+                    appendUnconfirmed(name)
+                }
+                if !matchedTargets.isEmpty || !nonManagedSyncNames.isEmpty || !accountHints.isEmpty {
+                    let message = updateError?.localizedDescription ?? L(
+                        "CPA runtime inventory could not be read; runtime pause was not verified.",
+                        "未能读取 CPA 运行时清单，未确认运行态暂停。"
+                    )
+                    verificationError = message
+                    lastError = message
+                }
+            }
+
+            if verificationError == nil && (!unconfirmedNames.isEmpty || !externalActiveFiles.isEmpty) {
+                let untouched = (unconfirmedNames + externalActiveFiles).joined(separator: ", ")
+                lastError = L(
+                    "CPA is not paused for external or unconfirmed credential(s): \(untouched). Disable them manually in Gateway if needed.",
+                    "CPA 中的外部或未确认凭据未暂停（\(untouched)）；如需停止路由请在网关中手动停用。"
+                )
+            }
+        } else {
+            if !unconfirmedNames.isEmpty {
+                let untouched = unconfirmedNames.joined(separator: ", ")
+                lastError = L(
+                    "Could not pause managed CPA file(s): \(untouched).",
+                    "未能暂停 CPA 托管凭据：\(untouched)。"
+                )
+            }
+        }
+
+        return ManagedPauseOutcome(
+            pausedFiles: disabledNames,
+            unconfirmedFiles: unconfirmedNames,
+            externalActiveFiles: externalActiveFiles,
+            verificationError: verificationError
+        )
+    }
+
     /// Applies one account-level enable/disable action to every underlying
     /// login/project record, then refreshes the pool once. This avoids visible
     /// partial states and repeated list reloads for project-expanded accounts.
@@ -1002,6 +1251,7 @@ final class CLIProxyGatewayManager: ObservableObject {
             var requiresRestart = false
             var handledNames = Set<String>()
             var updateError: Error?
+            let excludedIDs = AccountStore.shared.excludedEngineAccountFilters().credentialIDs
             for file in files where handledNames.insert(file.name.lowercased()).inserted {
                 do {
                     if file.isOpenAICompatibleRuntime {
@@ -1011,6 +1261,22 @@ final class CLIProxyGatewayManager: ObservableObject {
                         )
                         requiresRestart = true
                     } else {
+                        if !disabled, !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+                            throw CLIProxyGatewayError.configuration(CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage)
+                        }
+                        let activeAuthDir = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                            ? paths.authDirectory
+                            : paths.isolatedAuthDirectory
+                        if !disabled,
+                           let blockedReason = CLIProxyRuntimeController.reEnableRejectionReason(
+                               for: file,
+                               in: activeAuthDir,
+                               excludedCredentialIDs: excludedIDs
+                           ) {
+                            throw CLIProxyGatewayError.configuration(
+                                "Refused to enable blocked CPA auth file \(file.name): \(blockedReason)"
+                            )
+                        }
                         try await client.setDisabled(disabled, name: file.name)
                     }
                 } catch {
@@ -1246,6 +1512,10 @@ final class CLIProxyGatewayManager: ObservableObject {
     }
 
     func installProviderPlugin(_ entry: CLIProxyPluginStoreEntry) async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            pluginError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            return
+        }
         guard runtime.state.isRunning, !isManagingPlugins, !isManagingAccounts else { return }
         isManagingPlugins = true
         pluginError = nil
@@ -1275,6 +1545,10 @@ final class CLIProxyGatewayManager: ObservableObject {
     }
 
     func setProviderPlugin(_ plugin: CLIProxyPlugin, enabled: Bool) async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            pluginError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            return
+        }
         guard runtime.state.isRunning, !isManagingPlugins, !isManagingAccounts,
               let client = managementClient() else { return }
         isManagingPlugins = true
@@ -1298,6 +1572,10 @@ final class CLIProxyGatewayManager: ObservableObject {
         _ candidate: CLIProxyAccountSyncCandidate,
         forceOverwriteCPA: Bool = false
     ) async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            lastError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            return
+        }
         if case .requiresPlugin(let pluginHint) = CLIProxyCapabilityMatrix.capability(
             forAIUsageProvider: candidate.providerId
         ) {
@@ -1320,12 +1598,46 @@ final class CLIProxyGatewayManager: ObservableObject {
         }
         guard syncManifestHealthy,
               !isManagingAccounts,
-              case .compatible = candidate.compatibility,
-              let client = managementClient(),
+              case .compatible = candidate.compatibility else { return }
+        let normalizedProviderID = CLIProxyCredentialAdapter.normalizedProviderID(candidate.providerId)
+        if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(normalizedProviderID) {
+            lastError = L(
+                "Consumer OAuth sync to CPA is disabled for \(normalizedProviderID) under current release policy.",
+                "根据当前发布策略，已禁止将 \(normalizedProviderID) 消费者 OAuth 同步到 CPA。"
+            )
+            return
+        }
+        guard let client = managementClient(),
               let credential = AccountCredentialStore.shared.loadCredential(
                 providerId: candidate.providerId,
                 credentialId: candidate.credentialId
               ) else { return }
+        let normalizedCredID = credential.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let excludedIDs = AccountStore.shared.excludedEngineAccountFilters().credentialIDs
+        if excludedIDs.contains(normalizedCredID) {
+            lastError = L(
+                "This account is paused in AIUsage and cannot be synced to CPA.",
+                "该账号已在 AIUsage 中暂停，无法同步到 CPA。"
+            )
+            return
+        }
+        if CLIProxyCredentialAdapter.normalizedProviderID(credential.providerId) == "antigravity",
+           credential.authMethod == .authFile,
+           let sourceData = try? Data(contentsOf: URL(fileURLWithPath: credential.credential), options: .mappedIfSafe),
+           let suspension = AntigravityAccountProtection.suspension(in: sourceData) {
+            lastError = suspension.message
+            return
+        }
+        if normalizedProviderID == "codex",
+           credential.authMethod == .authFile,
+           let sourceData = try? Data(contentsOf: URL(fileURLWithPath: credential.credential), options: .mappedIfSafe),
+           let planRejection = CLIProxyCapabilityMatrix.codexPlanRejectionReason(
+               fromAuthData: sourceData,
+               metadata: credential.metadata
+           ) {
+            lastError = planRejection
+            return
+        }
         isManagingAccounts = true
         lastError = nil
         defer { isManagingAccounts = false }
@@ -1484,6 +1796,11 @@ final class CLIProxyGatewayManager: ObservableObject {
     }
 
     func beginOAuth(_ provider: CLIProxyOAuthProvider) async {
+        if let reason = CLIProxyCapabilityMatrix.directOAuthRejectionReason(for: provider.rawValue) {
+            lastError = reason
+            oauthFlowState = .failed(provider, reason)
+            return
+        }
         guard !isManagingAccounts, !oauthFlowState.isActive, let client = managementClient() else { return }
         let operationID = UUID()
         activeOAuthOperationID = operationID
@@ -1560,6 +1877,11 @@ final class CLIProxyGatewayManager: ObservableObject {
     }
 
     func beginPluginOAuth(_ plugin: CLIProxyPlugin) async {
+        if let reason = CLIProxyCapabilityMatrix.directOAuthRejectionReason(for: plugin.providerID) {
+            lastError = reason
+            oauthFlowState = .pluginFailed(plugin.displayName, reason)
+            return
+        }
         guard plugin.supportsOAuth, plugin.effectiveEnabled,
               !isManagingAccounts, !oauthFlowState.isActive, let client = managementClient() else { return }
         let operationID = UUID()
@@ -1653,17 +1975,61 @@ final class CLIProxyGatewayManager: ObservableObject {
         }
     }
 
+    private func canMutateManagedDistribution(generation: UInt64? = nil) -> Bool {
+        !Task.isCancelled
+            && !isContainmentInProgress
+            && !isManagedDistributionContainmentActive
+            && runtime.state.isRunning
+            && !runtime.hasUnconfirmedListener
+            && !runtime.isLifecycleBusy
+            && !runtime.state.isTransitioning
+            && (generation == nil || generation == containmentGeneration)
+    }
+
+    private func beginManagedDistributionContainment() {
+        containmentGeneration &+= 1
+        isManagedDistributionContainmentActive = true
+        APIProviderDistributor.shared.beginContainment(for: Self.managedProviderID)
+        managedProviderCredentialRefreshTask?.cancel()
+        managedProviderCredentialRefreshTask = nil
+        managedProviderCredentialRefreshID = nil
+        managedDistributionTask?.cancel()
+        managedDistributionTask = nil
+        managedDistributionTaskID = nil
+    }
+
+    private func releaseManagedDistributionContainmentIfHealthy() {
+        guard !isContainmentInProgress,
+              runtime.state.isRunning,
+              !runtime.hasUnconfirmedListener else { return }
+        isManagedDistributionContainmentActive = false
+        APIProviderDistributor.shared.endContainment(for: Self.managedProviderID)
+    }
+
     func upsertManagedProvider(targets: Set<ProxyTarget>) async {
-        guard !Task.isCancelled else { return }
+        guard canMutateManagedDistribution() else { return }
+        let taskID = UUID()
         // 分发会同时修改持久配置和运行中上游，开始后必须完成；离开 CPA 页面只取消刷新，
-        // 不能把这段事务一起取消，留下已保存节点与实际路由不一致的状态。
-        await Task { @MainActor in
+        // 不能把这段事务一起取消，留下已保存节点与实际路由不一致的状态；
+        // 但安全遏制启动时会通过 `managedDistributionTask` 取消仍在等待上游目录的任务。
+        let task = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.managedDistributionTaskID == taskID {
+                    self.managedDistributionTask = nil
+                    self.managedDistributionTaskID = nil
+                }
+            }
             await self.applyManagedProvider(targets: targets)
-        }.value
+        }
+        managedDistributionTaskID = taskID
+        managedDistributionTask = task
+        await task.value
     }
 
     private func applyManagedProvider(targets: Set<ProxyTarget>) async {
-        guard runtime.state.isRunning,
+        let generation = containmentGeneration
+        guard canMutateManagedDistribution(generation: generation),
               !isApplyingDistribution,
               let clientKey = runtime.managedProviderClientAPIKey else { return }
         isApplyingDistribution = true
@@ -1673,12 +2039,14 @@ final class CLIProxyGatewayManager: ObservableObject {
             let models: [CLIProxyModel]
             if availableModels.isEmpty, let client = managementClient() {
                 models = Self.normalizedModels(try await client.availableModels())
+                guard canMutateManagedDistribution(generation: generation) else { return }
                 availableModels = models
             } else { models = availableModels }
             let mapped = models.map { ProxyConfiguration.MappedModel(name: $0.id) }
             guard !mapped.isEmpty else {
                 throw CLIProxyGatewayError.invalidResponse("CPA did not report any available models")
             }
+            guard canMutateManagedDistribution(generation: generation) else { return }
             let existing = APIProviderStore.shared.provider(id: Self.managedProviderID)
             let provider = APIProvider(
                 id: Self.managedProviderID,
@@ -1692,10 +2060,13 @@ final class CLIProxyGatewayManager: ObservableObject {
                 lastUsedAt: existing?.lastUsedAt,
                 sortOrder: existing?.sortOrder ?? Int.max
             )
+            guard canMutateManagedDistribution(generation: generation) else { return }
             let saved = APIProviderStore.shared.upsert(provider)
-            await APIProviderDistributor.shared.setDistribution(saved, targets: targets)
+            _ = await APIProviderDistributor.shared.setDistribution(saved, targets: targets)
+            guard canMutateManagedDistribution(generation: generation) else { return }
             refreshDistributionState()
         } catch {
+            guard canMutateManagedDistribution(generation: generation) else { return }
             lastError = error.localizedDescription
             refreshDistributionState()
         }
@@ -1713,7 +2084,9 @@ final class CLIProxyGatewayManager: ObservableObject {
     /// key rotates, refresh the master provider and every linked child without
     /// making the user repeat the one-click distribution flow.
     private func reconcileManagedProviderCredentialIfNeeded() {
-        guard managedProviderCredentialRefreshTask == nil,
+        guard canMutateManagedDistribution(),
+              !isApplyingDistribution,
+              managedProviderCredentialRefreshTask == nil,
               let clientKey = runtime.managedProviderClientAPIKey,
               !clientKey.isEmpty,
               var provider = APIProviderStore.shared.provider(id: Self.managedProviderID) else { return }
@@ -1724,25 +2097,125 @@ final class CLIProxyGatewayManager: ObservableObject {
         )
         guard provider.apiKey != clientKey || !childrenAreCurrent else { return }
 
+        let generation = containmentGeneration
+        let taskID = UUID()
         provider.apiKey = clientKey
         let saved = APIProviderStore.shared.upsert(provider)
+        managedProviderCredentialRefreshID = taskID
         managedProviderCredentialRefreshTask = Task { @MainActor [weak self] in
+            defer {
+                if self?.managedProviderCredentialRefreshID == taskID {
+                    self?.managedProviderCredentialRefreshTask = nil
+                    self?.managedProviderCredentialRefreshID = nil
+                }
+            }
+            guard let self,
+                  self.canMutateManagedDistribution(generation: generation) else { return }
             _ = await APIProviderDistributor.shared.syncFromMaster(saved)
-            guard let self else { return }
-            self.managedProviderCredentialRefreshTask = nil
-            self.managedProviderExists = true
+            guard self.canMutateManagedDistribution(generation: generation) else { return }
+            self.managedProviderExists = APIProviderStore.shared.provider(id: Self.managedProviderID) != nil
             self.currentDistributionTargets = APIProviderDistributor.shared.currentTargets(
                 for: Self.managedProviderID
             )
         }
     }
 
+    struct ManagedDistributionContainmentOutcome: Equatable, Sendable {
+        let unconfirmedRoutes: [String]
+        var allRoutesDisabled: Bool { unconfirmedRoutes.isEmpty }
+    }
+
+    private func disableManagedDistributionForContainment() async -> ManagedDistributionContainmentOutcome {
+        let previousInProgress = isContainmentInProgress
+        isContainmentInProgress = true
+        defer { isContainmentInProgress = previousInProgress }
+        beginManagedDistributionContainment()
+        let verification = await APIProviderDistributor.shared.removeAllDistributionForContainment(
+            providerId: Self.managedProviderID
+        )
+        managedProviderExists = APIProviderStore.shared.provider(id: Self.managedProviderID) != nil
+        currentDistributionTargets = managedProviderExists ? verification.remainingTargets : []
+        return ManagedDistributionContainmentOutcome(unconfirmedRoutes: verification.unconfirmedTargets)
+    }
+
+    /// Fail closed when fresh credential inventory cannot be fetched, a blocked managed
+    /// file cannot be disabled and confirmed on re-read, or an enabled disallowed/unknown
+    /// credential row remains active. Deliberately scoped away from model catalog refreshes.
+    private func enforceAuthPoolContainment(
+        using client: CLIProxyManagementClient,
+        excludedCredentialIDs: Set<String>
+    ) async throws -> [CLIProxyAuthFile] {
+        do {
+            var files = try await client.listAuthFiles()
+            if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+               let disallowed = files.first(where: { !$0.isOpenAICompatibleRuntime }) {
+                throw CLIProxyGatewayError.configuration(
+                    "API-key-only CPA runtime contains non-API auth entry \(disallowed.name)"
+                )
+            }
+            let activeAuthDir = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                ? paths.authDirectory
+                : paths.isolatedAuthDirectory
+            var disabledManaged = false
+            for file in files where !file.disabled && !file.isOpenAICompatibleRuntime && !file.runtimeOnly && file.name.lowercased().hasPrefix("aiusage-") {
+                if CLIProxyRuntimeController.managedAuthRejectionReason(
+                    named: file.name,
+                    in: activeAuthDir,
+                    excludedCredentialIDs: excludedCredentialIDs,
+                    allowLocalDisabledFlag: false
+                ) != nil {
+                    try await client.setDisabled(true, name: file.name)
+                    disabledManaged = true
+                }
+            }
+            if disabledManaged {
+                files = try await client.listAuthFiles()
+            }
+            for file in files where !file.disabled && !file.isOpenAICompatibleRuntime {
+                if let reason = CLIProxyRuntimeController.reEnableRejectionReason(
+                    for: file,
+                    in: activeAuthDir,
+                    excludedCredentialIDs: excludedCredentialIDs,
+                    allowLocalDisabledFlag: false
+                ) {
+                    throw CLIProxyGatewayError.configuration(
+                        "Refused active CPA inventory row \(file.name): \(reason)"
+                    )
+                }
+            }
+            releaseManagedDistributionContainmentIfHealthy()
+            return files
+        } catch {
+            isContainmentInProgress = true
+            defer { isContainmentInProgress = false }
+            beginManagedDistributionContainment()
+            let stopped = await runtime.stop()
+            let routeOutcome = await disableManagedDistributionForContainment()
+            if !stopped || !routeOutcome.allRoutesDisabled {
+                var details: [String] = []
+                if !stopped {
+                    details.append("listener stop could not be confirmed")
+                }
+                if routeOutcome.allRoutesDisabled {
+                    details.append("managed routes were disabled")
+                } else {
+                    details.append(
+                        "managed route removal unconfirmed (\(routeOutcome.unconfirmedRoutes.joined(separator: "; ")))"
+                    )
+                }
+                let unconfirmed = "CPA containment failed (\(error.localizedDescription)); \(details.joined(separator: "; "))."
+                lastError = unconfirmed
+                throw CLIProxyGatewayError.process(unconfirmed)
+            }
+            throw error
+        }
+    }
+
     func loadAuthPool(using client: CLIProxyManagementClient) async throws -> [CLIProxyAuthFile] {
-        async let filesTask = client.listAuthFiles()
-        async let providersTask = client.listOpenAICompatibleProviders()
-        var files = try await filesTask
+        let excludedIDs = AccountStore.shared.excludedEngineAccountFilters().credentialIDs
+        var files = try await enforceAuthPoolContainment(using: client, excludedCredentialIDs: excludedIDs)
         files = await reconcileManagedAuthCopies(files, using: client)
-        let providers = (try? await providersTask) ?? openAICompatibleProviders
+        let providers = (try? await client.listOpenAICompatibleProviders()) ?? openAICompatibleProviders
         openAICompatibleProviders = providers
 
         for provider in providers {
@@ -2451,29 +2924,41 @@ final class CLIProxyGatewayManager: ObservableObject {
     }
 
     private func activateWithRuntimeRollback(version: String) async throws {
-        let wasRunning = runtime.state.isRunning
-        let previous = try await binaryStore.currentVersion()
-        if wasRunning { await runtime.stop() }
-        do {
-            try runtime.stabilizeConfigurationBeforeActivation()
-            _ = try await binaryStore.activate(version: version)
-            if wasRunning {
-                await runtime.start()
-                if case .failed(let reason) = runtime.state {
-                    throw CLIProxyGatewayError.process(reason)
+        var previous: String?
+        var committedID: String?
+        var didCommitSwitch = false
+        let wasRunning = try await runtime.performVersionActivation(
+            version: version,
+            switchVersion: {
+                let activation = try await binaryStore.activateTracked(version: version)
+                previous = activation.previous
+                committedID = activation.commitID
+                didCommitSwitch = true
+            },
+            rollbackVersion: {
+                guard didCommitSwitch,
+                      let previous,
+                      let committedID,
+                      CLIProxyVersion.normalized(previous) != CLIProxyVersion.normalized(version) else {
+                    return
                 }
-                await refreshAccounts()
+                _ = try await binaryStore.activate(
+                    version: previous,
+                    expectedCurrentVersion: version,
+                    expectedCommitID: committedID
+                )
             }
-        } catch {
-            if let previous, previous != version {
-                _ = try? await binaryStore.activate(version: previous)
-            }
-            if wasRunning { await runtime.start() }
-            throw error
+        )
+        if wasRunning {
+            await refreshAccounts()
         }
     }
 
     func managementClient() -> CLIProxyManagementClient? {
+        guard CLIProxyRuntimeController.managedRuntimeAvailable else {
+            lastError = CLIProxyRuntimeController.managedRuntimeHoldMessage
+            return nil
+        }
         guard let managementKey = runtime.managementKey,
               let clientKey = runtime.clientAPIKey else {
             lastError = CLIProxyGatewayError.secretStorage("gateway keys are unavailable").localizedDescription

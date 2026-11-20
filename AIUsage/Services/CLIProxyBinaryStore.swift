@@ -258,8 +258,7 @@ actor CLIProxyBinaryStore {
         self.validator = validator
     }
 
-    func currentVersion() throws -> String? {
-        try paths.prepare(fileManager: fileManager)
+    private func parseActiveSelection() throws -> (version: String, commitID: String?)? {
         let destination: String
         do {
             destination = try fileManager.destinationOfSymbolicLink(atPath: paths.currentSymlink.path)
@@ -270,9 +269,31 @@ actor CLIProxyBinaryStore {
             throw CLIProxyGatewayError.fileSystem(error.localizedDescription)
         }
         let name = URL(fileURLWithPath: destination).lastPathComponent
+        if name.hasPrefix(".commit-"), let separator = name.range(of: "-v", options: .backwards) {
+            let commitStart = name.index(name.startIndex, offsetBy: ".commit-".count)
+            let commitID = String(name[commitStart..<separator.lowerBound])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let version = String(name[separator.upperBound...])
+            guard !commitID.isEmpty, CLIProxyVersion.isSafePathComponent(version) else { return nil }
+            return (version, commitID)
+        }
         guard name.hasPrefix("v") else { return nil }
         let version = String(name.dropFirst())
-        return CLIProxyVersion.isSafePathComponent(version) ? version : nil
+        guard CLIProxyVersion.isSafePathComponent(version) else { return nil }
+        var st = stat()
+        var legacyCommitID: String?
+        if lstat(activeCommitIDURL.path, &st) == 0,
+           (st.st_mode & S_IFMT) == S_IFREG,
+           let raw = try? String(contentsOf: activeCommitIDURL, encoding: .utf8) {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if !trimmed.isEmpty { legacyCommitID = trimmed }
+        }
+        return (version, legacyCommitID)
+    }
+
+    func currentVersion() throws -> String? {
+        try paths.prepare(fileManager: fileManager)
+        return try parseActiveSelection()?.version
     }
 
     func currentBinaryURL() throws -> URL? {
@@ -372,35 +393,193 @@ actor CLIProxyBinaryStore {
         )
     }
 
-    @discardableResult
-    func activate(version: String) throws -> String? {
+    private var activeCommitIDURL: URL {
+        paths.root.appendingPathComponent(".active-commit-id")
+    }
+
+    func currentCommitID() -> String? {
+        (try? parseActiveSelection())?.commitID
+    }
+
+    private struct SharedRuntimePIDRecord: Codable {
+        let pid: Int32
+        let binaryPath: String
+        let configPath: String
+        let configSHA256: String?
+        let port: Int?
+        let bindHost: String?
+    }
+
+    private struct SharedUnconfirmedEndpoint: Codable {
+        let pid: Int32?
+        let port: Int
+        let bindHost: String
+    }
+
+    private func withRuntimeFenceLock<T>(_ body: () throws -> T) throws -> T {
         try paths.prepare(fileManager: fileManager)
-        let previous = try currentVersion()
-        let versionDirectory = try paths.versionDirectory(version)
-        let binaryURL = versionDirectory.appendingPathComponent(paths.binaryName)
-        guard fileManager.fileExists(atPath: binaryURL.path) else {
-            throw CLIProxyGatewayError.versionNotInstalled(version)
+        let lockURL = paths.root.appendingPathComponent("runtime.fence.lock")
+        let lockPath = lockURL.path
+        var st = stat()
+        if lstat(lockPath, &st) == 0, (st.st_mode & S_IFMT) != S_IFREG {
+            throw CLIProxyGatewayError.process(
+                "Containment unconfirmed: shared CPA fence lock path is not a regular file (\(lockPath))."
+            )
+        }
+        var fd: Int32 = -1
+        while true {
+            fd = Darwin.open(lockPath, O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC | O_EXLOCK, S_IRUSR | S_IWUSR)
+            if fd >= 0 { break }
+            if errno == EINTR { continue }
+            throw CLIProxyGatewayError.process(
+                "Containment unconfirmed: failed to open and lock shared CPA fence (\(String(cString: strerror(errno))))."
+            )
+        }
+        defer { Darwin.close(fd) }
+        _ = Darwin.fchmod(fd, S_IRUSR | S_IWUSR)
+
+        let unconfirmedURL = paths.root.appendingPathComponent("runtime.unconfirmed.json")
+        if fileManager.fileExists(atPath: unconfirmedURL.path) {
+            guard let data = fileManager.contents(atPath: unconfirmedURL.path),
+                  let decoded = try? JSONDecoder().decode(SharedUnconfirmedEndpoint.self, from: data),
+                  (1...65_535).contains(decoded.port),
+                  !decoded.bindHost.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                throw CLIProxyGatewayError.process(
+                    "Containment unconfirmed: unresolved CPA stop marker at \(unconfirmedURL.path) is unreadable and the original listener endpoint is unknown. Stop any running CPA process and remove the corrupt marker only after verifying no old CPA listener remains active."
+                )
+            }
+            if let pid = decoded.pid, pid > 1 {
+                throw CLIProxyGatewayError.process(
+                    "Containment unconfirmed: previous CPA listener pid=\(pid) on port \(decoded.port) must be stopped and verified before continuing."
+                )
+            }
+            throw CLIProxyGatewayError.process(
+                "Containment unconfirmed: original CPA listener port \(decoded.port) remains occupied and must be released before continuing."
+            )
         }
 
-        let temporaryLink = paths.root.appendingPathComponent(".current-\(UUID().uuidString)")
-        defer { try? fileManager.removeItem(at: temporaryLink) }
-        try fileManager.createSymbolicLink(
-            atPath: temporaryLink.path,
-            withDestinationPath: "versions/v\(CLIProxyVersion.normalized(version))"
-        )
-        guard Darwin.rename(temporaryLink.path, paths.currentSymlink.path) == 0 else {
-            throw CLIProxyGatewayError.fileSystem(String(cString: strerror(errno)))
+        let pidURL = paths.root.appendingPathComponent("runtime.pid.json")
+        if let pidData = fileManager.contents(atPath: pidURL.path),
+           let record = try? JSONDecoder().decode(SharedRuntimePIDRecord.self, from: pidData),
+           record.configPath == paths.configURL.path,
+           record.pid > 1,
+           (Darwin.kill(record.pid, 0) == 0 || errno == EPERM) {
+            let portSuffix = record.port.map { " on port \($0)" } ?? ""
+            throw CLIProxyGatewayError.process(
+                "Containment unconfirmed: live sibling AIUsage instance owns CPA listener pid=\(record.pid)\(portSuffix); stop it before changing or replacing the shared runtime."
+            )
         }
-        return previous
+
+        return try body()
+    }
+
+    @discardableResult
+    func activateTracked(
+        version: String,
+        expectedCurrentVersion: String? = nil,
+        expectedCommitID: String? = nil,
+        publicationFault: (() throws -> Void)? = nil
+    ) throws -> (previous: String?, commitID: String) {
+        try withRuntimeFenceLock {
+            let previousSelection = try parseActiveSelection()
+            let previous = previousSelection?.version
+            if let expectedCurrentVersion {
+                let normalizedExpected = CLIProxyVersion.normalized(expectedCurrentVersion)
+                guard previous == normalizedExpected else {
+                    throw CLIProxyGatewayError.process(
+                        "Containment unconfirmed: active CPA version changed from \(normalizedExpected) to \(previous ?? "none") before version commit."
+                    )
+                }
+            }
+            if let expectedCommitID {
+                let actualCommitID = previousSelection?.commitID
+                guard actualCommitID == expectedCommitID else {
+                    throw CLIProxyGatewayError.process(
+                        "Containment unconfirmed: active CPA activation commit changed before rollback (expected \(expectedCommitID), found \(actualCommitID ?? "none"))."
+                    )
+                }
+            }
+            let normalizedTarget = CLIProxyVersion.normalized(version)
+            let versionDirectory = try paths.versionDirectory(version)
+            let binaryURL = versionDirectory.appendingPathComponent(paths.binaryName)
+            guard fileManager.fileExists(atPath: binaryURL.path) else {
+                throw CLIProxyGatewayError.versionNotInstalled(version)
+            }
+
+            var legacyCommitStat = stat()
+            if lstat(activeCommitIDURL.path, &legacyCommitStat) == 0,
+               (legacyCommitStat.st_mode & S_IFMT) != S_IFREG {
+                throw CLIProxyGatewayError.fileSystem(
+                    "Refusing CPA version activation: legacy .active-commit-id path is not a regular file"
+                )
+            }
+
+            let commitID = UUID().uuidString.lowercased()
+            let commitLinkName = ".commit-\(commitID)-v\(normalizedTarget)"
+            let commitLinkURL = paths.versionsDirectory.appendingPathComponent(commitLinkName, isDirectory: false)
+            let temporaryLink = paths.root.appendingPathComponent(".current-\(UUID().uuidString)")
+            var didPublish = false
+            defer {
+                try? fileManager.removeItem(at: temporaryLink)
+                if !didPublish {
+                    try? fileManager.removeItem(at: commitLinkURL)
+                }
+            }
+            if fileManager.fileExists(atPath: commitLinkURL.path) {
+                try? fileManager.removeItem(at: commitLinkURL)
+            }
+            try fileManager.createSymbolicLink(
+                atPath: commitLinkURL.path,
+                withDestinationPath: "v\(normalizedTarget)"
+            )
+            try fileManager.createSymbolicLink(
+                atPath: temporaryLink.path,
+                withDestinationPath: "versions/\(commitLinkName)"
+            )
+            if let publicationFault {
+                try publicationFault()
+            }
+            guard Darwin.rename(temporaryLink.path, paths.currentSymlink.path) == 0 else {
+                throw CLIProxyGatewayError.fileSystem(String(cString: strerror(errno)))
+            }
+            didPublish = true
+            try? fileManager.removeItem(at: activeCommitIDURL)
+            if let entries = try? fileManager.contentsOfDirectory(
+                at: paths.versionsDirectory,
+                includingPropertiesForKeys: nil,
+                options: []
+            ) {
+                for entry in entries where entry.lastPathComponent.hasPrefix(".commit-") && entry.lastPathComponent != commitLinkName {
+                    try? fileManager.removeItem(at: entry)
+                }
+            }
+            return (previous, commitID)
+        }
+    }
+
+    @discardableResult
+    func activate(
+        version: String,
+        expectedCurrentVersion: String? = nil,
+        expectedCommitID: String? = nil
+    ) throws -> String? {
+        try activateTracked(
+            version: version,
+            expectedCurrentVersion: expectedCurrentVersion,
+            expectedCommitID: expectedCommitID
+        ).previous
     }
 
     func delete(version: String) throws {
-        if try currentVersion() == version {
-            throw CLIProxyGatewayError.cannotDeleteCurrentVersion
-        }
-        let directory = try paths.versionDirectory(version)
-        if fileManager.fileExists(atPath: directory.path) {
-            try fileManager.removeItem(at: directory)
+        try withRuntimeFenceLock {
+            let normalized = CLIProxyVersion.normalized(version)
+            if try currentVersion() == normalized {
+                throw CLIProxyGatewayError.cannotDeleteCurrentVersion
+            }
+            let directory = try paths.versionDirectory(version)
+            if fileManager.fileExists(atPath: directory.path) {
+                try fileManager.removeItem(at: directory)
+            }
         }
     }
 

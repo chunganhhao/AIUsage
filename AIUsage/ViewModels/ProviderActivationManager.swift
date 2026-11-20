@@ -94,7 +94,8 @@ final class ProviderActivationManager: ObservableObject {
     }
 
     private init() {
-        if let cliProxyPaths = try? CLIProxyPaths() {
+        if CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+           let cliProxyPaths = try? CLIProxyPaths() {
             CodexLinkedCredentialCopies.registerDirectory(cliProxyPaths.authDirectory)
         }
     }
@@ -907,7 +908,7 @@ final class ProviderActivationManager: ObservableObject {
     }
 
     private func convertToGeminiNativeFormat(_ data: Data) throws -> Data {
-        try CLIProxyGeminiCredentialBridge.makeNativePayload(from: data)
+        try GeminiCredentialBridge.makeNativePayload(from: data)
     }
 
     private func updateGeminiActiveAccount(googleAccountsPath: String, email: String, fm: FileManager) throws {

@@ -203,7 +203,6 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         priceCatalog: ModelsDevPricingService.Catalog?
     ) async -> Report {
         let target = Target.provider(id)
-        // CPA 托管主配置的模型由 CPA 网关维护，fetchSpec 为 nil，这里只补价格。
         let fetched = await fetchUpstream(for: target)
 
         guard var provider = APIProviderStore.shared.provider(id: id) else { return Report() }

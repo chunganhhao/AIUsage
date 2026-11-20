@@ -636,11 +636,23 @@ class ProxyViewModel: ObservableObject {
             }
         }
 
-        if proxyOnlyRunningIds.contains(id),
-           let config = configurations.first(where: { $0.id == id }) {
+        if let config = configurations.first(where: { $0.id == id }),
+           proxyOnlyRunningIds.contains(id) || runtimeService.isProxyRunning(id) {
             runtimeService.stopProxyOnly(for: config)
             proxyOnlyRunningIds.remove(id)
             saveProxyOnlyIds()
+        }
+        if unusedNodeRuntimePrompt?.nodeID == id {
+            unusedNodeRuntimePrompt = nil
+        }
+
+        guard profileStore.delete(id) else {
+            operationErrorMessage = profileStore.lastIOError
+                ?? AppSettings.shared.t(
+                    "Failed to delete node profile from disk.",
+                    "无法从磁盘删除节点配置。"
+                )
+            return
         }
 
         if let logs = recentLogs[id], !logs.isEmpty {
@@ -653,7 +665,6 @@ class ProxyViewModel: ObservableObject {
         statistics.removeValue(forKey: id)
         recentLogs.removeValue(forKey: id)
         clearConnectivityResult(for: id)
-        profileStore.delete(id)
         saveStatistics()
         saveLogs()
         flushLogsRefresh()

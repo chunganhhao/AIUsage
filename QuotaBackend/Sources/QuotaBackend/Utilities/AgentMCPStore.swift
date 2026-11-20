@@ -107,7 +107,9 @@ public struct AgentMCPStore {
         }
         return lines.joined(separator: "\n")
     }
-    private static func quote(_ value: String) -> String { String(decoding: try! jsonData(value), as: UTF8.self) }
+    private static func quote(_ value: String) -> String {
+        (try? jsonData(value)).map { String(decoding: $0, as: UTF8.self) } ?? "\"\(value)\""
+    }
     private static func shell(_ value: String) -> String { "'" + value.replacingOccurrences(of: "'", with: "'\"'\"'") + "'" }
 
     /// Paste-safe JSON or common TOML server tables. Unsupported syntax fails explicitly, never guesses.
@@ -201,7 +203,7 @@ public struct AgentMCPStore {
             return String(decoding: try JSONSerialization.data(withJSONObject: object, options: [.sortedKeys]), as: UTF8.self)
         }
     }
-    private func replacing(_ data: Data, name: String, with record: String?) throws -> Data {
+    func replacing(_ data: Data, name: String, with record: String?) throws -> Data {
         if platform == .codex {
             var removing = false
             var retained: [String] = []
@@ -216,7 +218,9 @@ public struct AgentMCPStore {
             if let record { text += "\n" + record + "\n" }
             return Data(text.utf8)
         }
-        var json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+        guard var json = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw Failure.invalid("Invalid MCP config.")
+        }
         var map = json["mcpServers"] as? [String: Any] ?? [:]
         if let record { map[name] = try JSONSerialization.jsonObject(with: Data(record.utf8)) } else { map.removeValue(forKey: name) }
         json["mcpServers"] = map

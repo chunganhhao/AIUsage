@@ -91,9 +91,7 @@ struct SavedAccountCard: View {
 
                 Text(
                     isSwitchSafePausedAntigravity
-                        ? (AntigravityPoolProtectionSettings.pollingMode() == .localOnly
-                            ? L("Background checks read only the running Antigravity IDE locally; click Refresh to inspect a random dormant account or retry this card.", "后台仅通过本地 Antigravity IDE 读取活跃账号；点击刷新可随机检查 1 个休眠账号或重试当前卡片。")
-                            : L("Queued for randomized 1-by-1 trickle checks (15m cooldown); click Retry to check this account immediately.", "已加入随机逐个检查队列（每账号 15 分钟冷却）；点击重试可立即检查此账号。"))
+                        ? L("Background checks read only the running Antigravity IDE locally; dormant accounts stay cache-only. Switch accounts inside Antigravity IDE to refresh locally.", "后台仅通过本地 Antigravity IDE 读取活跃账号，休眠账号保持仅读缓存；请在 Antigravity IDE 内切换账号以本地刷新。")
                         : (hasSecureCredential
                             ? L("The stored credential could not fetch live data. Try refreshing or reconnecting.", "已存储的凭证未能获取实时数据。可尝试刷新或重新连接。")
                             : L("Account saved locally. Will auto-match when the app session appears.", "账号已保存到本地。对应应用出现在线会话后会自动匹配。"))
@@ -109,9 +107,7 @@ struct SavedAccountCard: View {
                 if hasSecureCredential {
                     Button {
                         guard !isRefreshing, let credentialId = account.storedAccount?.credentialId else { return }
-                        isRefreshing = true
-                        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
+                        performRetry(credentialId: credentialId)
                     } label: {
                         if isRefreshing {
                             ProgressView()
@@ -197,6 +193,12 @@ struct SavedAccountCard: View {
             }
             .environmentObject(appState)
         }
+    }
+
+    private func performRetry(credentialId: String) {
+        isRefreshing = true
+        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
     }
 
     private func copyToPasteboard(_ value: String) {
@@ -305,9 +307,7 @@ struct SavedAccountDetailView: View {
                     if hasSecureCredential {
                         Button {
                             guard !isRefreshing, let credentialId = account.storedAccount?.credentialId else { return }
-                            isRefreshing = true
-                            refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
+                            performRetry(credentialId: credentialId)
                         } label: {
                             if isRefreshing {
                                 ProgressView().controlSize(.small)
@@ -377,5 +377,11 @@ struct SavedAccountDetailView: View {
             appState.deleteAccount(account)
             dismiss()
         }
+    }
+
+    private func performRetry(credentialId: String) {
+        isRefreshing = true
+        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
     }
 }

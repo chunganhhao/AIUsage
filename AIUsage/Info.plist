@@ -30,7 +30,7 @@
 	<key>NSHumanReadableCopyright</key>
 	<string>Copyright © 2026 AIUsage. All rights reserved.</string>
 	<key>NSLocalNetworkUsageDescription</key>
-	<string>Allow trusted local-network devices to reach the CPA Gateway only when you enable LAN access. 开启局域网访问后，允许可信设备连接 CPA 网关。</string>
+	<string>Allow trusted local-network devices to reach AIUsage Quota Share only when you enable LAN sharing. 开启局域网共享后，允许可信设备访问 AIUsage 额度共享服务。</string>
 	<key>NSSupportsAutomaticTermination</key>
 	<true/>
 	<key>NSSupportsSuddenTermination</key>

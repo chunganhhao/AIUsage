@@ -57,16 +57,14 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     var effectiveLocalQuotaReader: AntigravityLocalQuotaReader? {
-        if let localQuotaReaderOverride { return localQuotaReaderOverride }
-        let normalizedHome = NSString(string: homeDirectory).standardizingPath
-        let normalizedReal = NSString(string: NSHomeDirectory()).standardizingPath
-        return normalizedHome == normalizedReal ? .live : nil
+        // shortcut: private IDE loopback RPC has no published Google authorization (§30.1), re-enable only when a documented and authorized interface is established
+        localQuotaReaderOverride
     }
 
     public func fetchUsage() async throws -> ProviderUsage {
         throw ProviderError(
             "not_logged_in",
-            "Antigravity requires credential-based authentication. Connect your Antigravity IDE session or sign in with Google."
+            "Antigravity requires an active local Antigravity IDE session or previously cached local snapshot."
         )
     }
 
@@ -80,14 +78,11 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         }
 
         let authContext = try resolveCredentialAuthContext(credential)
-        // A disabled account must not refresh OAuth or send even loadCodeAssist.
+        // A disabled account must not read or refresh credentials.
         if let error = AntigravityAccountProtection.suspension(in: authContext.rawData) { throw error }
         let sourceURL = credential.metadata["sourcePath"].map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath) }
         let sourceData = sourceURL.flatMap { try? Data(contentsOf: $0) }
-        let cpaCopies = AntigravityAccountProtection.ownedCopies(credentialID: credential.id, homeDirectory: homeDirectory,
-                                                               expectedData: authContext.rawData)
-        let session = localOnly ? nil : try Self.proxySession(proxyURL: authContext.authFile.proxyUrl)
-        defer { session?.finishTasksAndInvalidate() }
+        let session: URLSession? = nil
         do {
             var usage = try await fetchForAuthContext(authContext, session: session, localOnly: localOnly)
             usage.usageAccountId = authContext.authFile.email ?? authContext.url.lastPathComponent
@@ -96,11 +91,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             }
             return usage
         } catch let terminal as ProviderError where terminal.code == "tos_violation" {
-            do {
-                for (url, data) in cpaCopies { try AntigravityAccountProtection.suspend(url, error: terminal, expectedData: data) }
-            } catch {
-                throw ProviderError(terminal.code, terminal.message + " CPA suspension could not be saved; stop CPA and check file permissions.", metadata: terminal.metadata)
-            }
             if let url = sourceURL, url.path != authContext.url.path, let data = sourceData,
                let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let email = authContext.authFile.email,
@@ -119,52 +109,22 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         []
     }
 
-    /// Core fetch logic for a single auth context
+    /// Core fetch logic for a single auth context (local Antigravity IDE RPC only; no third-party Google consumer HTTPS calls)
     private func fetchForAuthContext(_ authContext: AuthContext, session: URLSession?, localOnly: Bool = false) async throws -> ProviderUsage {
-        var expectedData = authContext.rawData
-        var authFile = authContext.authFile
-        var accessToken = authFile.accessToken
+        let authFile = authContext.authFile
+        _ = session
+        _ = localOnly
 
-        do {
-        var transport = "https"
-        var subscription: SubscriptionInfo
-        let quota: QuotaSnapshot
-        if let localReader = effectiveLocalQuotaReader,
-           let local = await localReader.fetchMatchingQuota(expectedEmail: authFile.email) {
-            subscription = SubscriptionInfo(tierId: local.tierId, tierName: local.tierName, projectId: authFile.projectId)
-            quota = QuotaSnapshot(models: local.models, isGrouped: true)
-            transport = "loopback_rpc"
-        } else if localOnly {
-            throw ProviderError("local_only_unavailable", "Active local Antigravity IDE session unavailable; remote request skipped.")
-        } else {
-            if authFile.needsRefresh, let refreshToken = authFile.refreshToken, !refreshToken.isEmpty {
-                if let refreshed = try? await refreshAccessToken(refreshToken: refreshToken, session: session) {
-                    accessToken = refreshed.accessToken
-                    authFile.accessToken = refreshed.accessToken
-                    authFile.expired = iso8601String(refreshed.expiryDate)
-                    if let persisted = persistRefreshedToken(at: authContext.url, originalData: expectedData, refreshed: refreshed) {
-                        expectedData = persisted
-                    }
-                }
-            }
-
-            try Task.checkCancellation()
-            do {
-                subscription = try await loadCodeAssist(accessToken: accessToken, session: session)
-                let resolvedProjectId = subscription.projectId ?? authFile.projectId
-                quota = try await fetchQuota(accessToken: accessToken, projectId: resolvedProjectId, session: session)
-            } catch let error as ProviderError where error.code == "unauthorized" {
-                guard let refreshToken = authFile.refreshToken, !refreshToken.isEmpty else { throw error }
-                let refreshed = try await refreshAccessToken(refreshToken: refreshToken, session: session)
-                accessToken = refreshed.accessToken
-                authFile.accessToken = refreshed.accessToken
-                authFile.expired = iso8601String(refreshed.expiryDate)
-                if let persisted = persistRefreshedToken(at: authContext.url, originalData: expectedData, refreshed: refreshed) { expectedData = persisted }
-                subscription = try await loadCodeAssist(accessToken: accessToken, session: session)
-                let retryProjectId = subscription.projectId ?? authFile.projectId
-                quota = try await fetchQuota(accessToken: accessToken, projectId: retryProjectId, session: session)
-            }
+        guard let localReader = effectiveLocalQuotaReader,
+              let local = await localReader.fetchMatchingQuota(expectedEmail: authFile.email) else {
+            throw ProviderError(
+                "local_only_unavailable",
+                "Direct third-party Antigravity consumer API checks are disabled for policy compliance; showing local IDE session or last-known cached snapshot only."
+            )
         }
+        let subscription = SubscriptionInfo(tierId: local.tierId, tierName: local.tierName, projectId: authFile.projectId)
+        let quota = QuotaSnapshot(models: local.models, isGrouped: true)
+        let transport = "loopback_rpc"
         var usage = buildUsage(
             authContext: authContext,
             authFile: authFile,
@@ -187,13 +147,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         }
 
         return usage
-        } catch let terminal as ProviderError where terminal.code == "tos_violation" {
-            do { try AntigravityAccountProtection.suspend(authContext.url, error: terminal, expectedData: expectedData) }
-            catch {
-                throw ProviderError(terminal.code, terminal.message + " Suspension could not be saved; stop polling and check file permissions.", metadata: terminal.metadata)
-            }
-            throw terminal
-        }
     }
 
     // MARK: - Auth Files
@@ -280,157 +233,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         return restored.contains("@") ? restored : nil
     }
 
-    // MARK: - OAuth
-
-    private struct RefreshedToken {
-        let accessToken: String
-        let expiryDate: Date
-        let expiresIn: Int
-    }
-
-    private func refreshAccessToken(refreshToken: String, session: URLSession?) async throws -> RefreshedToken {
-        guard let (clientId, clientSecret) = resolveOAuthCredentials() else {
-            throw ProviderError(
-                "oauth_config_missing",
-                "Could not find Antigravity OAuth client credentials. Keep Antigravity installed locally or set AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID / AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET."
-            )
-        }
-
-        guard let url = URL(string: Self.oauthRefreshURL) else {
-            throw ProviderError("invalid_url", "Antigravity OAuth refresh URL is invalid.")
-        }
-        var request = URLRequest(url: url, timeoutInterval: timeoutSeconds)
-        request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = formURLEncodedBody([
-            "client_id": clientId,
-            "client_secret": clientSecret,
-            "refresh_token": refreshToken,
-            "grant_type": "refresh_token"
-        ])
-
-        let (data, response) = try await (session ?? QuotaHTTP.sessionOverride ?? QuotaHTTP.session).data(for: request)
-        guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
-            throw ProviderError("refresh_failed", "Failed to refresh Antigravity OAuth token.")
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let accessToken = json["access_token"] as? String,
-              let expiresIn = intValue(json["expires_in"]) else {
-            throw ProviderError("refresh_failed", "Antigravity token refresh returned invalid JSON.")
-        }
-
-        return RefreshedToken(
-            accessToken: accessToken,
-            expiryDate: Date().addingTimeInterval(TimeInterval(expiresIn)),
-            expiresIn: expiresIn
-        )
-    }
-
-    @discardableResult
-    private func persistRefreshedToken(at url: URL, originalData: Data, refreshed: RefreshedToken) -> Data? {
-        guard let original = try? JSONSerialization.jsonObject(with: originalData) as? [String: Any] else { return nil }
-        guard let updated = try? AntigravityCredentialFile.update(url, transform: { latest in
-            guard latest["access_token"] as? String == original["access_token"] as? String,
-                  latest["refresh_token"] as? String == original["refresh_token"] as? String else { return nil }
-            var json = latest
-            json["access_token"] = refreshed.accessToken
-            json["expired"] = iso8601String(refreshed.expiryDate)
-            json["expires_in"] = refreshed.expiresIn
-            json["timestamp"] = Int(Date().timeIntervalSince1970 * 1000)
-            return json
-        }) else { return nil }
-        // Advance the expected snapshot only after our own successful write.
-        return try? JSONSerialization.data(withJSONObject: updated)
-    }
-
-    private func formURLEncodedBody(_ params: [String: String]) -> Data? {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._* "))
-        let body = params.map { key, value in
-            let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed)?.replacingOccurrences(of: " ", with: "+") ?? key
-            let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed)?.replacingOccurrences(of: " ", with: "+") ?? value
-            return "\(encodedKey)=\(encodedValue)"
-        }.joined(separator: "&")
-        return body.data(using: .utf8)
-    }
-
-    private func resolveOAuthCredentials() -> (String, String)? {
-        let environment = ProcessInfo.processInfo.environment
-        if let clientId = environment["AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           let clientSecret = environment["AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET"]?.trimmingCharacters(in: .whitespacesAndNewlines),
-           !clientId.isEmpty,
-           !clientSecret.isEmpty {
-            return (clientId, clientSecret)
-        }
-
-        for candidate in antigravityOAuthSourceCandidates() {
-            guard let content = try? String(contentsOfFile: candidate, encoding: .utf8) else {
-                continue
-            }
-            if let credentials = extractOAuthCredentials(from: content) {
-                return credentials
-            }
-        }
-
-        // 新版 Antigravity（凭据在 Go 二进制内）兜底：用实证已知常量。
-        return (Self.knownClientId, Self.knownClientSecret)
-    }
-
-    private func antigravityOAuthSourceCandidates() -> [String] {
-        let home = FileManager.default.homeDirectoryForCurrentUser.path
-        let appCandidates = [
-            "/Applications/Antigravity.app",
-            "\(home)/Applications/Antigravity.app"
-        ]
-
-        let relativeCandidates = [
-            "Contents/Resources/app/out/main.js",
-            "Contents/Resources/app/out/cli.js"
-        ]
-
-        return appCandidates.flatMap { appPath in
-            relativeCandidates.map { "\(appPath)/\($0)" }
-        }.filter { FileManager.default.fileExists(atPath: $0) }
-    }
-
-    private func extractOAuthCredentials(from content: String) -> (String, String)? {
-        let focusedContent: String
-        if let markerRange = content.range(of: "out-build/vs/platform/cloudCode/common/oauthClient.js") {
-            focusedContent = String(content[markerRange.lowerBound...].prefix(4000))
-        } else {
-            focusedContent = String(content.prefix(8000))
-        }
-
-        let clientIds = extractMatches(
-            using: #"([0-9]+-[A-Za-z0-9_-]+\.apps\.googleusercontent\.com)"#,
-            from: focusedContent
-        )
-        let clientSecrets = extractMatches(
-            using: #"(GOCSPX-[A-Za-z0-9_-]+)"#,
-            from: focusedContent
-        )
-
-        guard let clientId = clientIds.first,
-              let clientSecret = clientSecrets.first else {
-            return nil
-        }
-        return (clientId, clientSecret)
-    }
-
-    private func extractMatches(using pattern: String, from content: String) -> [String] {
-        guard let regex = try? NSRegularExpression(pattern: pattern) else {
-            return []
-        }
-
-        let range = NSRange(content.startIndex..., in: content)
-        return regex.matches(in: content, range: range).compactMap { match in
-            guard match.numberOfRanges > 1,
-                  let matchRange = Range(match.range(at: 1), in: content) else {
-                return nil
-            }
-            return String(content[matchRange])
-        }
-    }
-
     // MARK: - API
 
     private struct SubscriptionInfo {
@@ -457,106 +259,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         let models: [ModelQuota]
         /// true = 来自 retrieveUserQuotaSummary 的分组窗口；false = 旧的按模型配额。
         let isGrouped: Bool
-    }
-
-    private func loadCodeAssist(accessToken: String, session: URLSession?) async throws -> SubscriptionInfo {
-        for urlString in Self.loadCodeAssistURLs {
-            try Task.checkCancellation()
-            guard let url = URL(string: urlString) else { continue }
-
-            var request = URLRequest(url: url, timeoutInterval: min(timeoutSeconds, 8))
-            request.httpMethod = "POST"
-            request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-            request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.httpBody = try? JSONSerialization.data(withJSONObject: [
-                "metadata": ["ideType": "ANTIGRAVITY"]
-            ])
-
-            let data: Data
-            let response: URLResponse
-            do { (data, response) = try await (session ?? QuotaHTTP.sessionOverride ?? QuotaHTTP.session).data(for: request) }
-            catch is CancellationError { throw CancellationError() }
-            catch { continue }
-            guard let http = response as? HTTPURLResponse else { continue }
-            if let error = AntigravityAPIError.parse(statusCode: http.statusCode, data: data) { throw error }
-            guard (200...299).contains(http.statusCode),
-                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-                continue
-            }
-
-            let tier = (json["paidTier"] as? [String: Any]) ?? (json["currentTier"] as? [String: Any])
-            return SubscriptionInfo(
-                tierId: tier?["id"] as? String,
-                tierName: tier?["name"] as? String,
-                projectId: normalizeProjectId(json["cloudaicompanionProject"])
-            )
-        }
-        return SubscriptionInfo(tierId: nil, tierName: nil, projectId: nil)
-    }
-
-    private func fetchQuota(accessToken: String, projectId: String?, session: URLSession?) async throws -> QuotaSnapshot {
-        for summaryURL in Self.quotaSummaryURLs {
-            try Task.checkCancellation()
-            do {
-                let response = try await postQuotaRequest(
-                    summaryURL,
-                    accessToken: accessToken,
-                    projectId: projectId,
-                    timeout: min(timeoutSeconds, 8), session: session
-                )
-                if let models = parseQuotaSummary(response) {
-                    return QuotaSnapshot(models: models, isGrouped: true)
-                }
-            } catch let error as ProviderError where ["unauthorized", "forbidden", "tos_violation", "unsupported_client", "rate_limited"].contains(error.code) {
-                throw error
-            } catch is CancellationError { throw CancellationError()
-            } catch {
-                // Only incompatible or transient endpoints may fall back.
-                continue
-            }
-        }
-
-        let response = try await postQuotaRequest(
-            Self.quotaURL,
-            accessToken: accessToken,
-            projectId: projectId,
-            timeout: timeoutSeconds, session: session
-        )
-        return QuotaSnapshot(models: parseModels(response), isGrouped: false)
-    }
-
-    private func postQuotaRequest(_ urlString: String,
-                                  accessToken: String,
-                                  projectId: String?,
-                                  timeout: Double, session: URLSession?) async throws -> [String: Any] {
-        guard let url = URL(string: urlString) else {
-            throw ProviderError("invalid_url", "Antigravity quota URL is invalid.")
-        }
-        var request = URLRequest(url: url, timeoutInterval: timeout)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
-        request.setValue(Self.userAgent, forHTTPHeaderField: "User-Agent")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-
-        var body: [String: Any] = [:]
-        if let projectId, !projectId.isEmpty, projectId != "aicode-consumers" {
-            body["project"] = projectId
-        }
-        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
-
-        let (data, response) = try await (session ?? QuotaHTTP.sessionOverride ?? QuotaHTTP.session).data(for: request)
-        guard let http = response as? HTTPURLResponse else {
-            throw ProviderError("invalid_response", "Antigravity quota API returned an invalid response.")
-        }
-        if let error = AntigravityAPIError.parse(statusCode: http.statusCode, data: data) { throw error }
-        guard (200...299).contains(http.statusCode) else {
-            throw ProviderError("api_error", "Antigravity quota API returned HTTP \(http.statusCode).")
-        }
-        guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-            throw ProviderError("parse_failed", "Antigravity quota API returned invalid JSON.")
-        }
-        return json
     }
 
     // MARK: - Build Usage
@@ -624,21 +326,8 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         models: [ModelQuota],
         email: String?
     ) -> CircuitBreakerResult? {
-        guard AntigravityPoolProtectionSettings.isEnabled(homeDirectory: homeDirectory) else { return nil }
-        let targets = QuotaCircuitBreakerHelper.findTargetCPAAuthFiles(
-            providerPrefix: "antigravity", email: email, currentFileURL: fileURL,
-            homeDirectory: homeDirectory
-        )
-        let runtime = URL(fileURLWithPath: homeDirectory)
-            .appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI")
-        do {
-            guard let outcome = try AntigravityPoolCircuitBreaker.sync(targets: targets, models: models, runtime: runtime) else {
-                return nil
-            }
-            return CircuitBreakerResult(blockedPools: outcome.blockedPools, reason: outcome.reason, error: nil)
-        } catch {
-            return CircuitBreakerResult(blockedPools: [], reason: "Pool protection not synchronized", error: error.localizedDescription)
-        }
+        _ = (fileURL, models, email)
+        return nil
     }
 
     /// 返回 nil 表示没有可用窗口（旧部署、桶全被禁用等），由调用方换下一个来源。

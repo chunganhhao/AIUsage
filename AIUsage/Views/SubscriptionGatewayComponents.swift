@@ -76,32 +76,6 @@ final class CLIProxyGatewayNavigation: ObservableObject {
     }
 }
 
-struct GatewayCard<Content: View>: View {
-    var padding: CGFloat = 22
-    @ViewBuilder let content: Content
-    @Environment(\.colorScheme) private var colorScheme
-
-    init(padding: CGFloat = 22, @ViewBuilder content: () -> Content) {
-        self.padding = padding
-        self.content = content()
-    }
-
-    var body: some View {
-        content
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .fill(AppSurface.card(colorScheme))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .strokeBorder(AppStroke.card(colorScheme), lineWidth: 1)
-            )
-            .shadow(color: AppShadow.card(colorScheme), radius: colorScheme == .dark ? 0 : 8, y: 3)
-    }
-}
-
 struct GatewaySectionTitle<Trailing: View>: View {
     let title: String
     let subtitle: String

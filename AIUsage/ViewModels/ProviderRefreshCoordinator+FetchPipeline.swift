@@ -13,6 +13,7 @@ extension ProviderRefreshCoordinator {
         guard settings.backendMode == "local" else {
             return .failure()
         }
+        await syncExcludedAccountsToEngine()
         let resetGeneration = codexResetRefreshFence.token
         guard let result = await engine.fetchForCredential(providerId: providerId, credentialId: credentialId),
               result.summary != nil else {
@@ -26,28 +27,57 @@ extension ProviderRefreshCoordinator {
         guard let converted = convertedBatch.first?.provider else {
             return .failure()
         }
+        guard isCredentialStillRegistered(providerId: providerId, credentialId: credentialId) else {
+            return .failure()
+        }
         let identity = codexResetIdentity(converted)
         guard expectedCodexIdentity == nil || expectedCodexIdentity == identity else { return .failure() }
         guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
         await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
         guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
+        guard isCredentialStillRegistered(providerId: providerId, credentialId: credentialId) else {
+            return .failure()
+        }
 
-        if let index = providers.firstIndex(where: { $0.id == converted.id }) {
-            providers[index] = converted
-        } else if let index = providers.firstIndex(where: {
-            $0.baseProviderId == providerId && $0.id.contains(credentialId)
-        }) {
-            providers[index] = converted
+        let existingIndex = providers.firstIndex(where: { $0.id == converted.id })
+            ?? providers.firstIndex(where: { $0.baseProviderId == providerId && $0.id.contains(credentialId) })
+
+        if result.ok {
+            clearAccountCheckError(for: converted, credentialId: credentialId)
+            if let existingIndex {
+                providers[existingIndex] = converted
+            } else if !isProviderHidden(converted) {
+                providers.append(converted)
+                providers = providers.sorted(by: providerSort)
+            }
+            guard let refreshedProvider = currentProviderMatchingRefresh(converted) else {
+                return .failure()
+            }
+            let acquiredAt = resolvedFetchedDate(for: refreshedProvider)
+                ?? ((providerId == "antigravity" || providerId == "codex") ? nil : Date())
+            return .success(refreshedProviders: [refreshedProvider], at: acquiredAt)
+        }
+
+        if let existingIndex,
+           isLastKnownErrorPreservable(providers[existingIndex]),
+           !isTerminalStopFailure(converted) {
+            recordAccountCheckError(
+                for: providers[existingIndex],
+                credentialId: credentialId,
+                message: result.error ?? converted.headline.primary,
+                errorCode: result.summary?.errorCode
+            )
+            return .failure(userMessage: result.error)
+        }
+
+        clearAccountCheckError(for: converted, credentialId: credentialId)
+        if let existingIndex {
+            providers[existingIndex] = converted
         } else if !isProviderHidden(converted) {
             providers.append(converted)
             providers = providers.sorted(by: providerSort)
         }
-
-        guard result.ok,
-              let refreshedProvider = currentProviderMatchingRefresh(converted) else {
-            return .failure()
-        }
-        return .success(refreshedProviders: [refreshedProvider])
+        return .failure()
     }
 
     @MainActor
@@ -62,21 +92,62 @@ extension ProviderRefreshCoordinator {
             guard !candidates.isEmpty else { continue }
 
             for candidate in candidates {
+                let expectedCodexKey: String?
+                if providerId == "codex" {
+                    guard candidate.authMethod == .authFile,
+                          let activeIdentity = CodexQuotaPollingPolicy.activeNativeIdentity(),
+                          let activeKey = activeIdentity.nativeKey,
+                          let candidateIdentity = CodexQuotaPollingPolicy.verifiedNativeIdentity(atPath: candidate.credentialValue),
+                          candidateIdentity.nativeKey == activeKey else {
+                        continue
+                    }
+                    expectedCodexKey = activeKey
+                } else {
+                    expectedCodexKey = nil
+                }
                 let backoffKey = discoveryBackoffKey(for: candidate)
                 if let retryAfter = discoveryFailureBackoff[backoffKey], retryAfter > Date() {
+                    continue
+                }
+
+                if shouldSuppressAutoManagedCandidate(candidate, providerId: providerId) {
+                    discoveryFailureBackoff[backoffKey] = Date().addingTimeInterval(discoveryFailureCooldown)
+                    continue
+                }
+
+                if let expectedCodexKey,
+                   CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey != expectedCodexKey {
                     continue
                 }
 
                 do {
                     let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
                         candidate,
-                        localOnly: providerId == "antigravity"
+                        localOnly: true,
+                        allowLocalMetadataFallback: providerId != "antigravity"
                     )
+                    if let expectedCodexKey {
+                        let currentActiveKey = CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey
+                        let credentialKey = CodexQuotaPollingPolicy.credentialIdentity(for: credential)?.nativeKey
+                        if currentActiveKey != expectedCodexKey || credentialKey != expectedCodexKey {
+                            if candidate.shouldCopyFile,
+                               credential.authMethod == .authFile,
+                               credential.credential != candidate.sourcePath {
+                                try? FileManager.default.removeItem(atPath: credential.credential)
+                            }
+                            continue
+                        }
+                    }
                     if shouldSuppressAutoManagedAccount(
                         providerId: providerId,
                         usage: usage,
                         credential: credential
                     ) {
+                        if candidate.shouldCopyFile,
+                           credential.authMethod == .authFile,
+                           credential.credential != candidate.sourcePath {
+                            try? FileManager.default.removeItem(atPath: credential.credential)
+                        }
                         discoveryFailureBackoff[backoffKey] = Date().addingTimeInterval(discoveryFailureCooldown)
                         continue
                     }
@@ -111,6 +182,44 @@ extension ProviderRefreshCoordinator {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank
     }
 
+    func shouldSuppressAutoManagedCandidate(
+        _ candidate: ProviderAuthCandidate,
+        providerId: String
+    ) -> Bool {
+        var normalizedEmail = normalizedAccountLookupValue(candidate.title)
+        var normalizedAccountId: String?
+        var workspaceUserId: String?
+        let sourceFilePath = candidate.sourcePath?.nilIfBlank
+            ?? (candidate.authMethod == .authFile ? candidate.credentialValue.nilIfBlank : nil)
+
+        if candidate.authMethod == .authFile,
+           let path = sourceFilePath,
+           let json = ProviderAuthManager.loadJSONObject(at: path) {
+            if providerId == "codex" {
+                let identity = CodexAccountIdentity(authJSON: json)
+                normalizedEmail = normalizedAccountLookupValue(identity.email) ?? normalizedEmail
+                normalizedAccountId = normalizedAccountLookupValue(identity.accountId)
+                workspaceUserId = identity.userId
+            } else {
+                normalizedEmail = normalizedAccountLookupValue(json["email"] as? String) ?? normalizedEmail
+                normalizedAccountId = normalizedAccountLookupValue(
+                    (json["account_id"] as? String)
+                        ?? (json["accountId"] as? String)
+                        ?? (json["project_id"] as? String)
+                        ?? (json["projectId"] as? String)
+                )
+            }
+        }
+
+        return accountStore.hasHiddenRegistryMatch(
+            providerId: providerId,
+            normalizedEmail: normalizedEmail,
+            normalizedAccountId: normalizedAccountId,
+            sourceFilePath: sourceFilePath,
+            workspaceUserId: workspaceUserId
+        )
+    }
+
     func shouldSuppressAutoManagedAccount(
         providerId: String,
         usage: ProviderUsage,
@@ -140,7 +249,9 @@ extension ProviderRefreshCoordinator {
     func fetchSingleProviderLocal(_ providerId: String) async -> ProviderRefreshResult {
         let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
+        await syncExcludedAccountsToEngine()
         await syncUnifiedManagedAccounts(for: [providerId])
+        await syncExcludedAccountsToEngine()
         let language = self.language
 
         if let results = await engine.fetchMultiAccountProvider(id: providerId) {
@@ -155,12 +266,15 @@ extension ProviderRefreshCoordinator {
             await reconcileResetProtectedAccountRegistry(stabilizedResults, since: resetGeneration)
             let visible = visibleProviders(from: preserveCodexResetUpdates(stabilizedResults, since: resetGeneration, providerId: providerId))
             replaceProviderEntries(for: providerId, with: visible)
+            let timestampable = timestampableProviders(
+                for: convertedResults.filter(\.ok).map(\.provider)
+            )
+            let latestAcquiredAt = timestampable.compactMap(resolvedFetchedDate(for:)).max()
+                ?? ((providerId == "antigravity" || providerId == "codex") ? nil : refreshedAt)
             return .classified(
                 totalResults: results.count,
-                refreshedProviders: timestampableProviders(
-                    for: convertedResults.filter(\.ok).map(\.provider)
-                ),
-                at: refreshedAt
+                refreshedProviders: timestampable,
+                at: latestAcquiredAt
             )
         } else if let result = await engine.fetchSingle(id: providerId),
                   result.summary != nil {
@@ -168,12 +282,29 @@ extension ProviderRefreshCoordinator {
                 localizedProviderResults(from: [result], language: language)
             }.value
             guard let converted = convertedResults.first?.provider else { return .failure() }
+            if !result.ok,
+               let existing = providers.first(where: { $0.baseProviderId == providerId && isLastKnownErrorPreservable($0) }),
+               !isTerminalStopFailure(converted) {
+                recordAccountCheckError(
+                    for: existing,
+                    credentialId: credentialID(for: existing),
+                    message: result.error ?? converted.headline.primary,
+                    errorCode: result.summary?.errorCode
+                )
+                return .failure(userMessage: result.error)
+            }
+            if result.ok {
+                clearAccountCheckError(for: converted, credentialId: credentialID(for: converted))
+            }
             await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
             replaceProviderEntries(for: providerId, with: visibleProviders(from: preserveCodexResetUpdates([converted], since: resetGeneration, providerId: providerId)))
+            let timestampable = result.ok ? timestampableProviders(for: [converted]) : []
+            let latestAcquiredAt = timestampable.compactMap(resolvedFetchedDate(for:)).max()
+                ?? ((providerId == "antigravity" || providerId == "codex") ? nil : refreshedAt)
             return .classified(
                 totalResults: 1,
-                refreshedProviders: result.ok ? timestampableProviders(for: [converted]) : [],
-                at: refreshedAt
+                refreshedProviders: timestampable,
+                at: latestAcquiredAt
             )
         }
         return .failure()
@@ -219,7 +350,9 @@ extension ProviderRefreshCoordinator {
     func fetchDashboardLocal(useRecentResults: Bool = false, automatic: Bool = false) async -> ProviderRefreshResult {
         let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
+        await syncExcludedAccountsToEngine()
         await syncUnifiedManagedAccounts(for: selectedProviderIDList())
+        await syncExcludedAccountsToEngine()
 
         let snapshot = await engine.fetchAll(
             ids: selectedProviderIDList(),
@@ -265,10 +398,13 @@ extension ProviderRefreshCoordinator {
                 alerts: batch.overview.alerts
             )
         }
+        let refreshedBatch = localizedProviders.filter(\.ok).map(\.provider)
+        let latestAcquiredAt = refreshedBatch.compactMap(resolvedFetchedDate(for:)).max()
+            ?? (refreshedBatch.allSatisfy { $0.baseProviderId == "antigravity" || $0.baseProviderId == "codex" } ? nil : refreshedAt)
         return .classified(
             totalResults: snapshot.providers.count,
-            refreshedProviders: localizedProviders.filter(\.ok).map(\.provider),
-            at: refreshedAt
+            refreshedProviders: refreshedBatch,
+            at: latestAcquiredAt
         )
     }
 
@@ -348,48 +484,83 @@ extension ProviderRefreshCoordinator {
     }
 
     func completeGlobalRefresh(_ result: ProviderRefreshResult) {
-        guard result.shouldUpdateTimestamps,
-              let refreshedAt = result.refreshedAt else {
+        guard result.shouldUpdateTimestamps else {
             return
         }
 
         let currentProviders = timestampableProviders(for: result.refreshedProviders)
         guard !currentProviders.isEmpty else { return }
 
-        lastRefreshTime = refreshedAt
-        for providerId in Set(currentProviders.map(\.baseProviderId)) {
-            providerRefreshTimes[providerId] = refreshedAt
-        }
+        var latestTimestamp: Date?
         for provider in currentProviders {
-            markAccountRefreshed(provider, at: refreshedAt)
+            guard let acquiredAt = resolvedTimestamp(for: provider, fallback: result.refreshedAt) else {
+                continue
+            }
+            markAccountRefreshed(provider, at: acquiredAt)
+            latestTimestamp = max(latestTimestamp ?? .distantPast, acquiredAt)
+        }
+        if let latestTimestamp {
+            lastRefreshTime = max(lastRefreshTime ?? .distantPast, latestTimestamp)
+        }
+        for providerId in Set(currentProviders.map(\.baseProviderId)) {
+            let providerLatest = currentProviders
+                .filter { $0.baseProviderId == providerId }
+                .compactMap { resolvedTimestamp(for: $0, fallback: result.refreshedAt) }
+                .max()
+            if let providerLatest {
+                providerRefreshTimes[providerId] = max(providerRefreshTimes[providerId] ?? .distantPast, providerLatest)
+            }
         }
     }
 
     func completeProviderRefresh(providerId: String, result: ProviderRefreshResult) {
-        guard result.shouldUpdateTimestamps,
-              let refreshedAt = result.refreshedAt else {
+        guard result.shouldUpdateTimestamps else {
             return
         }
 
         let currentProviders = timestampableProviders(for: result.refreshedProviders)
+            .filter { $0.baseProviderId == providerId }
         guard !currentProviders.isEmpty else { return }
 
-        providerRefreshTimes[providerId] = refreshedAt
-        for provider in currentProviders where provider.baseProviderId == providerId {
-            markAccountRefreshed(provider, at: refreshedAt)
+        var providerLatest: Date?
+        for provider in currentProviders {
+            guard let acquiredAt = resolvedTimestamp(for: provider, fallback: result.refreshedAt) else {
+                continue
+            }
+            markAccountRefreshed(provider, at: acquiredAt)
+            providerLatest = max(providerLatest ?? .distantPast, acquiredAt)
+        }
+        if let providerLatest {
+            providerRefreshTimes[providerId] = max(providerRefreshTimes[providerId] ?? .distantPast, providerLatest)
         }
     }
 
     func completeAccountRefresh(refreshKey: String, result: ProviderRefreshResult) {
-        guard result.shouldUpdateTimestamps,
-              let refreshedAt = result.refreshedAt else {
+        guard result.shouldUpdateTimestamps else {
             return
         }
 
-        accountRefreshTimes[refreshKey] = max(accountRefreshTimes[refreshKey] ?? .distantPast, refreshedAt)
+        var latestForKey: Date?
         for provider in result.refreshedProviders {
-            markAccountRefreshed(provider, at: refreshedAt)
+            guard let acquiredAt = resolvedTimestamp(for: provider, fallback: result.refreshedAt) else {
+                continue
+            }
+            markAccountRefreshed(provider, at: acquiredAt)
+            latestForKey = max(latestForKey ?? .distantPast, acquiredAt)
         }
+        if let latestForKey {
+            accountRefreshTimes[refreshKey] = max(accountRefreshTimes[refreshKey] ?? .distantPast, latestForKey)
+        }
+    }
+
+    func resolvedTimestamp(for provider: ProviderData, fallback: Date?) -> Date? {
+        if let fetchedDate = resolvedFetchedDate(for: provider) {
+            return fetchedDate
+        }
+        if provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex" {
+            return nil
+        }
+        return fallback
     }
 
     func markAccountRefreshed(_ provider: ProviderData, at refreshedAt: Date) {
@@ -416,7 +587,7 @@ extension ProviderRefreshCoordinator {
             append(accountRefreshKey(providerId: provider.baseProviderId, storedAccountId: storedAccount.id))
         }
 
-        if provider.baseProviderId == "codex" {
+        if QuotaBackend.AccountCredentialStore.isMultiWorkspace(provider.baseProviderId) {
             append(accountRefreshKey(providerId: provider.baseProviderId, identity: liveProviderIdentity(provider)))
             append(accountRefreshKey(providerId: provider.baseProviderId, providerDataId: provider.id))
             return keys
@@ -475,9 +646,17 @@ extension ProviderRefreshCoordinator {
         }
 
         if let currentCredential = credentialID(for: current)?.lowercased().nilIfBlank,
-           let refreshedCredential = credentialID(for: refreshed)?.lowercased().nilIfBlank,
-           currentCredential == refreshedCredential {
-            return true
+           let refreshedCredential = credentialID(for: refreshed)?.lowercased().nilIfBlank {
+            return currentCredential == refreshedCredential
+        }
+
+        if QuotaBackend.AccountCredentialStore.isMultiWorkspace(current.baseProviderId) {
+            if let currentPath = current.sourceFilePath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank,
+               let refreshedPath = refreshed.sourceFilePath?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank {
+                return QuotaBackend.AccountCredentialStore.normalizedAuthFilePath(currentPath)
+                    == QuotaBackend.AccountCredentialStore.normalizedAuthFilePath(refreshedPath)
+            }
+            return false
         }
 
         if let currentAccountId = normalizedAccountLookupValue(current.accountId),
@@ -568,11 +747,39 @@ extension ProviderRefreshCoordinator {
         incoming: ProviderData?,
         existing: ProviderData?
     ) -> ProviderData? {
-        // A completed refresh must be able to replace the on-screen card,
-        // including when the new result is an error. Keeping a previous
-        // healthy card here made Codex look like bulk refresh did nothing.
-        if let incoming { return incoming }
-        return existing
+        guard let incoming else { return existing }
+        if incoming.status != .error {
+            if let existingError = lastCheckError(for: incoming) {
+                let incomingFetched = resolvedFetchedDate(for: incoming)
+                let existingFetched = existing.flatMap(resolvedFetchedDate(for:))
+                let failedSecond = Date(timeIntervalSince1970: floor(existingError.failedAt.timeIntervalSince1970))
+                let isNewAcquisition = incomingFetched.map { fetched in
+                    if let existingFetched, fetched <= existingFetched {
+                        return false
+                    }
+                    // `fetchedAt` is formatted via `SharedFormatters.iso8601` (whole seconds), so compare against floored second.
+                    return fetched >= failedSecond
+                } ?? false
+                if isNewAcquisition {
+                    clearAccountCheckError(for: incoming, credentialId: credentialID(for: incoming))
+                }
+            }
+            return incoming
+        }
+        if (incoming.baseProviderId == "antigravity" || incoming.baseProviderId == "codex"),
+           let existing,
+           isLastKnownErrorPreservable(existing),
+           !isTerminalStopFailure(incoming) {
+            recordAccountCheckError(
+                for: existing,
+                credentialId: credentialID(for: existing),
+                message: incoming.headline.supporting.nilIfBlank ?? incoming.headline.primary,
+                errorCode: incoming.errorCode
+            )
+            return existing
+        }
+        clearAccountCheckError(for: incoming, credentialId: credentialID(for: incoming))
+        return incoming
     }
 
     func deduplicatedProvidersByID(_ providers: [ProviderData]) -> [ProviderData] {

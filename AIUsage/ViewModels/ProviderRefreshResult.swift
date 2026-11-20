@@ -18,7 +18,7 @@ struct ProviderRefreshResult {
 
     static func success(
         refreshedProviders: [ProviderData],
-        at refreshedAt: Date = Date(),
+        at refreshedAt: Date? = Date(),
         userMessage: String? = nil
     ) -> Self {
         Self(
@@ -31,7 +31,7 @@ struct ProviderRefreshResult {
 
     static func partial(
         refreshedProviders: [ProviderData],
-        at refreshedAt: Date = Date(),
+        at refreshedAt: Date? = Date(),
         userMessage: String? = nil
     ) -> Self {
         Self(
@@ -63,7 +63,7 @@ struct ProviderRefreshResult {
     static func classified(
         totalResults: Int,
         refreshedProviders: [ProviderData],
-        at refreshedAt: Date = Date(),
+        at refreshedAt: Date? = Date(),
         userMessage: String? = nil
     ) -> Self {
         guard !refreshedProviders.isEmpty else {

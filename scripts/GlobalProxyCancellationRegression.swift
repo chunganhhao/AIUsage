@@ -44,22 +44,6 @@ final class AppSettings {
     func node(for id: String?) -> TestNode? { id.map { TestNode(id: $0, name: $0) } }
 }
 
-@MainActor final class CLIProxyGatewayManager {
-    let gateway = GlobalProxyManager()
-    var persistedNodeID: String?
-    var operationErrorMessage: String?
-    var applyCount = 0
-
-    // 对应正式分发路径的边界：先保存节点，再通过正式 reapply 方法更新运行时。
-    func applyManagedProvider(targets: Set<String>) async {
-        applyCount += 1
-        persistedNodeID = targets.first
-        gateway.config.activeNodeId = persistedNodeID
-        await gateway.reapplyActiveUpstream()
-        operationErrorMessage = gateway.operationError
-    }
-}
-
 final class AdminResponseProtocol: URLProtocol, @unchecked Sendable {
     enum Reply { case success, failure(URLError.Code), rejected }
     static var reply = Reply.success
@@ -101,28 +85,6 @@ final class AdminResponseProtocol: URLProtocol, @unchecked Sendable {
         do {
             try expect(URLProtocol.registerClass(AdminResponseProtocol.self), "无法安装隔离网络响应")
             defer { URLProtocol.unregisterClass(AdminResponseProtocol.self) }
-
-            // CPA 已开始保存/下发时切页：事务必须继续，磁盘和运行时最终一致，且无错误弹窗。
-            let manager = CLIProxyGatewayManager()
-            let page = Task { await manager.upsertManagedProvider(targets: ["node-b"]) }
-            AdminResponseProtocol.onStarted = { page.cancel() }
-            await page.value
-            try expect(page.isCancelled, "测试必须实际取消页面任务")
-            try expect(manager.persistedNodeID == "node-b", "节点没有保存")
-            try expect(manager.operationErrorMessage == nil && manager.gateway.operationError == nil,
-                       "切页出现错误弹窗：\(manager.operationErrorMessage ?? manager.gateway.operationError ?? "")")
-            try expect(manager.gateway.runtime.activeNodeId == "node-b", "切页后运行时未完成下发")
-            try expect(!manager.gateway.isBusy, "切页后忙状态未释放")
-            AdminResponseProtocol.onStarted = nil
-            print("PASS: 页面取消后分发完成，配置与运行时一致，无错误弹窗")
-
-            // 页面在事务开始前已经取消：不能再开启写配置操作。
-            let abandoned = CLIProxyGatewayManager()
-            let cancelledPage = Task { await abandoned.upsertManagedProvider(targets: ["node-b"]) }
-            cancelledPage.cancel()
-            await cancelledPage.value
-            try expect(abandoned.applyCount == 0, "已取消页面仍启动分发")
-            print("PASS: 已取消页面不启动新事务")
 
             // 非分发调用仍允许取消，但不能把 URLSession 的 -999 包装成不可达。
             let gateway = GlobalProxyManager()

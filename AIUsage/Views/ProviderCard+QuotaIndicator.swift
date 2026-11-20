@@ -24,33 +24,11 @@ struct QuotaIndicatorView: View {
     }
 
     private var inlineResetText: String? {
-        guard let resetAt, let date = parseResetDate(resetAt) else { return nil }
-        let remaining = max(0, Int(date.timeIntervalSinceNow))
-        if remaining == 0 {
-            switch appState.language {
-            case "zh": return "即将刷新"
-            case "vi": return "sắp đặt lại"
-            default: return "soon"
-            }
-        }
-        let days = remaining / 86_400
-        let hours = (remaining % 86_400) / 3_600
-        let minutes = (remaining % 3_600) / 60
-        if days > 0 { return "\(days)d \(hours)h" }
-        if hours > 0 { return "\(hours)h \(minutes)m" }
-        return "\(max(1, minutes))m"
+        QuotaResetFormatter.compactText(resetAt: resetAt, language: appState.language)
     }
 
     private var inlineResetColor: Color {
-        guard let resetAt, let date = parseResetDate(resetAt) else { return .secondary }
-        let remaining = Int(date.timeIntervalSinceNow)
-        if remaining < 3_600 { return .red }
-        if remaining < 21_600 { return .orange }
-        return .secondary
-    }
-
-    private func parseResetDate(_ value: String) -> Date? {
-        SharedFormatters.parseISO8601(value)
+        QuotaResetFormatter.highlightColor(resetAt: resetAt)
     }
 
     private var riskColor: Color {

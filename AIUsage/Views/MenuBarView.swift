@@ -523,8 +523,8 @@ struct MenuBarView: View {
     }
 
     private func openTokenSaverSettings() {
-        CLIProxyGatewayNavigation.shared.showSettings(destination: .tokenSaver)
-        openMainWindow(section: .subscriptionGateway)
+        appState.requestedSettingsCategory = .tokenSaver
+        openMainWindow(section: .settings)
     }
 
     private func openMainWindow(section: AppSection) {

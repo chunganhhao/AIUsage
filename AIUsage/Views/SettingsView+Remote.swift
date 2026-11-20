@@ -107,13 +107,18 @@ extension SettingsView {
     }
 
     func applyRemoteSettings(refreshDashboard: Bool = true) {
-        let parsed = AppSettings.parseRemoteAddress(remoteHostInput)
+        let trimmedInput = remoteHostInput.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesHTTPS = trimmedInput.lowercased().hasPrefix("https://")
+        let parsed = AppSettings.parseRemoteAddress(trimmedInput)
         if let pastedPort = parsed.port {
             remotePortInput = "\(pastedPort)"
         }
         let port = Int(remotePortInput.trimmingCharacters(in: .whitespaces)) ?? 4318
-        remoteHostInput = parsed.host
-        settings.remoteHost = parsed.host.isEmpty ? "127.0.0.1" : parsed.host
+        let normalizedHost = parsed.host.isEmpty
+            ? "127.0.0.1"
+            : (usesHTTPS ? "https://\(parsed.host)" : parsed.host)
+        remoteHostInput = normalizedHost
+        settings.remoteHost = normalizedHost
         settings.remotePort = port
 
         let token = remoteTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -168,8 +173,8 @@ extension SettingsView {
             settingsToggleRow(
                 title: L("Share with Other Devices", "共享给其他设备"),
                 subtitle: L(
-                    "Let AIUsage on another Mac (e.g. over Tailscale) show this Mac's quotas in Remote mode. Read-only: other devices never trigger a refresh here and never need to sign in.",
-                    "让其他 Mac 上处于「远程」模式的 AIUsage（例如通过 Tailscale）显示本机的额度。只读：其他设备不会触发本机刷新，也不需要登录账号。"
+                    "Expose this Mac's displayed quotas read-only over loopback (`127.0.0.1`) for a TLS proxy or `tailscale serve`. Plaintext non-loopback peers (including 100.64.0.0/10 CGNAT/VPN and LAN) are rejected.",
+                    "在本地回环（`127.0.0.1`）以只读方式提供本机额度快照，配合 TLS 代理或 `tailscale serve` 使用。未启用 TLS 时拒绝任何非回环连接（含 100.64.0.0/10 CGNAT/VPN 与局域网）。"
                 ),
                 isOn: $settings.shareQuotaEnabled
             )
@@ -193,10 +198,10 @@ extension SettingsView {
                         Text(L("Address to enter on the other device", "在其他设备上填写的地址"))
                             .font(.subheadline.weight(.semibold))
 
-                        if shareAddresses.isEmpty {
+                        if !quotaShare.isEncryptedTransportEnabled || shareAddresses.isEmpty {
                             Text(L(
-                                "No Tailscale or local network address detected. Connect Tailscale on this Mac first.",
-                                "未检测到 Tailscale 或局域网地址，请先在本机连上 Tailscale。"
+                                "Loopback only (http://127.0.0.1:\(settings.shareQuotaPort)). Without TLS configured, non-loopback peers (including 100.64.0.0/10 CGNAT/VPN and LAN) are rejected; use `tailscale serve` or an SSH/HTTPS tunnel.",
+                                "仅限本机回环（http://127.0.0.1:\(settings.shareQuotaPort)）。未配置 TLS 时会拒绝所有非回环来源（含 100.64.0.0/10 与局域网），请通过 `tailscale serve` 或 SSH/HTTPS 隧道暴露。"
                             ))
                             .font(.caption)
                             .foregroundStyle(.secondary)
@@ -247,8 +252,8 @@ extension SettingsView {
                     }
 
                     Text(L(
-                        "Only connections from Tailscale, the local network, or this Mac are accepted, and each request must carry the token. After regenerating the token, update it on the other devices.",
-                        "仅接受来自 Tailscale、局域网或本机的连接，且每次请求都必须携带令牌。重新生成令牌后，需要在其他设备上同步更新。"
+                        "Plaintext mode accepts loopback connections (127.0.0.1 / ::1) only — shared CGNAT/VPN and LAN peers require TLS. Each request must carry the bearer token.",
+                        "明文模式仅接受本机回环连接（127.0.0.1 / ::1）；局域网与共享 CGNAT/VPN 地址均需 TLS。每次请求都必须携带令牌；重新生成令牌后请在其他设备上同步更新。"
                     ))
                     .font(.caption)
                     .foregroundStyle(.secondary)

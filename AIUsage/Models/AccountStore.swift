@@ -351,9 +351,33 @@ final class AccountStore: ObservableObject {
 
     func restoreAccount(_ storedAccountId: String, onRestored: (String) -> Void) {
         guard let index = accountRegistry.firstIndex(where: { $0.id == storedAccountId }) else { return }
+        let providerId = accountRegistry[index].providerId
         accountRegistry[index].isHidden = false
+        accountRegistry[index].isPermanentlyRemoved = false
+        _ = normalizeAccountRegistryAgainstCredentials()
+        deduplicateAccountRegistry()
         persistAccountRegistry()
-        onRestored(accountRegistry[index].providerId)
+        onRestored(providerId)
+    }
+
+    func excludedEngineAccountFilters() -> (credentialIDs: Set<String>, codexNativeKeys: Set<String>) {
+        var credentialIDs = Set<String>()
+        var codexNativeKeys = Set<String>()
+        for account in accountRegistry where account.isHidden || account.isPermanentlyRemoved {
+            if let credId = account.credentialId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !credId.isEmpty {
+                credentialIDs.insert(credId)
+            }
+            if let resultCredId = account.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId)?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+               !resultCredId.isEmpty {
+                credentialIDs.insert(resultCredId)
+            }
+            if account.providerId == "codex",
+               let nativeKey = AccountIdentityPolicy.codexIdentity(for: account).nativeKey?.lowercased() {
+                codexNativeKeys.insert(nativeKey)
+            }
+        }
+        return (credentialIDs, codexNativeKeys)
     }
 
     func hideAccount(
@@ -383,11 +407,13 @@ final class AccountStore: ObservableObject {
 
     private func applyHideMutation(_ entry: ProviderAccountEntry) {
         let matchingIndices = matchingStoredAccountIndices(for: entry)
+        let preservedCredentialId = entry.storedAccount?.credentialId?.nilIfBlank
+            ?? entry.liveProvider.flatMap { AccountIdentityPolicy.extractCredentialId(from: $0.id) }
         if !matchingIndices.isEmpty {
             for index in matchingIndices {
                 var updated = accountRegistry[index]
                 updated.note = nil
-                updated.credentialId = nil
+                updated.credentialId = preservedCredentialId ?? updated.credentialId
                 updated.providerResultId = entry.liveProvider?.id ?? updated.providerResultId
                 updated.accountId = entry.liveProvider?.accountId ?? updated.accountId
                 updated.workspaceUserId = entry.liveProvider?.workspaceUserId ?? updated.workspaceUserId
@@ -579,8 +605,15 @@ final class AccountStore: ObservableObject {
                     || AccountIdentityPolicy.sourceFilePathsMatch(stored.sourceFilePath, sourceFilePath)
             }
             if AccountIdentityPolicy.isMultiWorkspace(providerId) {
-                // Codex / Antigravity: email alone can hide the wrong workspace.
                 if AccountIdentityPolicy.sourceFilePathsMatch(stored.sourceFilePath, sourceFilePath) {
+                    return true
+                }
+                if let normalizedEmail, stored.normalizedEmail == normalizedEmail {
+                    if let normalizedAccountId, let storedAccountId = stored.normalizedAccountId,
+                       storedAccountId != stored.normalizedEmail,
+                       normalizedAccountId != normalizedEmail {
+                        return storedAccountId == normalizedAccountId
+                    }
                     return true
                 }
                 return false

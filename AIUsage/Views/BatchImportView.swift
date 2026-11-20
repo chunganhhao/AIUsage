@@ -312,7 +312,11 @@ struct BatchImportView: View {
         for file in filesToImport {
             let candidate = makeCandidateFromScannedFile(file)
             do {
-                let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(candidate)
+                let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
+                    candidate,
+                    localOnly: true,
+                    allowLocalMetadataFallback: true
+                )
                 try await MainActor.run {
                     try appState.registerAuthenticatedCredential(credential, usage: usage, note: nil)
                     succeeded += 1
@@ -322,7 +326,7 @@ struct BatchImportView: View {
             }
         }
 
-        if succeeded > 0 {
+        if succeeded > 0, !ProviderRefreshCoordinator.shouldSkipImmediateProviderRefresh(for: providerId) {
             _ = await refreshCoordinator.fetchSingleProvider(providerId)
         }
 

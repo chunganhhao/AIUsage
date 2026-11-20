@@ -382,6 +382,22 @@ private actor Attempts {
         var collision = false
         do { try profiles.saveCurrent(name: "Collision") } catch { collision = true }
         try check(collision, "duplicate skill gives error not trap")
+
+        // [M6] Valid non-dictionary JSON root (`[]`) in MCP config throws Failure.invalid cleanly without SIGTRAP crash
+        try write("[]", jsonStore.configURL)
+        var nonObjectSetEnabledThrown = false
+        do {
+            try jsonStore.setEnabled("demo", enabled: true)
+        } catch AgentMCPStore.Failure.invalid {
+            nonObjectSetEnabledThrown = true
+        }
+        var nonObjectReplacingThrown = false
+        do {
+            _ = try jsonStore.replacing(Data("[]".utf8), name: "demo", with: nil)
+        } catch AgentMCPStore.Failure.invalid {
+            nonObjectReplacingThrown = true
+        }
+        try check(nonObjectSetEnabledThrown && nonObjectReplacingThrown, "[M6] non-object JSON root in MCP config throws Failure.invalid in both setEnabled and replacing without crashing")
     }
     static func priority(_ home: URL) throws {
         let a = home.appendingPathComponent("a.json"); let b = home.appendingPathComponent("b.json")

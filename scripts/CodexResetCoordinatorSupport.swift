@@ -63,11 +63,18 @@ final class AppSettings: ObservableObject {
     func completeAccountRefresh(refreshKey: String, result: ProviderRefreshResult) {}
     // 不扫描真实账号；fixture 每个原生身份只提供一个候选结果。
     func syncUnifiedManagedAccounts(for providerIds: [String]) async {}
+    func syncExcludedAccountsToEngine() async {}
     func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil, includingExistingFor: Set<String> = []) -> [ProviderData] { incoming }
     func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers }
     func timestampableProviders(for providers: [ProviderData]) -> [ProviderData] { providers }
     func selectedProviderIDList() -> [String] { ["codex"] }
     func sendErrorNotification(_ message: String) {}
+    func isCredentialStillRegistered(providerId: String, credentialId: String) -> Bool { true }
+    func resolvedFetchedDate(for provider: ProviderData) -> Date? { provider.fetchedAt.flatMap { SharedFormatters.parseISO8601($0) } }
+    func isLastKnownErrorPreservable(_ provider: ProviderData) -> Bool { provider.status != .error && !provider.windows.isEmpty }
+    func isTerminalStopFailure(_ provider: ProviderData) -> Bool { provider.status == .error && ["tos_violation", "account_disabled", "unsupported_client", "not_logged_in"].contains(provider.errorCode ?? "") }
+    func recordAccountCheckError(for provider: ProviderData, credentialId: String? = nil, message: String, errorCode: String?) {}
+    func clearAccountCheckError(for provider: ProviderData, credentialId: String? = nil) {}
 }
 @MainActor var fixtureLanguage = "en"
 @MainActor func L(_ english: String, _ chinese: String, _ vietnamese: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String { fixtureLanguage == "zh" ? chinese : (fixtureLanguage == "vi" ? (vietnamese ?? english) : english) }

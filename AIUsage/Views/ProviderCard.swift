@@ -9,6 +9,7 @@ struct ProviderCard: View {
     let footerAccountLabelOverride: String?
     let accountEntry: ProviderAccountEntry?
     let refreshAction: (() async -> Void)?
+    let onReconnect: (() -> Void)?
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @EnvironmentObject var activationManager: ProviderActivationManager
@@ -28,7 +29,8 @@ struct ProviderCard: View {
         subtitleOverride: String? = nil,
         footerAccountLabelOverride: String? = nil,
         accountEntry: ProviderAccountEntry? = nil,
-        refreshAction: (() async -> Void)? = nil
+        refreshAction: (() async -> Void)? = nil,
+        onReconnect: (() -> Void)? = nil
     ) {
         self.provider = provider
         self.titleOverride = titleOverride
@@ -36,6 +38,7 @@ struct ProviderCard: View {
         self.footerAccountLabelOverride = footerAccountLabelOverride
         self.accountEntry = accountEntry
         self.refreshAction = refreshAction
+        self.onReconnect = onReconnect
     }
     private var isRefreshing: Bool {
         refreshCoordinator.isRefreshInProgress(for: provider)
@@ -129,6 +132,28 @@ struct ProviderCard: View {
                                          summaryFetchedAt: provider.fetchedAt, refreshUsage: refreshResetTarget)
             }
 
+            if provider.status != .error,
+               provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex",
+               let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                for: QuotaResetFormatter.snapshotHealth(for: provider),
+                language: appState.language
+               ) {
+                Label(healthBanner, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+
+            if let checkError = refreshCoordinator.lastCheckError(for: provider) {
+                Label(
+                    L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+            }
+
             HStack(alignment: .center, spacing: 8) {
                 if let account = footerAccountLabel {
                     Label(account, systemImage: accountIdentityIcon(for: account))
@@ -148,13 +173,20 @@ struct ProviderCard: View {
                     SmallProgressView()
                         .frame(width: 12, height: 12)
                 } else if let refreshTimestamp {
-                    RefreshableTimeView(
-                        date: refreshTimestamp,
-                        language: appState.language,
-                        font: .caption2,
-                        foregroundStyle: .secondary,
-                        style: .relativeOnly
-                    )
+                    HStack(spacing: 3) {
+                        if showLastKnownPrefix(for: refreshTimestamp) {
+                            Text(L("Last known ·", "上次已知 ·"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        RefreshableTimeView(
+                            date: refreshTimestamp,
+                            language: appState.language,
+                            font: .caption2,
+                            foregroundStyle: .secondary,
+                            style: .relativeOnly
+                        )
+                    }
                 }
 
                 if provider.providerId == "claude-subscription", let directory = provider.sourceFilePath {
@@ -209,16 +241,23 @@ struct ProviderCard: View {
                 }
             }
 
-            Button {
-                Task {
-                    if let refreshAction {
-                        await refreshAction()
-                    } else {
-                        await refreshCoordinator.refreshProviderCardNow(provider)
-                    }
+            if provider.baseProviderId == "antigravity" {
+                Button {
+                    AntigravityAccountSwitcher.openAntigravityApp()
+                } label: {
+                    Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
                 }
+            }
+
+            Button {
+                Task { await runCardRefresh() }
             } label: {
-                Label(L("Refresh This Account", "刷新此账号"), systemImage: "arrow.clockwise")
+                Label(
+                    provider.baseProviderId == "antigravity"
+                        ? L("Reload Saved Snapshot", "重载已存快照")
+                        : L("Refresh This Account", "刷新此账号"),
+                    systemImage: "arrow.clockwise"
+                )
             }
 
             if let candidate = cpaSyncCandidate {
@@ -306,6 +345,14 @@ struct ProviderCard: View {
             Button("OK") { activationMessage = nil }
         } message: {
             Text(activationMessage ?? "")
+        }
+    }
+
+    private func runCardRefresh() async {
+        if let refreshAction {
+            await refreshAction()
+        } else {
+            await refreshCoordinator.refreshProviderCardNow(provider)
         }
     }
     
@@ -523,6 +570,14 @@ struct ProviderCard: View {
         case .segments:
             return 50
         }
+    }
+
+    private func showLastKnownPrefix(for timestamp: Date) -> Bool {
+        guard provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex" else {
+            return false
+        }
+        return refreshCoordinator.lastCheckError(for: provider) != nil
+            || Date().timeIntervalSince(timestamp) >= 120
     }
 
     private func copyToPasteboard(_ value: String) {

@@ -39,6 +39,10 @@ nonisolated enum CLIProxyAuthImportInspectionFailure: Error, Equatable, Sendable
     case unknownType(String)
     case missingType
     case missingCredentialMaterial(type: String)
+    case suspendedAccount(type: String)
+    case disallowedProvider(type: String)
+    case disallowedCodexPlan(reason: String)
+    case disallowedRetryOverride(reason: String)
     case looksLikeAPIKeyConfig
     case looksLikeServiceAccount
 
@@ -58,6 +62,18 @@ nonisolated enum CLIProxyAuthImportInspectionFailure: Error, Equatable, Sendable
         case .missingCredentialMaterial(let type):
             L("The \(type) credential is missing its required token fields.",
               "该 \(type) 凭据缺少必需的 Token 字段。")
+        case .suspendedAccount(let type):
+            L("This \(type) account is suspended or disabled and cannot be imported into CPA.",
+              "该 \(type) 账号已被封禁或停用，无法导入到 CPA。")
+        case .disallowedProvider(let type):
+            L("Provider \"\(type)\" consumer OAuth credentials cannot be imported into CPA under the current release policy.",
+              "根据当前发布策略，无法将“\(type)”消费者 OAuth 凭据导入 CPA。")
+        case .disallowedCodexPlan(let reason):
+            L("Codex account cannot be imported into CPA: \(reason)",
+              "Codex 账号无法导入 CPA：\(reason)")
+        case .disallowedRetryOverride(let reason):
+            L("Auth file violates zero-retry/cooling policy: \(reason)",
+              "认证文件违反零重试/冷却保护策略：\(reason)")
         case .looksLikeAPIKeyConfig:
             L("This looks like an API-key configuration file, not a CPA auth file. Use the API upstream form instead.",
               "这看起来是 API Key 配置文件，不是 CPA 认证文件。请改用“API 上游”入口配置。")
@@ -75,7 +91,10 @@ nonisolated enum CLIProxyAuthImportInspector {
     static func inspect(
         fileName: String,
         data: Data,
-        enabledPluginProviderIDs: Set<String>
+        enabledPluginProviderIDs: Set<String>,
+        disallowedProviderIDs: Set<String> = CLIProxyCapabilityMatrix.defaultDisallowedProviderIDs,
+        allowedCodexPlans: Set<String> = CLIProxyCapabilityMatrix.allowedCodexPlanTypes,
+        trustedCodexIssuerKeys: [CLIProxyTrustedJWSKey] = CLIProxyCapabilityMatrix.defaultTrustedCodexIssuerKeys
     ) -> Result<CLIProxyAuthImportInspection, CLIProxyAuthImportInspectionFailure> {
         guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
             return .failure(.notJSONObject)
@@ -117,6 +136,20 @@ nonisolated enum CLIProxyAuthImportInspector {
 
         let normalizedPluginIDs = Set(enabledPluginProviderIDs.map { $0.lowercased() })
         var missingPluginHint: String?
+        if providerType == "antigravity" {
+            let reason = (object["circuit_breaker_reason"] as? String)?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .uppercased()
+            if object["tos_suspended"] as? Bool == true
+                || object["tos_violation"] as? Bool == true
+                || object["disabled"] as? Bool == true
+                || reason == "TOS_VIOLATION" {
+                return .failure(.suspendedAccount(type: providerType))
+            }
+        }
+        if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(providerType, disallowedProviderIDs: disallowedProviderIDs) {
+            return .failure(.disallowedProvider(type: providerType))
+        }
         if !CLIProxyCapabilityMatrix.importableAuthTypes.contains(providerType),
            !normalizedPluginIDs.contains(providerType) {
             return .failure(.unknownType(providerType))
@@ -128,6 +161,20 @@ nonisolated enum CLIProxyAuthImportInspector {
 
         guard hasCredentialMaterial(object) else {
             return .failure(.missingCredentialMaterial(type: providerType))
+        }
+
+        if let overrideRejection = CLIProxyCapabilityMatrix.disallowedPerCredentialRetryOverrideReason(in: object) {
+            return .failure(.disallowedRetryOverride(reason: overrideRejection))
+        }
+
+        if providerType == "codex" && !allowedCodexPlans.isEmpty {
+            if let planRejection = CLIProxyCapabilityMatrix.codexPlanVerification(
+                fromJSONObject: object,
+                allowedPlans: allowedCodexPlans,
+                trustedKeys: trustedCodexIssuerKeys
+            ).rejectionReason {
+                return .failure(.disallowedCodexPlan(reason: planRejection))
+            }
         }
 
         var strippedManagedMarker = false

@@ -77,6 +77,8 @@ final class OpenCodeNodeStore: ObservableObject {
         return (home as NSString).appendingPathComponent(".config/aiusage/opencode-global-config.json")
     }
 
+    private(set) var lastSaveError: String?
+
     init() {
         load()
         loadGlobalConfig()
@@ -154,10 +156,23 @@ final class OpenCodeNodeStore: ObservableObject {
         if proxyOnlyNodeIds.contains(node.id) {
             stopProxyOnly(node)
         }
+        let previousNodes = nodes
+        nodes.removeAll { $0.id == node.id }
+        guard save() else {
+            nodes = previousNodes
+            throw NSError(
+                domain: "OpenCodeNodeStore",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: lastSaveError ?? AppSettings.shared.t(
+                        "Failed to save OpenCode nodes to disk.",
+                        "无法将 OpenCode 节点保存到磁盘。"
+                    ),
+                ]
+            )
+        }
         // 清理该节点的全局统一代理归因残留（永久累计 + 请求日志），避免 JSON 长期堆积。
         OpenCodeProxyRuntime.shared.purgeNode(node.id)
-        nodes.removeAll { $0.id == node.id }
-        save()
     }
 
     /// 复制节点：新 id/slug（归因独立），插在原节点之后；代理端口避让已占用端口。
@@ -660,7 +675,9 @@ final class OpenCodeNodeStore: ObservableObject {
         if changed { save() }
     }
 
-    private func save() {
+    @discardableResult
+    func save() -> Bool {
+        lastSaveError = nil
         let file = StoreFile(
             version: Self.storeVersion,
             nodes: nodes,
@@ -675,8 +692,11 @@ final class OpenCodeNodeStore: ObservableObject {
             let data = try JSONEncoder.profileEncoder.encode(file)
             try data.write(to: URL(fileURLWithPath: Self.storePath), options: .atomic)
             try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.storePath)
+            return true
         } catch {
+            lastSaveError = SensitiveDataRedactor.redactedMessage(for: error)
             openCodeStoreLog.error("Failed to save OpenCode nodes: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 

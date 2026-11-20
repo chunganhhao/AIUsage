@@ -288,7 +288,114 @@ struct AccountIdentityRegression {
         // AGY Switcher: Verify state.vscdb protobuf/JSON account switching, field preservation, snapshot recovery, and restart lifecycle.
         await testAntigravityAccountSwitcher()
 
+        // [M1] Non-Codex (Antigravity) Pause/Hide & Delete Tombstone Isolation: preserve credentialId, survive normalize & reconcile, exact engine exclusion filters.
+        try await testAntigravityHideAndTombstoneIsolation(store: store)
+
         print("PASS: \(assertions) account identity & OAuth assertions (production save/reconcile/hide/delete/OAuth, isolated storage)")
+    }
+
+    @MainActor
+    static func testAntigravityHideAndTombstoneIsolation(store: AccountStore) async throws {
+        store.accountRegistry = []
+        AccountCredentialStore.shared.credentials = []
+
+        let agyActive = AccountCredential(
+            id: "agy-cred-1",
+            providerId: "antigravity",
+            accountLabel: "paused@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-fixtures/paused.json",
+            metadata: ["projectId": "proj-1", "accountEmail": "paused@example.invalid"]
+        )
+        let agyPeer = AccountCredential(
+            id: "agy-cred-2",
+            providerId: "antigravity",
+            accountLabel: "peer@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-fixtures/peer.json",
+            metadata: ["projectId": "proj-2", "accountEmail": "peer@example.invalid"]
+        )
+        try AccountCredentialStore.shared.saveCredential(agyActive)
+        try AccountCredentialStore.shared.saveCredential(agyPeer)
+
+        check(store.saveAccount(
+            providerId: "antigravity",
+            email: "paused@example.invalid",
+            displayName: "Paused AGY",
+            accountId: "proj-1",
+            credentialId: "agy-cred-1",
+            ensureProviderSelected: { _ in }
+        ), "[M1] save AGY paused candidate")
+        check(store.saveAccount(
+            providerId: "antigravity",
+            email: "peer@example.invalid",
+            displayName: "Peer AGY",
+            accountId: "proj-2",
+            credentialId: "agy-cred-2",
+            ensureProviderSelected: { _ in }
+        ), "[M1] save AGY peer candidate")
+
+        func agyLive(_ cred: AccountCredential, withPath: Bool = true) throws -> ProviderData {
+            var usage = ProviderUsage(provider: "antigravity", label: "Antigravity")
+            usage.usageAccountId = cred.metadata["projectId"]
+            usage.accountEmail = cred.accountLabel
+            var summary = UsageNormalizer.normalize(provider: AntigravityProvider(), usage: usage)
+            summary.id = "antigravity:cred:\(cred.id)"
+            summary.sourceFilePath = withPath ? cred.credential : nil
+            return try JSONDecoder().decode(ProviderData.self, from: JSONEncoder().encode(summary))
+        }
+
+        let livePaused = try agyLive(agyActive)
+        let livePausedLateNoPath = try agyLive(agyActive, withPath: false)
+        let livePeer = try agyLive(agyPeer)
+
+        // Soft-hide agy-cred-1
+        let pausedEntry = ProviderAccountEntry(
+            id: livePaused.id,
+            providerId: "antigravity",
+            providerTitle: "Antigravity",
+            providerSubtitle: nil,
+            liveProvider: livePaused,
+            storedAccount: store.accountRegistry.first { $0.credentialId == "agy-cred-1" }
+        )
+        store.hideAccount(pausedEntry, onPostRegistryChange: {})
+        let hiddenRow = store.hiddenAccounts().first { $0.providerId == "antigravity" }
+        check(hiddenRow != nil && hiddenRow?.credentialId == "agy-cred-1",
+              "[M1] soft-hide preserves credentialId for Antigravity")
+        check(store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] excludedEngineAccountFilters includes soft-hidden Antigravity credential")
+
+        // Normalize & reconcile with late response (including path-less live result) must NEVER un-hide agy-cred-1
+        _ = store.normalizeAccountRegistryAgainstCredentials()
+        await store.reconcileAccountRegistry(with: [livePaused, livePausedLateNoPath, livePeer])
+        check(store.hiddenAccounts().count == 1 && store.accountRegistry.filter { $0.providerId == "antigravity" && !$0.isHidden }.count == 1,
+              "[M1] normalize + reconcile never unhides soft-hidden Antigravity or duplicates peer")
+
+        // Explicit restore brings agy-cred-1 back and clears engine exclusion
+        store.restoreAccount(hiddenRow!.id, onRestored: { _ in })
+        check(store.hiddenAccounts().isEmpty && !store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] explicit restore lifts soft-hide and updates engine filter")
+
+        // Delete creates permanent tombstone; late reconcile with live result must NEVER resurrect tombstone
+        let restoredEntry = ProviderAccountEntry(
+            id: livePaused.id,
+            providerId: "antigravity",
+            providerTitle: "Antigravity",
+            providerSubtitle: nil,
+            liveProvider: livePaused,
+            storedAccount: store.accountRegistry.first { $0.credentialId == "agy-cred-1" }
+        )
+        store.deleteAccount(restoredEntry, onPostRegistryDelete: {})
+        try AccountCredentialStore.shared.saveCredential(agyActive) // simulate race where cred wasn't gone yet
+        await store.reconcileAccountRegistry(with: [livePaused, livePeer])
+        check(store.accountRegistry.contains(where: { $0.providerId == "antigravity" && $0.isPermanentlyRemoved && $0.credentialId == nil }),
+              "[M1] permanent tombstone stays permanentlyRemoved without credential re-attachment on reconcile")
+        check(store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] tombstoned providerResultId keeps credentialId excluded from engine")
+        check(store.hasHiddenRegistryMatch(providerId: "antigravity", normalizedEmail: "paused@example.invalid", normalizedAccountId: "proj-1", sourceFilePath: "/tmp/new-ephemeral-copy/uuid2.json"),
+              "[M1] tombstoned Antigravity IDE session suppresses ephemeral copy even with new UUID path")
+        check(!store.hasHiddenRegistryMatch(providerId: "antigravity", normalizedEmail: "paused@example.invalid", normalizedAccountId: "proj-other", sourceFilePath: "/tmp/new-ephemeral-copy/uuid3.json"),
+              "[M1] distinct projectId with same email is not suppressed by Antigravity tombstone")
     }
 
     static func testProductionCredentialStoreFaultInjection() throws {
@@ -566,70 +673,33 @@ struct AccountIdentityRegression {
             fatalError("R3: expected coordinator phase to be .failed when loopback listener setup fails")
         }
 
-        // R2: Real local NWListener/NWConnection transport test with split TCP headers and truncated EOF
-        coordinator.start()
-        for _ in 0..<100 {
-            if coordinator.phase == .waitingForBrowser { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        check(coordinator.phase == .waitingForBrowser, "R2: real loopback listener reaches waitingForBrowser state")
-        let liveItems = URLComponents(url: coordinator.authURL!, resolvingAgainstBaseURL: false)!.queryItems!
-        guard case .single(let tcpState) = AntigravityLoginCoordinator.queryParameter("state", in: liveItems),
-              case .single(let tcpChallenge) = AntigravityLoginCoordinator.queryParameter("code_challenge", in: liveItems),
-              case .single(let tcpRedirect) = AntigravityLoginCoordinator.queryParameter("redirect_uri", in: liveItems),
-              let tcpPort = URL(string: tcpRedirect)?.port else {
-            fatalError("R2: missing callback endpoint parameters")
-        }
-
-        // R2a: Truncated request (EOF before \r\n\r\n) returns HTTP 400 and keeps session alive
-        let truncatedPrefix = "GET /oauth2callback?code=TruncatedCode&state=\(tcpState) HTTP/1.1\r\nHost: 127."
-        let truncatedConnection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(tcpPort))!, using: .tcp)
-        let truncatedResponse: String = await withCheckedContinuation { continuation in
-            truncatedConnection.stateUpdateHandler = { state in
-                guard case .ready = state else { return }
-                truncatedConnection.stateUpdateHandler = nil
-                truncatedConnection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                    continuation.resume(returning: String(data: data ?? Data(), encoding: .utf8) ?? "")
-                }
-                truncatedConnection.send(
-                    content: Data(truncatedPrefix.utf8),
-                    contentContext: .finalMessage,
-                    isComplete: true,
-                    completion: .contentProcessed { _ in }
-                )
+        // R2 / Policy compliance: direct Antigravity browser OAuth must fail closed with 0 listeners, 0 browser launches, and 0 network calls
+        var browserOpenedCount = 0
+        let blockedOAuthCoordinator = AntigravityLoginCoordinator(
+            dataLoader: { _ in
+                fatalError("Policy-blocked OAuth must not make network calls")
+            },
+            oauthConfigurationProvider: {
+                .init(clientId: "test-client-id", clientSecret: "test-client-secret")
+            },
+            openBrowserHandler: { _ in
+                browserOpenedCount += 1
+            },
+            listenerFactory: {
+                fatalError("Policy-blocked OAuth must not start a loopback listener")
             }
-            truncatedConnection.start(queue: DispatchQueue.global())
+        )
+        blockedOAuthCoordinator.start()
+        if case .failed(let message) = blockedOAuthCoordinator.phase {
+            check(message.contains("policy compliance")
+                    && blockedOAuthCoordinator.authURL == nil
+                    && !blockedOAuthCoordinator.isRunning
+                    && browserOpenedCount == 0,
+                  "R2/Policy: AntigravityLoginCoordinator.start() fails closed with 0 browser opens and 0 HTTP calls")
+        } else {
+            fatalError("R2/Policy: expected coordinator phase to fail closed on start()")
         }
-        truncatedConnection.cancel()
-        check(truncatedResponse.hasPrefix("HTTP/1.1 400"), "R2: truncated EOF header returns HTTP 400")
-        check(coordinator.phase == .waitingForBrowser, "R2: truncated EOF header does not abort waitingForBrowser session")
-
-        // R2b: Valid callback split across multiple TCP segments reassembles and succeeds with HTTP 200
-        let splitPart1 = "GET /oauth2callback?code=FragmentedCode&state=\(tcpState) HTTP/1.1\r\nHost: 127."
-        let splitPart2 = "0.0.1:\(tcpPort)\r\nUser-Agent: SplitTest/1.0\r\n\r\n"
-        let splitConnection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(tcpPort))!, using: .tcp)
-        let splitResponse: String = await withCheckedContinuation { continuation in
-            splitConnection.stateUpdateHandler = { state in
-                guard case .ready = state else { return }
-                splitConnection.stateUpdateHandler = nil
-                splitConnection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                    continuation.resume(returning: String(data: data ?? Data(), encoding: .utf8) ?? "")
-                }
-                splitConnection.send(content: Data(splitPart1.utf8), completion: .contentProcessed { _ in
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(40)) {
-                        splitConnection.send(content: Data(splitPart2.utf8), completion: .contentProcessed { _ in })
-                    }
-                })
-            }
-            splitConnection.start(queue: DispatchQueue.global())
-        }
-        splitConnection.cancel()
-        check(splitResponse.hasPrefix("HTTP/1.1 200 OK"), "R2: split TCP header request succeeds with HTTP 200 OK after reassembly")
-        check(coordinator.phase == .succeeded, "R2: coordinator reaches .succeeded after split TCP callback")
-        check(capturedTokenVerifiers.values.count == 2 && AntigravityLoginCoordinator.pkceCodeChallenge(for: capturedTokenVerifiers.values[1]) == tcpChallenge,
-              "R2: split TCP callback exchanges token with matching PKCE code_verifier")
-
-        coordinator.discardImportedSession()
+        blockedOAuthCoordinator.discardImportedSession()
     }
 
     @MainActor

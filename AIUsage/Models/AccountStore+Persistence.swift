@@ -300,10 +300,11 @@ nonisolated enum AccountIdentityPolicy {
             merged.sourceFilePath = preferredPath
         }
         merged.lastSeenAt = maxTimestampString(preferred.lastSeenAt, secondary.lastSeenAt)
-        merged.isPermanentlyRemoved = preferred.providerId == "codex"
-            ? preferred.isPermanentlyRemoved
-            : preferred.isPermanentlyRemoved || secondary.isPermanentlyRemoved
-        merged.isHidden = (preferred.isHidden && secondary.isHidden) || merged.isPermanentlyRemoved
+        merged.isPermanentlyRemoved = preferred.isPermanentlyRemoved
+        let keepHidden = secondary.isPermanentlyRemoved
+            ? preferred.isHidden
+            : (preferred.isHidden || secondary.isHidden)
+        merged.isHidden = keepHidden || merged.isPermanentlyRemoved
         if merged.isPermanentlyRemoved {
             merged.credentialId = nil
             merged.note = nil
@@ -340,6 +341,10 @@ nonisolated enum AccountIdentityPolicy {
             if let savedId = stored.credentialId, let liveId = extractCredentialId(from: provider.id) {
                 return savedId == liveId
             }
+            if let savedResultId = stored.providerResultId.flatMap(extractCredentialId),
+               let liveId = extractCredentialId(from: provider.id) {
+                return savedResultId.caseInsensitiveCompare(liveId) == .orderedSame
+            }
             return sourceFilePathsMatch(stored.sourceFilePath, provider.sourceFilePath)
         }
 
@@ -352,6 +357,11 @@ nonisolated enum AccountIdentityPolicy {
         }
 
         if isMultiWorkspace(stored.providerId) {
+            if let storedResultId = stored.normalizedProviderResultId,
+               extractCredentialId(from: storedResultId) != nil,
+               storedResultId == provider.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                return true
+            }
             if sourceFilePathsMatch(stored.sourceFilePath, provider.sourceFilePath) {
                 return true
             }
@@ -682,7 +692,7 @@ private struct AccountRegistryRefreshSnapshot {
 
             let inferredCredentialId = AccountIdentityPolicy.extractCredentialId(from: provider.id).flatMap { id in
                 // 删除前已发出的请求可能稍后返回；失效凭据不能借刷新结果复活删除记录。
-                provider.baseProviderId != "codex" || credentialLookup[id] != nil ? id : nil
+                credentialLookup[id] != nil ? id : nil
             }
 
             if let hiddenIndex = accountRegistry.firstIndex(where: {
@@ -690,59 +700,15 @@ private struct AccountRegistryRefreshSnapshot {
                 AccountIdentityPolicy.matchesLive(stored: $0, provider: provider)
             }) {
                 var hidden = accountRegistry[hiddenIndex]
-
-                // Credential-backed live row means the user re-imported / reconnected —
-                // revive permanent tombstones instead of keeping them suppressed forever.
-                if hidden.isPermanentlyRemoved, inferredCredentialId != nil {
-                    hidden.isPermanentlyRemoved = false
-                    hidden.isHidden = false
-                    hidden.credentialId = inferredCredentialId
-                    if hidden.providerResultId != provider.id {
-                        hidden.providerResultId = provider.id
-                    }
-                    let isLiveSuccess = provider.status != .error
-                    if isLiveSuccess, hidden.accountId != provider.accountId {
-                        hidden.accountId = provider.accountId
-                    }
-                    if let userId = provider.workspaceUserId { hidden.workspaceUserId = userId }
-                    if let livePath = provider.sourceFilePath,
-                       !AccountIdentityPolicy.sourceFilePathsMatch(hidden.sourceFilePath, livePath) {
-                        hidden.sourceFilePath = livePath
-                    }
-                    hidden.lastSeenAt = now
-                    accountRegistry[hiddenIndex] = hidden
+                if hidden.isPermanentlyRemoved {
                     reservedStoredIDs.insert(hidden.id)
-                    didChange = true
                     continue
                 }
-
-                if hidden.providerResultId != provider.id {
-                    hidden.providerResultId = provider.id
-                    didChange = true
-                }
-                let isLiveSuccess = provider.status != .error
-                if isLiveSuccess, hidden.accountId != provider.accountId {
-                    hidden.accountId = provider.accountId
-                    didChange = true
-                }
-                if let userId = provider.workspaceUserId, hidden.workspaceUserId != userId {
-                    hidden.workspaceUserId = userId
-                    didChange = true
-                }
-                if hidden.providerId != "codex", hidden.credentialId == nil, let inferredCredentialId, !hidden.isPermanentlyRemoved {
+                if hidden.credentialId == nil, let inferredCredentialId {
                     hidden.credentialId = inferredCredentialId
+                    accountRegistry[hiddenIndex] = hidden
                     didChange = true
                 }
-                if let livePath = provider.sourceFilePath,
-                   !AccountIdentityPolicy.sourceFilePathsMatch(hidden.sourceFilePath, livePath) {
-                    hidden.sourceFilePath = livePath
-                    didChange = true
-                }
-                if hidden.lastSeenAt != now {
-                    hidden.lastSeenAt = now
-                    didChange = true
-                }
-                accountRegistry[hiddenIndex] = hidden
                 reservedStoredIDs.insert(hidden.id)
                 continue
             }
@@ -784,12 +750,13 @@ private struct AccountRegistryRefreshSnapshot {
                     updated.lastSeenAt = now
                     didChange = true
                 }
-                if updated.isHidden {
-                    updated.isHidden = false
-                    didChange = true
-                }
                 accountRegistry[index] = updated
                 reservedStoredIDs.insert(updated.id)
+            } else if accountRegistry.contains(where: {
+                !$0.id.isEmpty && reservedStoredIDs.contains($0.id) && $0.isHidden &&
+                AccountIdentityPolicy.matchesLive(stored: $0, provider: provider)
+            }) {
+                continue
             } else {
                 let normalizedNewEmail = label.lowercased()
                 let normalizedNewAccountId = AccountIdentityPolicy.normalizedLookupValue(provider.accountId)
@@ -1119,8 +1086,16 @@ extension AccountStore {
 
         for index in accountRegistry.indices {
             var account = accountRegistry[index]
-            // 隐藏/删除记录保留身份，但不能通过旧 providerResultId 自动重新绑定凭据。
-            if account.providerId == "codex", account.isHidden { continue }
+            // 隐藏/删除记录保留身份，但不能在归一化阶段自动解除隔离或重新绑定凭据。
+            if account.isPermanentlyRemoved {
+                if account.credentialId != nil {
+                    account.credentialId = nil
+                    accountRegistry[index] = account
+                    didChange = true
+                }
+                continue
+            }
+            if account.isHidden { continue }
             var resolvedCredentialId = account.credentialId?.nilIfBlank
 
             if resolvedCredentialId == nil,

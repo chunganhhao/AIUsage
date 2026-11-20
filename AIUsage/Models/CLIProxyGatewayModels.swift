@@ -186,17 +186,16 @@ nonisolated struct CLIProxyGatewaySettings: Codable, Equatable, Sendable {
     var autoStart: Bool = false
     var allowLANAccess: Bool = false
     var routingStrategy: CLIProxyRoutingStrategy = .roundRobin
-    /// CPA `request-retry`：单次请求在可用凭据上的重试次数上限（含 429 冷却等待场景）。
-    /// 官方示例默认 3；与「额度用尽换号」互补，不是二选一。
-    var requestRetry: Int = 1
-    /// CPA `max-retry-interval`（秒）。为 0 时上游会跳过冷却等待重试，429 几乎无法换号。
+    /// CPA `request-retry`: opt-in retries per request (0 by default so gateway does not burst).
+    var requestRetry: Int = 0
+    /// CPA `max-retry-interval`（秒）。
     var maxRetryInterval: Int = 30
-    /// CPA `max-retry-credentials`：单次请求最多尝试几把凭据；0 = 尝试全部可用凭据。
-    var maxRetryCredentials: Int = 0
+    /// CPA `max-retry-credentials`: bounded to 1 by default unless user widens failover.
+    var maxRetryCredentials: Int = 1
     /// CPA `quota-exceeded.switch-project`。关闭以防止触发 Google Cloud Code TOS_VIOLATION。
     var quotaSwitchProject: Bool = false
-    /// CPA `quota-exceeded.switch-preview-model`。
-    var quotaSwitchPreviewModel: Bool = true
+    /// CPA `quota-exceeded.switch-preview-model` (opt-in; off by default).
+    var quotaSwitchPreviewModel: Bool = false
     /// CPA `quota-exceeded.antigravity-credits`。关闭以防止触发 Google 账户违规封禁。
     var quotaAntigravityCredits: Bool = false
     var proxyURL: String = ""
@@ -213,11 +212,11 @@ nonisolated struct CLIProxyGatewaySettings: Codable, Equatable, Sendable {
         autoStart: Bool = false,
         allowLANAccess: Bool = false,
         routingStrategy: CLIProxyRoutingStrategy = .roundRobin,
-        requestRetry: Int = 1,
+        requestRetry: Int = 0,
         maxRetryInterval: Int = 30,
-        maxRetryCredentials: Int = 0,
+        maxRetryCredentials: Int = 1,
         quotaSwitchProject: Bool = false,
-        quotaSwitchPreviewModel: Bool = true,
+        quotaSwitchPreviewModel: Bool = false,
         quotaAntigravityCredits: Bool = false,
         proxyURL: String = "",
         enablePlugins: Bool = false,
@@ -254,11 +253,11 @@ nonisolated struct CLIProxyGatewaySettings: Codable, Equatable, Sendable {
         autoStart = try container.decodeIfPresent(Bool.self, forKey: .autoStart) ?? false
         allowLANAccess = try container.decodeIfPresent(Bool.self, forKey: .allowLANAccess) ?? false
         routingStrategy = try container.decodeIfPresent(CLIProxyRoutingStrategy.self, forKey: .routingStrategy) ?? .roundRobin
-        requestRetry = try container.decodeIfPresent(Int.self, forKey: .requestRetry) ?? 1
+        requestRetry = try container.decodeIfPresent(Int.self, forKey: .requestRetry) ?? 0
         maxRetryInterval = try container.decodeIfPresent(Int.self, forKey: .maxRetryInterval) ?? 30
-        maxRetryCredentials = try container.decodeIfPresent(Int.self, forKey: .maxRetryCredentials) ?? 0
+        maxRetryCredentials = try container.decodeIfPresent(Int.self, forKey: .maxRetryCredentials) ?? 1
         quotaSwitchProject = try container.decodeIfPresent(Bool.self, forKey: .quotaSwitchProject) ?? false
-        quotaSwitchPreviewModel = try container.decodeIfPresent(Bool.self, forKey: .quotaSwitchPreviewModel) ?? true
+        quotaSwitchPreviewModel = try container.decodeIfPresent(Bool.self, forKey: .quotaSwitchPreviewModel) ?? false
         quotaAntigravityCredits = try container.decodeIfPresent(Bool.self, forKey: .quotaAntigravityCredits) ?? false
         proxyURL = try container.decodeIfPresent(String.self, forKey: .proxyURL) ?? ""
         enablePlugins = try container.decodeIfPresent(Bool.self, forKey: .enablePlugins) ?? false
@@ -269,17 +268,34 @@ nonisolated struct CLIProxyGatewaySettings: Codable, Equatable, Sendable {
     var normalized: CLIProxyGatewaySettings {
         var value = self
         value.port = min(max(value.port, 1_024), 65_535)
-        value.requestRetry = min(max(value.requestRetry, 0), 10)
-        // CPA：max-retry-interval<=0 时 shouldRetryAfterError 直接放弃，429 几乎无法换号。
+        // Enforce strict zero-failover subscription safety profile (§0 M0b / §37.3):
+        // no cross-credential retry or preview-model fallback after quota/429 errors.
+        value.requestRetry = 0
         value.maxRetryInterval = min(max(value.maxRetryInterval, 1), 1_800)
-        value.maxRetryCredentials = min(max(value.maxRetryCredentials, 0), 64)
-        // Tắt tính năng lách project và credits để chống Google quét TOS_VIOLATION.
+        value.maxRetryCredentials = 1
         value.quotaSwitchProject = false
-        value.quotaSwitchPreviewModel = true
+        value.quotaSwitchPreviewModel = false
         value.quotaAntigravityCredits = false
+        if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+            value.enablePlugins = false
+        }
         value.accountModelProbeIntervalSeconds = min(max(value.accountModelProbeIntervalSeconds, 15), 3_600)
         value.proxyURL = value.proxyURL.trimmingCharacters(in: .whitespacesAndNewlines)
         return value
+    }
+
+    /// Fail-closed migration from persisted legacy settings before current retry/failover/plugin defaults existed.
+    var migratedFromLegacyV1: CLIProxyGatewaySettings {
+        var value = normalized
+        value.requestRetry = 0
+        value.maxRetryCredentials = 1
+        value.quotaSwitchProject = false
+        value.quotaSwitchPreviewModel = false
+        value.quotaAntigravityCredits = false
+        if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+            value.enablePlugins = false
+        }
+        return value.normalized
     }
 
     var bindHost: String { allowLANAccess ? "0.0.0.0" : "127.0.0.1" }
@@ -520,19 +536,6 @@ nonisolated struct CLIProxyAuthFile: Codable, Identifiable, Equatable, Sendable 
     var isOpenAICompatibleRuntime: Bool {
         let value = (provider ?? type ?? "").lowercased()
         return runtimeOnly && (value == "openai-compatibility" || value.hasPrefix("openai-compatible-"))
-    }
-}
-
-/// Raw result returned by CPA's credential-scoped management request. The body
-/// is inspected only to validate that the upstream returned its expected JSON;
-/// it is never persisted or displayed because it can contain account details.
-nonisolated struct CLIProxyUpstreamCallResult: Decodable, Sendable {
-    let statusCode: Int
-    let body: String
-
-    enum CodingKeys: String, CodingKey {
-        case statusCode = "status_code"
-        case body
     }
 }
 
@@ -1341,6 +1344,30 @@ nonisolated enum CLIProxyAccountSyncManifestValidator {
 /// The key intentionally excludes access tokens, refresh tokens, and AIUsage's
 /// credential ID. It is safe to use for reconciliation only when
 /// `canAutomaticallyMerge` is true.
+nonisolated struct CLIProxyTrustedJWSKey: Equatable, Sendable {
+    let keyID: String?
+    let issuer: String
+    let allowedAudiences: Set<String>
+    let publicKeyData: Data
+
+    init(
+        keyID: String? = nil,
+        issuer: String,
+        allowedAudiences: Set<String>,
+        publicKeyData: Data
+    ) {
+        let trimmedKID = keyID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.keyID = (trimmedKID?.isEmpty == false) ? trimmedKID : nil
+        self.issuer = issuer.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.allowedAudiences = Set(
+            allowedAudiences
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+        )
+        self.publicKeyData = publicKeyData
+    }
+}
+
 nonisolated struct CLIProxyAccountIdentity: Equatable, Sendable {
     let key: String
     let providerID: String
@@ -1607,15 +1634,124 @@ nonisolated struct CLIProxyAccountIdentity: Equatable, Sendable {
         }
     }
 
-    private static func jwtClaims(_ token: String) -> [String: Any]? {
-        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
-        guard segments.count >= 2 else { return nil }
-        var payload = String(segments[1])
+    struct ValidatedJWSToken: Equatable {
+        let algorithm: String
+        let claims: [String: Any]
+        let signature: Data
+
+        static func == (lhs: ValidatedJWSToken, rhs: ValidatedJWSToken) -> Bool {
+            lhs.algorithm == rhs.algorithm && lhs.signature == rhs.signature
+        }
+    }
+
+    private static func decodeBase64URL(_ rawSegment: String) -> Data? {
+        guard !rawSegment.isEmpty else { return nil }
+        var normalized = rawSegment
             .replacingOccurrences(of: "-", with: "+")
             .replacingOccurrences(of: "_", with: "/")
-        let padding = (4 - payload.count % 4) % 4
-        payload += String(repeating: "=", count: padding)
-        guard let data = Data(base64Encoded: payload),
+        let remainder = normalized.count % 4
+        if remainder == 1 { return nil }
+        let padding = (4 - remainder) % 4
+        normalized += String(repeating: "=", count: padding)
+        return Data(base64Encoded: normalized)
+    }
+
+    private static func p256PublicKey(from data: Data) -> P256.Signing.PublicKey? {
+        if let key = try? P256.Signing.PublicKey(x963Representation: data) {
+            return key
+        }
+        if let key = try? P256.Signing.PublicKey(rawRepresentation: data) {
+            return key
+        }
+        if let pem = String(data: data, encoding: .utf8),
+           pem.contains("BEGIN PUBLIC KEY"),
+           let key = try? P256.Signing.PublicKey(pemRepresentation: pem) {
+            return key
+        }
+        return try? P256.Signing.PublicKey(derRepresentation: data)
+    }
+
+    /// Cryptographically verifies a 3-segment ES256 JWS against configured trusted issuer keys,
+    /// requiring `alg == "es256"`, valid `typ` if present, matching `kid` when configured on the key,
+    /// matching `iss`, and intersection with `allowedAudiences`.
+    static func verifyAuthenticatedJWS(
+        _ token: String,
+        trustedKeys: [CLIProxyTrustedJWSKey]
+    ) -> ValidatedJWSToken? {
+        guard !trustedKeys.isEmpty else { return nil }
+        let trimmed = token.trimmingCharacters(in: .whitespacesAndNewlines)
+        let segments = trimmed.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count == 3 else { return nil }
+        guard let headerData = decodeBase64URL(String(segments[0])),
+              let headerObj = try? JSONSerialization.jsonObject(with: headerData) as? [String: Any],
+              let rawAlg = (headerObj["alg"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+              rawAlg == "es256" else {
+            return nil
+        }
+        if let rawTyp = (headerObj["typ"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+           !rawTyp.isEmpty,
+           !["jwt", "at+jwt", "openid-oauth-jwt"].contains(rawTyp) {
+            return nil
+        }
+        let tokenKID: String? = {
+            guard let raw = (headerObj["kid"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !raw.isEmpty else { return nil }
+            return raw
+        }()
+        guard let payloadData = decodeBase64URL(String(segments[1])),
+              let payloadObj = try? JSONSerialization.jsonObject(with: payloadData) as? [String: Any],
+              let signatureData = decodeBase64URL(String(segments[2])),
+              !signatureData.isEmpty,
+              let ecdsaSignature = try? P256.Signing.ECDSASignature(rawRepresentation: signatureData) else {
+            return nil
+        }
+        guard let rawIssuer = (payloadObj["iss"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !rawIssuer.isEmpty else {
+            return nil
+        }
+        let tokenAudiences: Set<String> = {
+            if let single = payloadObj["aud"] as? String {
+                let norm = single.trimmingCharacters(in: .whitespacesAndNewlines)
+                return norm.isEmpty ? [] : [norm]
+            }
+            if let list = payloadObj["aud"] as? [String] {
+                return Set(list.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty })
+            }
+            return []
+        }()
+        guard !tokenAudiences.isEmpty else { return nil }
+        let signingInput = Data("\(segments[0]).\(segments[1])".utf8)
+
+        for trustedKey in trustedKeys {
+            guard !trustedKey.issuer.isEmpty,
+                  !trustedKey.allowedAudiences.isEmpty,
+                  rawIssuer == trustedKey.issuer,
+                  !tokenAudiences.isDisjoint(with: trustedKey.allowedAudiences) else {
+                continue
+            }
+            if let expectedKID = trustedKey.keyID, tokenKID != expectedKID {
+                continue
+            }
+            guard let publicKey = p256PublicKey(from: trustedKey.publicKeyData) else {
+                continue
+            }
+            if publicKey.isValidSignature(ecdsaSignature, for: signingInput) {
+                return ValidatedJWSToken(
+                    algorithm: rawAlg,
+                    claims: payloadObj,
+                    signature: signatureData
+                )
+            }
+        }
+        return nil
+    }
+
+    /// Display and local account-deduplication parser ONLY — never use as provider-authenticated
+    /// entitlement proof. Admission checks must call `verifyAuthenticatedJWS(_:trustedKeys:)`.
+    static func jwtClaims(_ token: String) -> [String: Any]? {
+        let segments = token.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count >= 2,
+              let data = decodeBase64URL(String(segments[1])),
               let object = try? JSONSerialization.jsonObject(with: data),
               let claims = object as? [String: Any] else { return nil }
         return claims

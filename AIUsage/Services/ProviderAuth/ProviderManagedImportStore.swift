@@ -29,6 +29,10 @@ enum ProviderManagedImportStore {
         return canonicalManagedPath(path) != nil
     }
 
+    static func isWritableManagedImportPath(_ path: String?) -> Bool {
+        writableManagedPath(path) != nil
+    }
+
     static func primaryManagedImportPath(for credential: AccountCredential) -> String? {
         if credential.authMethod == .authFile,
            let credentialPath = canonicalManagedPath(credential.credential) {

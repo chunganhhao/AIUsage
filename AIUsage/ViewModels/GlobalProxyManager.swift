@@ -780,7 +780,7 @@ final class GlobalProxyManager: ObservableObject {
         }
     }
 
-    /// 节点配置已变（例如 CPA 从 convert 切到 Anthropic 透传）时，对当前激活节点强制再推上游。
+    /// 节点配置已变时，对当前激活节点强制再推上游。
     func reapplyActiveUpstream() async {
         guard !Task.isCancelled, !isBusy else { return }
         guard isRuntimeEnabled, runtime.isProcessRunning,
@@ -938,6 +938,7 @@ final class GlobalProxyManager: ObservableObject {
     ) async throws {
         guard track == .desktop else { return }
         guard !isBusy else { throw GlobalProxyRuntimeError.startFailed("operation in progress") }
+        try TLSCertificateManager.requireMemoryOnlyTLSRuntimeSupport()
         guard (1_024...65_535).contains(httpsPort), httpsPort != config.port else {
             throw GlobalProxyRuntimeError.startFailed("invalid Claude Desktop HTTPS port")
         }

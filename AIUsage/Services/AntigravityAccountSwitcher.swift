@@ -2542,6 +2542,23 @@ enum AntigravityAccountSwitcher {
     }
 
     @MainActor
+    static func openAntigravityApp(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) {
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        for path in ["/Applications/Antigravity.app", "\(homeDirectory)/Applications/Antigravity.app"]
+        where FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        if let docsURL = URL(string: "https://antigravity.google/docs/faq") {
+            NSWorkspace.shared.open(docsURL)
+        }
+    }
+
     static func restartAntigravityApp(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
         timeoutSeconds: TimeInterval = 6.0,

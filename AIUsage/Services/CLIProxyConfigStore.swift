@@ -1,9 +1,13 @@
+import CryptoKit
 import QuotaBackend
 import Foundation
 
 nonisolated struct CLIProxyConfigStore {
     private struct StateFile: Codable {
+        static let currentSettingsVersion = 4
+        // Keep `version == 1` so WeeklyResetPriority continues recognizing saved state files.
         let version: Int
+        var settingsVersion: Int?
         var settings: CLIProxyGatewaySettings
     }
 
@@ -15,25 +19,130 @@ nonisolated struct CLIProxyConfigStore {
         self.fileManager = fileManager
     }
 
-    func loadSettings() -> CLIProxyGatewaySettings {
+    func loadSettingsWithMigrationState() -> (settings: CLIProxyGatewaySettings, migratedFromLegacyV1: Bool) {
         guard let data = fileManager.contents(atPath: paths.stateURL.path),
               let state = try? JSONDecoder().decode(StateFile.self, from: data),
-              state.version == 1 else { return .default }
-        return state.settings.normalized
+              state.version == 1 else { return (.default, false) }
+        if (state.settingsVersion ?? 1) < StateFile.currentSettingsVersion {
+            return (state.settings.migratedFromLegacyV1, true)
+        }
+        return (state.settings.normalized, false)
+    }
+
+    func loadSettings() -> CLIProxyGatewaySettings {
+        loadSettingsWithMigrationState().settings
     }
 
     func saveSettings(_ settings: CLIProxyGatewaySettings) throws {
         do {
             try paths.prepare(fileManager: fileManager)
-            let data = try JSONEncoder.pretty.encode(StateFile(version: 1, settings: settings.normalized))
+            let data = try JSONEncoder.pretty.encode(
+                StateFile(
+                    version: 1,
+                    settingsVersion: StateFile.currentSettingsVersion,
+                    settings: settings.normalized
+                )
+            )
             try data.write(to: paths.stateURL, options: [.atomic])
             try fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: paths.stateURL.path)
             // Publish Off before cleanup so queued background workers cannot reapply the overlay.
-            if settings.routingStrategy != .earliestWeeklyReset {
+            // Preserve legacy auth/ files untouched in API-key-only builds.
+            if CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+               settings.routingStrategy != .earliestWeeklyReset {
                 try WeeklyResetPriority.sync(authDirectory: paths.authDirectory, enabled: false, observations: [])
             }
         } catch {
             throw CLIProxyGatewayError.configuration(error.localizedDescription)
+        }
+    }
+
+    func runtimeConfigSHA256() -> String? {
+        guard let data = fileManager.contents(atPath: paths.configURL.path) else { return nil }
+        return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Returns true only when `paths.configURL` exists and every managed gateway
+    /// policy, retry/failover knob, and management/client key matches `settings` and `secrets`.
+    func runtimeConfigMatches(
+        settings: CLIProxyGatewaySettings,
+        secrets: CLIProxySecrets,
+        clientAPIKeys: [String]? = nil
+    ) -> Bool {
+        guard let existing = try? existingRuntimeConfig() else { return false }
+        let value = settings.normalized
+        let managementKey = secrets.managementKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let defaultClientKey = secrets.clientAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedClientKeys: [String] = {
+            let raw = (clientAPIKeys ?? [defaultClientKey])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            var unique: [String] = []
+            for key in raw where !unique.contains(key) {
+                unique.append(key)
+            }
+            if !unique.contains(defaultClientKey), !defaultClientKey.isEmpty {
+                unique.insert(defaultClientKey, at: 0)
+            }
+            return unique
+        }()
+        guard !managementKey.isEmpty,
+              !resolvedClientKeys.isEmpty,
+              resolvedClientKeys.allSatisfy({ $0 != managementKey }) else {
+            return false
+        }
+        do {
+            let expectedAuthDir = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                ? paths.authDirectory.path
+                : paths.isolatedAuthDirectory.path
+            var document = RuntimeYAMLDocument(existing)
+            guard try document.managedStringScalar("host") == value.bindHost,
+                  try document.managedStringScalar("port") == "\(value.port)",
+                  try document.managedStringScalar("auth-dir") == expectedAuthDir,
+                  try document.managedStringScalar("ws-auth") == "true",
+                  try document.managedStringScalar("remote-management.allow-remote") == "false",
+                  try document.managedStringScalar("remote-management.secret-key") == managementKey,
+                  try document.managedStringScalar("remote-management.disable-control-panel") == "true",
+                  try document.managedStringScalar("routing.strategy") == value.routingStrategy.cpaValue,
+                  try document.managedStringScalar("request-retry") == "0",
+                  try document.managedStringScalar("max-retry-interval") == "\(value.maxRetryInterval)",
+                  try document.managedStringScalar("max-retry-credentials") == "1",
+                  try document.managedStringScalar("quota-exceeded.switch-project") == "false",
+                  try document.managedStringScalar("quota-exceeded.switch-preview-model") == "false",
+                  try document.managedStringScalar("quota-exceeded.antigravity-credits") == "false",
+                  try document.managedStringScalar("plugins.enabled") == (value.enablePlugins ? "true" : "false"),
+                  try document.managedStringScalar("disable-cooling") == "false",
+                  try document.managedStringScalar("save-cooldown-status") == "false" else {
+                return false
+            }
+            if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+               try document.managedStringScalar("kv-store.disabled")?
+                   .trimmingCharacters(in: .whitespacesAndNewlines)
+                   .lowercased() != "true" {
+                return false
+            }
+            let existingProxy = try document.managedStringScalar("proxy-url") ?? ""
+            guard existingProxy == value.proxyURL else { return false }
+
+            let configuredKeys = try document.managedStringSequence("api-keys")
+            guard resolvedClientKeys.allSatisfy({ configuredKeys.contains($0) }),
+                  configuredKeys.allSatisfy({ key in
+                      resolvedClientKeys.contains(key)
+                          || !CLIProxyManagedAPIKeyNamespace.prefixes.contains(where: { key.hasPrefix($0) })
+                  }) else {
+                return false
+            }
+
+            let protectionURL = paths.root.appendingPathComponent("pool-protection.json")
+            if let protectionData = try? Data(contentsOf: protectionURL),
+               let protection = try? JSONSerialization.jsonObject(with: protectionData) as? [String: Any],
+               let protectionEnabled = protection["enabled"] as? Bool {
+                guard try document.managedStringScalar("antigravity.tos-pause-window") == (protectionEnabled ? "6h" : "0") else {
+                    return false
+                }
+            }
+            return true
+        } catch {
+            return false
         }
     }
 
@@ -81,9 +190,12 @@ nonisolated struct CLIProxyConfigStore {
             let existing = try existingRuntimeConfig()
             var document = RuntimeYAMLDocument(existing)
             let configuredPluginDirectory = try document.managedStringScalar("plugins.dir")
+            let targetAuthDir = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                ? paths.authDirectory.path
+                : paths.isolatedAuthDirectory.path
             try document.setManagedScalar("host", value: yamlQuoted(value.bindHost))
             try document.setManagedScalar("port", value: "\(value.port)")
-            try document.setManagedScalar("auth-dir", value: yamlQuoted(paths.authDirectory.path))
+            try document.setManagedScalar("auth-dir", value: yamlQuoted(targetAuthDir))
             try document.syncManagedSequence(
                 "api-keys",
                 ensuredValues: resolvedClientKeys.map(yamlQuoted),
@@ -121,6 +233,11 @@ nonisolated struct CLIProxyConfigStore {
             try document.setManagedScalar("plugins.enabled",
                 value: value.enablePlugins ? "true" : "false"
             )
+            try document.setManagedScalar("disable-cooling", value: "false")
+            try document.setManagedScalar("save-cooldown-status", value: "false")
+            if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+                try document.setManagedScalar("kv-store.disabled", value: "true")
+            }
             let protectionURL = paths.root.appendingPathComponent("pool-protection.json")
             let protectionData = try? Data(contentsOf: protectionURL)
             let protection = protectionData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }
@@ -214,11 +331,16 @@ nonisolated private struct RuntimeYAMLDocument {
                 throw CLIProxyGatewayError.configuration("Unsupported CPA config-version; config was left unchanged")
             }
         }
-        let v8 = version != nil || ["server", "management", "access", "oauth", "requests", "observability"]
+        let hasNativeRouting = topLevelRange("routing")?.dropFirst().contains {
+            let key = mappingKey(in: lines[$0], indent: 2)
+            return key == "retry" || key == "cooldown"
+        } ?? false
+        let v8 = version != nil || hasNativeRouting || ["server", "management", "access", "oauth", "requests", "observability"]
             .contains { topLevelRange($0) != nil }
         guard v8 else { return legacy.components(separatedBy: ".") }
         let paths = [
             "host": "server.host", "port": "server.port", "auth-dir": "oauth.auth-dir",
+            "kv-store.disabled": "server.kv-store.disabled",
             "api-keys": "access.api-keys", "ws-auth": "oauth.providers.aistudio.ws-auth",
             "remote-management.allow-remote": "management.allow-remote",
             "remote-management.secret-key": "management.secret-key",
@@ -226,6 +348,8 @@ nonisolated private struct RuntimeYAMLDocument {
             "request-retry": "routing.retry.request-retry",
             "max-retry-interval": "routing.retry.max-retry-interval",
             "max-retry-credentials": "routing.retry.max-retry-credentials",
+            "disable-cooling": "routing.cooldown.disable-cooling",
+            "save-cooldown-status": "routing.cooldown.save-cooldown-status",
             "quota-exceeded.antigravity-credits": "oauth.providers.antigravity.antigravity-credits",
             "antigravity.tos-pause-window": "oauth.providers.antigravity.tos-pause-window",
             "debug": "observability.logs.debug", "logging-to-file": "observability.logs.logging-to-file",

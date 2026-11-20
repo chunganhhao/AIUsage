@@ -464,6 +464,39 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         return results
     }
 
+    /// Reads strictly `homeDirectory/.codex/auth.json` (never `CODEX_AUTH_FILE` or
+    /// `CODEX_AUTH_DIR`) and fetches only when its native `accountId + userId` matches.
+    func fetchNativeActiveAccount(expectedNativeKey: String) async -> AccountFetchResult? {
+        guard !Task.isCancelled,
+              CodexQuotaPollingPolicy.activeNativeIdentity(homeDirectory: homeDirectory)?.nativeKey == expectedNativeKey else {
+            return nil
+        }
+        let nativeURL = CodexQuotaPollingPolicy.nativeAuthFileURL(homeDirectory: homeDirectory)
+        let creds: Credentials
+        do {
+            creds = try loadCredentials(from: nativeURL.path)
+        } catch {
+            return AccountFetchResult(accountId: "default", accountLabel: nil, result: .failure(error), sourceFilePath: nativeURL.path)
+        }
+        let loadedKey = CodexAccountIdentity(accountId: creds.accountId, userId: creds.jwtUserId, email: creds.accountEmail).nativeKey
+        guard !creds.hasInternalIdentityConflict,
+              loadedKey == expectedNativeKey,
+              CodexQuotaPollingPolicy.activeNativeIdentity(homeDirectory: homeDirectory)?.nativeKey == expectedNativeKey else {
+            return nil
+        }
+        let accountId = creds.accountId ?? creds.accountEmail ?? nativeURL.lastPathComponent
+        let result: Result<ProviderUsage, Error>
+        do { result = .success(try await fetchForAuthContext(AuthContext(url: nativeURL, creds: creds))) }
+        catch { result = .failure(error) }
+        return AccountFetchResult(
+            accountId: accountId,
+            accountLabel: creds.accountEmail,
+            result: result,
+            sourceFilePath: nativeURL.path,
+            workspaceUserId: creds.jwtUserId
+        )
+    }
+
     // MARK: - Credentials
 
     struct Credentials: Sendable {

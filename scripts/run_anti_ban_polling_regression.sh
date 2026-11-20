@@ -40,6 +40,7 @@ store = store.replace(boundary_fn, """    static var managedBase: URL!
 src = (root / 'scripts/DiscoveryAntiBanRegression.swift').read_text()
 src = src.replace('// PRODUCTION_MANAGED_IMPORT_STORE', store)
 src = src.replace('// PRODUCTION_AUTHENTICATE_CANDIDATE', function(auth, '    static func authenticateCandidate('))
+src = src.replace('// PRODUCTION_VALIDATE_LOCAL_METADATA', function(auth, '    private static func validateLocalAuthFileMetadata('))
 src = src.replace('// PRODUCTION_VALIDATE', function(auth, '    private static func validate('))
 src = src.replace('// PRODUCTION_COPY_IMPORTED_AUTH_FILE', function(auth, '    private static func copyImportedAuthFile('))
 src = src.replace('// PRODUCTION_MANAGED_IMPORT_DIRECTORY', function(auth, '    private static func managedImportDirectory('))
