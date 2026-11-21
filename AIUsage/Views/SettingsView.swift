@@ -72,12 +72,8 @@ struct SettingsView: View {
     @State var launchHidden = UserDefaults.standard.bool(forKey: DefaultsKey.launchHidden)
     /// 关闭主窗口时最小化到托盘（issue #39）。缺省 false，与隐藏 Dock 解耦。
     @State var closeToTray = UserDefaults.standard.bool(forKey: DefaultsKey.closeToTray)
-    @State var launchAtLogin: Bool = {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
-    }()
+    @State var launchAtLogin: Bool = false
+    @State var isLaunchAtLoginLoaded = false
     @State var showNotifications = UserDefaults.standard.bool(forKey: DefaultsKey.showNotifications)
     @State var lowQuotaThreshold: Double = UserDefaults.standard.double(forKey: DefaultsKey.lowQuotaThreshold)
     @State var remoteHostInput: String = ""
@@ -149,25 +145,25 @@ struct SettingsView: View {
             shareAddresses = QuotaShareService.shareAddresses()
             consumeRequestedSettingsCategory()
         }
+        .task {
+            guard !isLaunchAtLoginLoaded else { return }
+            if #available(macOS 13.0, *) {
+                let enabled = await Task.detached(priority: .utility) {
+                    SMAppService.mainApp.status == .enabled
+                }.value
+                guard !Task.isCancelled, !isLaunchAtLoginLoaded else { return }
+                launchAtLogin = enabled
+                isLaunchAtLoginLoaded = true
+            } else {
+                isLaunchAtLoginLoaded = true
+            }
+        }
         .onChange(of: appState.requestedSettingsCategory) { _, _ in
             consumeRequestedSettingsCategory()
         }
         .onChange(of: hideDockIcon) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.hideDockIcon)
             updateDockIconVisibility(hidden: newValue)
-        }
-        .onChange(of: launchAtLogin) { _, newValue in
-            if #available(macOS 13.0, *) {
-                do {
-                    if newValue {
-                        try SMAppService.mainApp.register()
-                    } else {
-                        try SMAppService.mainApp.unregister()
-                    }
-                } catch {
-                    launchAtLogin = SMAppService.mainApp.status == .enabled
-                }
-            }
         }
         .onChange(of: showNotifications) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.showNotifications)
@@ -342,6 +338,22 @@ struct SettingsView: View {
             NSApp.setActivationPolicy(.accessory)
         } else {
             NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    func setLaunchAtLogin(_ newValue: Bool) {
+        guard isLaunchAtLoginLoaded else { return }
+        launchAtLogin = newValue
+        if #available(macOS 13.0, *) {
+            do {
+                if newValue {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
         }
     }
 }

@@ -2,7 +2,6 @@ import SwiftUI
 
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
-    @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @EnvironmentObject var sparkle: SparkleController
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme

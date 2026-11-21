@@ -311,6 +311,271 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
+    func testAntigravityCostTranscriptScanCacheHitsInvalidatesPrunesAndIsolatesTimeZones() async throws {
+        final class ParseCounter: @unchecked Sendable {
+            private let lock = NSLock()
+            private var paths: [String] = []
+            func record(_ path: String) {
+                lock.lock()
+                paths.append(path)
+                lock.unlock()
+            }
+            var count: Int {
+                lock.lock()
+                defer { lock.unlock() }
+                return paths.count
+            }
+            var recordedPaths: [String] {
+                lock.lock()
+                defer { lock.unlock() }
+                return paths
+            }
+        }
+
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("agy-scan-cache-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? fm.removeItem(at: root) }
+
+        let brainDir = root.appendingPathComponent("brain", isDirectory: true)
+        let siblingBrainDir = root.appendingPathComponent("brain2", isDirectory: true)
+        let tokenLogDir = brainDir.appendingPathComponent("conv-token/.system_generated/logs", isDirectory: true)
+        let emptyLogDir = brainDir.appendingPathComponent("conv-empty/.system_generated/logs", isDirectory: true)
+        let siblingLogDir = siblingBrainDir.appendingPathComponent("conv-sibling/.system_generated/logs", isDirectory: true)
+        try fm.createDirectory(at: tokenLogDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: emptyLogDir, withIntermediateDirectories: true)
+        try fm.createDirectory(at: siblingLogDir, withIntermediateDirectories: true)
+
+        let tokenFile = tokenLogDir.appendingPathComponent("transcript.jsonl").path
+        let emptyFile = emptyLogDir.appendingPathComponent("transcript.jsonl").path
+        let siblingFile = siblingLogDir.appendingPathComponent("transcript.jsonl").path
+
+        let line1 = #"{"type":"PLANNER_RESPONSE","created_at":"2026-11-21T23:30:00Z","input_tokens":100,"output_tokens":20,"cache_read_tokens":30}"# + "\n"
+        try Data(line1.utf8).write(to: URL(fileURLWithPath: tokenFile))
+        try Data(#"{"type":"USER_INPUT","content":"hello"}"#.utf8).write(to: URL(fileURLWithPath: emptyFile))
+        try Data(line1.utf8).write(to: URL(fileURLWithPath: siblingFile))
+
+        let tzPlus7 = try XCTUnwrap(TimeZone(secondsFromGMT: 7 * 3600))
+        let tzMinus8 = try XCTUnwrap(TimeZone(secondsFromGMT: -8 * 3600))
+        let providerPlus7 = AntigravityCostProvider(homeDirectory: root.path, timeZone: tzPlus7)
+        let providerMinus8 = AntigravityCostProvider(homeDirectory: root.path, timeZone: tzMinus8)
+
+        let counter = ParseCounter()
+        let countingParser: @Sendable (String) -> [String: CodexAggregateBucket]? = { path in
+            counter.record(path)
+            return providerPlus7.processFile(path)
+        }
+        let minus8Parser: @Sendable (String) -> [String: CodexAggregateBucket]? = { path in
+            counter.record(path)
+            return providerMinus8.processFile(path)
+        }
+
+        // 1. Cold scan parses both tokenFile and emptyFile (emptyFile omitted from output, still cached)
+        let first = await providerPlus7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 2)
+        XCTAssertEqual(first.keys.sorted(), [tokenFile])
+        XCTAssertEqual(first[tokenFile]?["2026-11-22"]?.totalTokens, 150)
+
+        // 2. Unchanged rescan hits cache for BOTH files (0 parses)
+        let second = await providerPlus7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 2)
+        XCTAssertEqual(second[tokenFile]?["2026-11-22"]?.totalTokens, 150)
+
+        // 3. Appending a line invalidates ONLY tokenFile
+        let line2 = #"{"type":"PLANNER_RESPONSE","created_at":"2026-11-21T23:31:00Z","input_tokens":50,"output_tokens":10,"cache_read_tokens":0}"# + "\n"
+        try Data((line1 + line2).utf8).write(to: URL(fileURLWithPath: tokenFile))
+        let third = await providerPlus7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 3)
+        XCTAssertEqual(counter.recordedPaths.last, tokenFile)
+        XCTAssertEqual(third[tokenFile]?["2026-11-22"]?.totalTokens, 210)
+
+        // 4. Different TimeZone reparses instead of returning wrong-day cached buckets
+        let minus8Result = await providerMinus8.scanFilesByPathCached([tokenFile], parseFile: minus8Parser)
+        XCTAssertEqual(counter.count, 4)
+        XCTAssertEqual(minus8Result[tokenFile]?["2026-11-21"]?.totalTokens, 210)
+        XCTAssertNil(minus8Result[tokenFile]?["2026-11-22"])
+
+        // Restore tzPlus7 entry for tokenFile before pruning test
+        _ = await providerPlus7.scanFilesByPathCached([tokenFile], parseFile: countingParser)
+        XCTAssertEqual(counter.count, 5)
+
+        // 5. Sibling brain2 is cached; pruning brain removes dropped tokenFile without evicting brain2
+        _ = await providerPlus7.scanFilesByPathCached([siblingFile], brainDirectory: siblingBrainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 6)
+
+        _ = await providerPlus7.scanFilesByPathCached([emptyFile], brainDirectory: brainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 6) // emptyFile still cached
+
+        _ = await providerPlus7.scanFilesByPathCached([siblingFile], brainDirectory: siblingBrainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 6) // brain2 NOT evicted by brain's prune
+
+        let reparsedAfterPrune = await providerPlus7.scanFilesByPathCached([tokenFile], brainDirectory: brainDir.path, parseFile: countingParser)
+        XCTAssertEqual(counter.count, 7) // tokenFile was pruned so it reparses
+        XCTAssertEqual(reparsedAfterPrune[tokenFile]?["2026-11-22"]?.totalTokens, 210)
+
+        // 6. [§6.1] Unreadable transcript (000 -> 600 chmod) must not poison cache as empty
+        let permLine = #"{"type":"PLANNER_RESPONSE","created_at":"2026-11-21T23:32:00Z","input_tokens":30,"output_tokens":12,"cache_read_tokens":0}"# + "\n"
+        let permLogDir = brainDir.appendingPathComponent("conv-perm/.system_generated/logs", isDirectory: true)
+        try fm.createDirectory(at: permLogDir, withIntermediateDirectories: true)
+        let permFile = permLogDir.appendingPathComponent("transcript.jsonl").path
+        try Data(permLine.utf8).write(to: URL(fileURLWithPath: permFile))
+        if ProcessInfo.processInfo.userName != "root" {
+            try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: permFile)
+            let unreadableScan = await providerPlus7.scanFilesByPathCached([permFile], parseFile: countingParser)
+            XCTAssertTrue(unreadableScan.isEmpty)
+            XCTAssertEqual(counter.count, 8)
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: permFile)
+            let recoveredScan = await providerPlus7.scanFilesByPathCached([permFile], parseFile: countingParser)
+            XCTAssertEqual(counter.count, 9) // failed read was not cached
+            XCTAssertEqual(recoveredScan[permFile]?["2026-11-22"]?.totalTokens, 42)
+            let cachedAfterRecovery = await providerPlus7.scanFilesByPathCached([permFile], parseFile: countingParser)
+            XCTAssertEqual(counter.count, 9) // successful recovery is now cached
+            XCTAssertEqual(cachedAfterRecovery[permFile]?["2026-11-22"]?.totalTokens, 42)
+        }
+
+        // 7. [§6.2] Symlink transcript tracks resolved target file stamp while preserving canonical symlink key
+        let symlinkTarget = root.appendingPathComponent("symlink-target.jsonl").path
+        let symlinkLogDir = brainDir.appendingPathComponent("conv-sym/.system_generated/logs", isDirectory: true)
+        try fm.createDirectory(at: symlinkLogDir, withIntermediateDirectories: true)
+        let symlinkPath = symlinkLogDir.appendingPathComponent("transcript.jsonl").path
+        try Data(permLine.utf8).write(to: URL(fileURLWithPath: symlinkTarget))
+        try fm.createSymbolicLink(atPath: symlinkPath, withDestinationPath: symlinkTarget)
+
+        let symFirst = await providerPlus7.scanFilesByPathCached([symlinkPath], parseFile: countingParser)
+        let countAfterSymFirst = counter.count
+        XCTAssertEqual(symFirst[symlinkPath]?["2026-11-22"]?.totalTokens, 42)
+        let symHit = await providerPlus7.scanFilesByPathCached([symlinkPath], parseFile: countingParser)
+        XCTAssertEqual(counter.count, countAfterSymFirst)
+        XCTAssertEqual(symHit[symlinkPath]?["2026-11-22"]?.totalTokens, 42)
+
+        try Data((permLine + permLine).utf8).write(to: URL(fileURLWithPath: symlinkTarget))
+        let symUpdated = await providerPlus7.scanFilesByPathCached([symlinkPath], parseFile: countingParser)
+        XCTAssertEqual(counter.count, countAfterSymFirst + 1)
+        XCTAssertEqual(symUpdated[symlinkPath]?["2026-11-22"]?.totalTokens, 84)
+    }
+
+    func testCredentialStoreRevisionFencedAuxiliaryWriteRejectsStaleOverwrite() throws {
+        let key = "providerAccounts.registry"
+        var persistedVaultData: Data?
+        var physicalWriteCount = 0
+        var shouldFailWrite = false
+        let makeStore: () -> AccountCredentialStore = {
+            AccountCredentialStore(
+                readVaultData: { persistedVaultData },
+                writeVaultData: { data in
+                    physicalWriteCount += 1
+                    if shouldFailWrite {
+                        throw CredentialStoreError.keychainWriteFailed(-25291)
+                    }
+                    persistedVaultData = data
+                }
+            )
+        }
+
+        let store = makeStore()
+        let rev2Data = Data("rev2".utf8)
+        let rev1Data = Data("rev1".utf8)
+        let rev3Data = Data("rev3".utf8)
+
+        let outcome2 = try store.saveAuxiliaryData(rev2Data, forKey: key, revision: 2)
+        XCTAssertEqual(outcome2, .committed)
+        XCTAssertEqual(physicalWriteCount, 1)
+        XCTAssertEqual(store.committedAuxiliaryRevision(forKey: key), 2)
+
+        let staleOutcome = try store.saveAuxiliaryData(rev1Data, forKey: key, revision: 1)
+        XCTAssertEqual(staleOutcome, .superseded(committedRevision: 2, committedData: rev2Data))
+        XCTAssertEqual(physicalWriteCount, 1)
+        XCTAssertEqual(store.loadAuxiliaryData(forKey: key), rev2Data)
+
+        shouldFailWrite = true
+        XCTAssertThrowsError(try store.saveAuxiliaryData(rev3Data, forKey: key, revision: 3))
+        XCTAssertEqual(physicalWriteCount, 2)
+        XCTAssertEqual(store.committedAuxiliaryRevision(forKey: key), 2)
+        XCTAssertEqual(store.loadAuxiliaryData(forKey: key), rev2Data)
+
+        shouldFailWrite = false
+        let outcome3 = try store.saveAuxiliaryData(rev3Data, forKey: key, revision: 3)
+        XCTAssertEqual(outcome3, .committed)
+        XCTAssertEqual(physicalWriteCount, 3)
+        XCTAssertEqual(store.committedAuxiliaryRevision(forKey: key), 3)
+
+        let reopenedStore = makeStore()
+        XCTAssertEqual(reopenedStore.loadAuxiliaryData(forKey: key), rev3Data)
+    }
+
+    func testCredentialStorePreservesExistingCredentialsAfterTransientVaultReadFailure() throws {
+        let key = "providerAccounts.registry"
+        var persistedVaultData: Data?
+        let seedStore = AccountCredentialStore(
+            readVaultData: { persistedVaultData },
+            writeVaultData: { persistedVaultData = $0 }
+        )
+        let existingCred = AccountCredential(
+            id: "seeded-codex-1",
+            providerId: "codex",
+            accountLabel: "seeded@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/seeded-codex-1/auth.json",
+            metadata: ["accountId": "acct-seeded", "workspaceUserId": "user-seeded"]
+        )
+        let extraCred = AccountCredential(
+            id: "seeded-codex-2",
+            providerId: "codex",
+            accountLabel: "extra@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/seeded-codex-2/auth.json",
+            metadata: ["accountId": "acct-extra", "workspaceUserId": "user-extra"]
+        )
+        try seedStore.saveCredential(existingCred)
+
+        var readAttempts = 0
+        var writeAttempts = 0
+        let failFirstReadStore = {
+            AccountCredentialStore(
+                readVaultData: {
+                    readAttempts += 1
+                    if readAttempts == 1 {
+                        throw CredentialStoreError.keychainReadFailed(-25308)
+                    }
+                    return persistedVaultData
+                },
+                writeVaultData: { data in
+                    writeAttempts += 1
+                    persistedVaultData = data
+                }
+            )
+        }
+        let cleanReader = {
+            AccountCredentialStore(readVaultData: { persistedVaultData }, writeVaultData: { _ in })
+        }
+
+        let rev7 = Data("rev7".utf8)
+        let versionedStore = failFirstReadStore()
+        XCTAssertNil(versionedStore.loadAuxiliaryData(forKey: key))
+        XCTAssertEqual(try versionedStore.saveAuxiliaryData(rev7, forKey: key, revision: 7), .committed)
+        XCTAssertEqual(readAttempts, 2)
+        XCTAssertEqual(writeAttempts, 1)
+        XCTAssertEqual(cleanReader().loadAllCredentials().map(\.id), ["seeded-codex-1"])
+        XCTAssertEqual(cleanReader().loadAuxiliaryData(forKey: key), rev7)
+
+        readAttempts = 0
+        writeAttempts = 0
+        let unversionedBlob = Data("unversioned".utf8)
+        let unversionedStore = failFirstReadStore()
+        XCTAssertTrue(unversionedStore.loadAllCredentials().isEmpty)
+        try unversionedStore.saveAuxiliaryData(unversionedBlob, forKey: "cliProxy.test")
+        XCTAssertEqual(readAttempts, 2)
+        XCTAssertEqual(writeAttempts, 1)
+        XCTAssertEqual(cleanReader().loadAllCredentials().map(\.id), ["seeded-codex-1"])
+        XCTAssertEqual(cleanReader().loadAuxiliaryData(forKey: key), rev7)
+        XCTAssertEqual(cleanReader().loadAuxiliaryData(forKey: "cliProxy.test"), unversionedBlob)
+
+        readAttempts = 0
+        let credStore = failFirstReadStore()
+        XCTAssertTrue(credStore.loadAllCredentials().isEmpty)
+        try credStore.saveCredential(extraCred)
+        XCTAssertEqual(Set(cleanReader().loadAllCredentials().map(\.id)), ["seeded-codex-1", "seeded-codex-2"])
+    }
+
     // MARK: - Fixtures
 
     private static let loadCodeAssist = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"

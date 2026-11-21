@@ -19,6 +19,7 @@ public struct AntigravityCostProvider: ProviderFetcher {
     let environment: [String: String]
 
     static let nonProxyArchive = AntigravityNonProxyUsageArchiveStore()
+    static let transcriptScanCache = AntigravityTranscriptScanCache()
 
     public func requestFullHistoryImport() async {
         _ = await Self.nonProxyArchive.needsFullHistoryImport(homeDirectory: homeDirectory)
@@ -49,7 +50,9 @@ public struct AntigravityCostProvider: ProviderFetcher {
         let brainDir = resolveBrainDirectory()
         let files = brainDir.flatMap { collectTranscriptFiles(brainDirectory: $0, scanWindowCutoff: scanWindowCutoff) } ?? []
 
-        let scannedByFile = files.isEmpty ? [:] : scanFilesByPath(files)
+        let scannedByFile = (files.isEmpty && brainDir == nil)
+            ? [:]
+            : await scanFilesByPathCached(files, brainDirectory: brainDir)
         var computedNonProxy: [String: CodexAggregateBucket] = [:]
         for fileBuckets in scannedByFile.values {
             for (dKey, bucket) in fileBuckets {

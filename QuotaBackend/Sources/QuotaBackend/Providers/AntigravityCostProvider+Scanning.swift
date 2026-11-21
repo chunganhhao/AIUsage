@@ -7,6 +7,54 @@ private let antigravityScanLog = Logger(subsystem: "com.aiusage.quotabackend", c
 // 负责扫描 ~/.gemini/antigravity/brain/*/transcript.jsonl 提取非代理 token，
 // 以及读取 ~/.config/aiusage/usage-archive/proxy-usage-antigravity-v1.json 提取代理轨用量。
 
+struct AntigravityTranscriptFileStamp: Equatable, Sendable {
+    let size: Int64
+    let modifiedAt: TimeInterval
+    let fileNumber: UInt64
+    let timeZoneId: String
+    let timeZoneOffset: Int
+}
+
+struct AntigravityTranscriptCacheEntry: Sendable {
+    let stamp: AntigravityTranscriptFileStamp
+    let buckets: [String: CodexAggregateBucket]
+}
+
+// shortcut: in-memory transcript scan cache (re-populates once per app launch for the 2-day window); add disk persistence only if cold-launch scan becomes noticeable.
+actor AntigravityTranscriptScanCache {
+    private var entries: [String: AntigravityTranscriptCacheEntry] = [:]
+
+    func snapshot(for paths: [String]) -> [String: AntigravityTranscriptCacheEntry] {
+        var result: [String: AntigravityTranscriptCacheEntry] = [:]
+        for path in paths {
+            if let entry = entries[path] {
+                result[path] = entry
+            }
+        }
+        return result
+    }
+
+    func update(
+        _ updates: [String: AntigravityTranscriptCacheEntry],
+        removing failedPaths: Set<String> = [],
+        pruningBrainDirectory brainDirectory: String?,
+        keeping activePaths: Set<String>
+    ) {
+        if let brainDirectory {
+            let prefix = brainDirectory.hasSuffix("/") ? brainDirectory : brainDirectory + "/"
+            entries = entries.filter { key, _ in
+                !key.hasPrefix(prefix) || activePaths.contains(key)
+            }
+        }
+        for path in failedPaths {
+            entries.removeValue(forKey: path)
+        }
+        for (path, entry) in updates {
+            entries[path] = entry
+        }
+    }
+}
+
 extension AntigravityCostProvider {
 
     private struct ProxyUsageModelAggDTO: Decodable {
@@ -64,7 +112,8 @@ extension AntigravityCostProvider {
             guard let foundPath = targetPath else { continue }
 
             if let scanWindowCutoff {
-                if let attrs = try? fm.attributesOfItem(atPath: foundPath),
+                let resolvedPath = (foundPath as NSString).resolvingSymlinksInPath
+                if let attrs = try? fm.attributesOfItem(atPath: resolvedPath),
                    let mtime = attrs[.modificationDate] as? Date {
                     if mtime < scanWindowCutoff {
                         continue
@@ -106,14 +155,12 @@ extension AntigravityCostProvider {
             let key = Self.canonicalTranscriptKey(filePath)
             #if canImport(Darwin)
             autoreleasepool {
-                let fileBuckets = processFile(filePath)
-                if !fileBuckets.isEmpty {
+                if let fileBuckets = processFile(filePath), !fileBuckets.isEmpty {
                     out[key] = fileBuckets
                 }
             }
             #else
-            let fileBuckets = processFile(filePath)
-            if !fileBuckets.isEmpty {
+            if let fileBuckets = processFile(filePath), !fileBuckets.isEmpty {
                 out[key] = fileBuckets
             }
             #endif
@@ -122,9 +169,95 @@ extension AntigravityCostProvider {
         return out
     }
 
-    private func processFile(_ filePath: String) -> [String: CodexAggregateBucket] {
+    func scanFilesByPathCached(
+        _ files: [String],
+        brainDirectory: String? = nil,
+        parseFile: (@Sendable (String) -> [String: CodexAggregateBucket]?)? = nil
+    ) async -> [String: [String: CodexAggregateBucket]] {
+        var stampsByPath: [String: AntigravityTranscriptFileStamp] = [:]
+        stampsByPath.reserveCapacity(files.count)
+        for filePath in files {
+            if let stamp = transcriptFileStamp(for: filePath) {
+                stampsByPath[filePath] = stamp
+            }
+        }
+
+        let cached = await Self.transcriptScanCache.snapshot(for: files)
+        var updates: [String: AntigravityTranscriptCacheEntry] = [:]
+        var failedPaths: Set<String> = []
+        var out: [String: [String: CodexAggregateBucket]] = [:]
+
+        for filePath in files {
+            let key = Self.canonicalTranscriptKey(filePath)
+            let stamp = stampsByPath[filePath]
+            if let stamp, let entry = cached[filePath], entry.stamp == stamp {
+                if !entry.buckets.isEmpty {
+                    out[key] = entry.buckets
+                }
+                continue
+            }
+
+            let fileBuckets: [String: CodexAggregateBucket]?
+            #if canImport(Darwin)
+            fileBuckets = autoreleasepool {
+                if let parseFile {
+                    return parseFile(filePath)
+                }
+                return processFile(filePath)
+            }
+            #else
+            if let parseFile {
+                fileBuckets = parseFile(filePath)
+            } else {
+                fileBuckets = processFile(filePath)
+            }
+            #endif
+
+            guard let fileBuckets else {
+                failedPaths.insert(filePath)
+                continue
+            }
+
+            if let stamp {
+                updates[filePath] = AntigravityTranscriptCacheEntry(stamp: stamp, buckets: fileBuckets)
+            }
+            if !fileBuckets.isEmpty {
+                out[key] = fileBuckets
+            }
+        }
+
+        if !updates.isEmpty || !failedPaths.isEmpty || brainDirectory != nil {
+            await Self.transcriptScanCache.update(
+                updates,
+                removing: failedPaths,
+                pruningBrainDirectory: brainDirectory,
+                keeping: Set(files)
+            )
+        }
+
+        return out
+    }
+
+    private func transcriptFileStamp(for filePath: String) -> AntigravityTranscriptFileStamp? {
+        let resolvedPath = (filePath as NSString).resolvingSymlinksInPath
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: resolvedPath),
+              let sizeNumber = attrs[.size] as? NSNumber,
+              let modDate = attrs[.modificationDate] as? Date else {
+            return nil
+        }
+        let fileNumber = (attrs[.systemFileNumber] as? NSNumber)?.uint64Value ?? 0
+        return AntigravityTranscriptFileStamp(
+            size: sizeNumber.int64Value,
+            modifiedAt: modDate.timeIntervalSinceReferenceDate,
+            fileNumber: fileNumber,
+            timeZoneId: timeZone.identifier,
+            timeZoneOffset: timeZone.secondsFromGMT()
+        )
+    }
+
+    func processFile(_ filePath: String) -> [String: CodexAggregateBucket]? {
         guard let content = try? String(contentsOfFile: filePath, encoding: .utf8) else {
-            return [:]
+            return nil
         }
 
         var currentModelKey = "gemini-3.8-flash" + Self.nonProxySourceSuffix

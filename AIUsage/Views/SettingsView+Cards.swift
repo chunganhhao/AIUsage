@@ -88,8 +88,12 @@ extension SettingsView {
             settingsToggleRow(
                 title: L("Launch at Login", "开机启动"),
                 subtitle: L("Open AIUsage automatically after login.", "登录系统后自动打开 AIUsage。"),
-                isOn: $launchAtLogin
+                isOn: Binding(
+                    get: { launchAtLogin },
+                    set: { setLaunchAtLogin($0) }
+                )
             )
+            .disabled(!isLaunchAtLoginLoaded)
 
             Divider()
 

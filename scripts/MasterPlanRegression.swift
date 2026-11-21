@@ -1191,6 +1191,425 @@ private actor Attempts {
         let ocSecond = await ocEngine.computeSnapshot(rangeKey: "all", cutoff: nil)
         try check(ocSecond.entries.filter { $0.name == "bash" }.reduce(0) { $0 + $1.count } == 3, "post-migration OpenCode increments bash=3")
         try check(ocSecond.entries.filter { $0.name == "read" }.reduce(0) { $0 + $1.count } == 1, "post-migration OpenCode retains deleted read=1")
+
+        // AntigravityCostProvider in-memory transcript scan cache
+        let cacheRoot = fm.temporaryDirectory.appendingPathComponent("master-agy-scan-cache-\(UUID())", isDirectory: true)
+        defer { try? fm.removeItem(at: cacheRoot) }
+        let brainA = cacheRoot.appendingPathComponent("brain", isDirectory: true)
+        let brainSibling = cacheRoot.appendingPathComponent("brain2", isDirectory: true)
+        let tokenFile = brainA.appendingPathComponent("conv-tok/.system_generated/logs/transcript.jsonl").path
+        let emptyFile = brainA.appendingPathComponent("conv-empty/.system_generated/logs/transcript.jsonl").path
+        let siblingFile = brainSibling.appendingPathComponent("conv-sib/.system_generated/logs/transcript.jsonl").path
+        let line1 = #"{"type":"PLANNER_RESPONSE","created_at":"2026-11-21T23:30:00Z","input_tokens":100,"output_tokens":20,"cache_read_tokens":30}"# + "\n"
+        try write(line1, URL(fileURLWithPath: tokenFile))
+        try write(#"{"type":"USER_INPUT","content":"hi"}"# + "\n", URL(fileURLWithPath: emptyFile))
+        try write(line1, URL(fileURLWithPath: siblingFile))
+
+        final class ScanCount: @unchecked Sendable {
+            private let lock = NSLock()
+            private var paths: [String] = []
+            func record(_ p: String) { lock.lock(); paths.append(p); lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return paths.count }
+            var last: String? { lock.lock(); defer { lock.unlock() }; return paths.last }
+        }
+        let tzPlus7 = TimeZone(secondsFromGMT: 7 * 3600)!
+        let tzMinus8 = TimeZone(secondsFromGMT: -8 * 3600)!
+        let p7 = AntigravityCostProvider(homeDirectory: cacheRoot.path, timeZone: tzPlus7)
+        let pMinus8 = AntigravityCostProvider(homeDirectory: cacheRoot.path, timeZone: tzMinus8)
+        let sc = ScanCount()
+        let parse7: @Sendable (String) -> [String: CodexAggregateBucket]? = { path in
+            sc.record(path)
+            return p7.processFile(path)
+        }
+        let parseMinus8: @Sendable (String) -> [String: CodexAggregateBucket]? = { path in
+            sc.record(path)
+            return pMinus8.processFile(path)
+        }
+        let c1 = await p7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainA.path, parseFile: parse7)
+        try check(sc.count == 2 && c1.keys.sorted() == [tokenFile] && c1[tokenFile]?["2026-11-22"]?.totalTokens == 150,
+                  "AntigravityCost cache cold scan parses both files and omits empty")
+        let c2 = await p7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainA.path, parseFile: parse7)
+        try check(sc.count == 2 && c2[tokenFile]?["2026-11-22"]?.totalTokens == 150,
+                  "AntigravityCost cache unchanged rescan parses 0 files")
+        let line2 = #"{"type":"PLANNER_RESPONSE","created_at":"2026-11-21T23:31:00Z","input_tokens":50,"output_tokens":10,"cache_read_tokens":0}"# + "\n"
+        try write(line1 + line2, URL(fileURLWithPath: tokenFile))
+        let c3 = await p7.scanFilesByPathCached([tokenFile, emptyFile], brainDirectory: brainA.path, parseFile: parse7)
+        try check(sc.count == 3 && sc.last == tokenFile && c3[tokenFile]?["2026-11-22"]?.totalTokens == 210,
+                  "AntigravityCost cache invalidates only modified file")
+        let cTz = await pMinus8.scanFilesByPathCached([tokenFile], parseFile: parseMinus8)
+        try check(sc.count == 4 && cTz[tokenFile]?["2026-11-21"]?.totalTokens == 210 && cTz[tokenFile]?["2026-11-22"] == nil,
+                  "AntigravityCost cache isolates TimeZone day keys")
+        _ = await p7.scanFilesByPathCached([tokenFile], parseFile: parse7)
+        _ = await p7.scanFilesByPathCached([siblingFile], brainDirectory: brainSibling.path, parseFile: parse7)
+        try check(sc.count == 6, "AntigravityCost cache warms tzPlus7 + sibling brain2")
+        _ = await p7.scanFilesByPathCached([emptyFile], brainDirectory: brainA.path, parseFile: parse7)
+        _ = await p7.scanFilesByPathCached([siblingFile], brainDirectory: brainSibling.path, parseFile: parse7)
+        try check(sc.count == 6, "AntigravityCost cache prefix pruning preserves sibling brain2")
+        let cPruned = await p7.scanFilesByPathCached([tokenFile], brainDirectory: brainA.path, parseFile: parse7)
+        try check(sc.count == 7 && cPruned[tokenFile]?["2026-11-22"]?.totalTokens == 210,
+                  "AntigravityCost cache reparses dropped file after pruning")
+
+        // [§6.1] Unreadable transcript (000 -> 600 chmod) must not be cached as empty, including end-to-end fetchUsage()
+        let recentISO = SharedFormatters.iso8601String(from: Date())
+        let line42 = #"{"type":"PLANNER_RESPONSE","created_at":"\#(recentISO)","input_tokens":30,"output_tokens":12,"cache_read_tokens":0}"# + "\n"
+        let permHome = cacheRoot.appendingPathComponent("perm-home", isDirectory: true)
+        let permFileURL = permHome.appendingPathComponent(".gemini/antigravity/brain/conv-perm/.system_generated/logs/transcript.jsonl")
+        try write(line42, permFileURL)
+        if ProcessInfo.processInfo.userName != "root" {
+            try fm.setAttributes([.posixPermissions: 0o000], ofItemAtPath: permFileURL.path)
+            defer { try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: permFileURL.path) }
+            let permProvider = AntigravityCostProvider(homeDirectory: permHome.path, timeZone: tzPlus7)
+            var threwNoUsage = false
+            do {
+                _ = try await permProvider.fetchUsage()
+            } catch let err as ProviderError where err.code == "no_usage_data" {
+                threwNoUsage = true
+            }
+            try check(threwNoUsage, "[§6.1] fetchUsage reports no_usage_data while transcript is 000")
+            try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: permFileURL.path)
+            let recoveredUsage = try await permProvider.fetchUsage()
+            try check((recoveredUsage.extra["overall.totalTokens"]?.value as? Int) == 42,
+                      "[§6.1] fetchUsage recovers all 42 tokens after 000 -> 600 without content/mtime/inode change")
+
+            let permScanCount = sc.count
+            let hitAfterRecover = await permProvider.scanFilesByPathCached(
+                [permFileURL.path],
+                brainDirectory: permHome.appendingPathComponent(".gemini/antigravity/brain").path,
+                parseFile: parse7
+            )
+            try check(sc.count == permScanCount && hitAfterRecover[permFileURL.path]?.values.reduce(0) { $0 + $1.totalTokens } == 42,
+                      "[§6.1] recovered file stays cached on subsequent scan")
+        }
+
+        // [§6.2] Symlink transcript tracks resolved target stamp (42 -> 84 tokens) while keeping canonical symlink key
+        let symHome = cacheRoot.appendingPathComponent("sym-home", isDirectory: true)
+        let symTarget = cacheRoot.appendingPathComponent("external-transcript-target.jsonl")
+        let symTranscript = symHome.appendingPathComponent(".gemini/antigravity/brain/conv-sym/.system_generated/logs/transcript.jsonl")
+        try fm.createDirectory(at: symTranscript.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try write(line42, symTarget)
+        try fm.createSymbolicLink(atPath: symTranscript.path, withDestinationPath: symTarget.path)
+        let symProvider = AntigravityCostProvider(homeDirectory: symHome.path, timeZone: tzPlus7)
+        let symUsage1 = try await symProvider.fetchUsage()
+        try check((symUsage1.extra["overall.totalTokens"]?.value as? Int) == 42,
+                  "[§6.2] symlink transcript initially reads 42 tokens")
+        try write(line42 + line42, symTarget)
+        let symUsage2 = try await symProvider.fetchUsage()
+        try check((symUsage2.extra["overall.totalTokens"]?.value as? Int) == 84,
+                  "[§6.2] updating symlink target from 42 -> 84 invalidates cache despite unchanged symlink lstat")
+        let symCached = await symProvider.scanFilesByPathCached(
+            [symTranscript.path],
+            brainDirectory: symHome.appendingPathComponent(".gemini/antigravity/brain").path
+        )
+        try check(symCached[symTranscript.path]?.values.reduce(0) { $0 + $1.totalTokens } == 84,
+                  "[§6.2] symlink cache result remains keyed by canonical transcript path")
+
+        // [§6.4] SettingsView Launch at Login stays disabled until async hydration completes
+        let settingsSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Views/SettingsView.swift"), encoding: .utf8)
+        let settingsCardsSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Views/SettingsView+Cards.swift"), encoding: .utf8)
+        try check(
+            settingsSrc.contains("@State var isLaunchAtLoginLoaded = false")
+                && settingsSrc.contains("guard !Task.isCancelled, !isLaunchAtLoginLoaded else { return }")
+                && settingsSrc.contains("guard isLaunchAtLoginLoaded else { return }")
+                && !settingsSrc.contains("didModifyLaunchAtLogin")
+                && settingsCardsSrc.contains(".disabled(!isLaunchAtLoginLoaded)"),
+            "[§6.4] SettingsView gates Launch at Login toggle and setter behind isLaunchAtLoginLoaded"
+        )
+        func extractBlock(_ src: String, marker: String) throws -> String {
+            guard let start = src.range(of: marker)?.lowerBound,
+                  let openBrace = src[start...].firstIndex(of: "{") else {
+                throw AgentMCPStore.Failure.invalid("Missing SettingsView marker: \(marker)")
+            }
+            var depth = 0
+            var idx = openBrace
+            while idx < src.endIndex {
+                let ch = src[idx]
+                if ch == "{" { depth += 1 }
+                else if ch == "}" {
+                    depth -= 1
+                    if depth == 0 {
+                        return String(src[start...idx])
+                    }
+                }
+                idx = src.index(after: idx)
+            }
+            throw AgentMCPStore.Failure.invalid("Unterminated SettingsView block: \(marker)")
+        }
+        let taskBlock = try extractBlock(settingsSrc, marker: ".task {")
+        let taskBodyStart = taskBlock.index(after: taskBlock.firstIndex(of: "{")!)
+        let taskBodyEnd = taskBlock.index(before: taskBlock.endIndex)
+        let taskBody = String(taskBlock[taskBodyStart..<taskBodyEnd])
+        let setterBlock = try extractBlock(settingsSrc, marker: "func setLaunchAtLogin(_ newValue: Bool)")
+        let harnessSrc = """
+        import Foundation
+
+        enum SMAppService {
+            enum Status { case enabled, notRegistered }
+            final class FakeMainApp: @unchecked Sendable {
+                private let lock = NSLock()
+                var delaySeconds: TimeInterval = 0.06
+                var currentStatus: Status = .enabled
+                var registerCount = 0
+                var unregisterCount = 0
+                var status: Status {
+                    Thread.sleep(forTimeInterval: delaySeconds)
+                    return lock.withLock { currentStatus }
+                }
+                func register() throws {
+                    lock.withLock {
+                        registerCount += 1
+                        currentStatus = .enabled
+                    }
+                }
+                func unregister() throws {
+                    lock.withLock {
+                        unregisterCount += 1
+                        currentStatus = .notRegistered
+                    }
+                }
+            }
+            static let mainApp = FakeMainApp()
+        }
+
+        @MainActor
+        final class LaunchAtLoginHarness {
+            var launchAtLogin = false
+            var isLaunchAtLoginLoaded = false
+
+            func runHydrationTask() async {
+        \(taskBody)
+            }
+
+        \(setterBlock)
+        }
+
+        @main
+        struct LaunchAtLoginFixtureMain {
+            @MainActor static func main() async throws {
+                let harness = LaunchAtLoginHarness()
+                let hydrate = Task { @MainActor in
+                    await harness.runHydrationTask()
+                }
+                try await Task.sleep(nanoseconds: 15_000_000)
+                precondition(!harness.isLaunchAtLoginLoaded, "toggle must stay disabled while SMAppService read is pending")
+                harness.setLaunchAtLogin(!harness.launchAtLogin)
+                precondition(SMAppService.mainApp.registerCount == 0 && SMAppService.mainApp.unregisterCount == 0,
+                             "pre-hydration click must never call register/unregister")
+                await hydrate.value
+                precondition(harness.isLaunchAtLoginLoaded && harness.launchAtLogin,
+                             "hydration populates authoritative enabled OS status and unlocks toggle")
+                harness.setLaunchAtLogin(!harness.launchAtLogin)
+                precondition(SMAppService.mainApp.registerCount == 0 && SMAppService.mainApp.unregisterCount == 1 && !harness.launchAtLogin,
+                             "first click after hydration calls unregister() instead of register()")
+            }
+        }
+        """
+        let harnessFile = cacheRoot.appendingPathComponent("LaunchAtLoginHarness.swift")
+        let harnessBin = cacheRoot.appendingPathComponent("LaunchAtLoginHarness")
+        try write(harnessSrc, harnessFile)
+        let compileProc = Process()
+        compileProc.executableURL = URL(fileURLWithPath: "/usr/bin/swiftc")
+        compileProc.arguments = ["-parse-as-library", "-swift-version", "5", harnessFile.path, "-o", harnessBin.path]
+        try compileProc.run()
+        compileProc.waitUntilExit()
+        try check(compileProc.terminationStatus == 0, "[§6.4] extracted Launch at Login fixture compiles")
+        let runProc = Process()
+        runProc.executableURL = harnessBin
+        try runProc.run()
+        runProc.waitUntilExit()
+        try check(runProc.terminationStatus == 0, "[§6.4] extracted Launch at Login fixture passes delayed OS-enabled hydration & first-click unregister")
+
+        // [§12.1] Revision-fenced auxiliary write enforces stale-revision rejection & failure rollback inside AccountCredentialStore lock
+        let auxKey = "providerAccounts.registry"
+        var vaultBytes: Data?
+        var auxWriteCount = 0
+        var failAuxWrite = false
+        let makeAuxStore: () -> AccountCredentialStore = {
+            AccountCredentialStore(
+                readVaultData: { vaultBytes },
+                writeVaultData: { data in
+                    auxWriteCount += 1
+                    if failAuxWrite {
+                        throw CredentialStoreError.keychainWriteFailed(-25291)
+                    }
+                    vaultBytes = data
+                }
+            )
+        }
+        let auxStore = makeAuxStore()
+        let auxRev2 = Data("rev-2".utf8)
+        let auxRev1 = Data("rev-1".utf8)
+        let auxRev3 = Data("rev-3".utf8)
+        try check(
+            try auxStore.saveAuxiliaryData(auxRev2, forKey: auxKey, revision: 2) == .committed
+                && auxWriteCount == 1
+                && auxStore.committedAuxiliaryRevision(forKey: auxKey) == 2,
+            "[§12.1] revision 2 auxiliary write commits once and advances committed revision"
+        )
+        try check(
+            try auxStore.saveAuxiliaryData(auxRev1, forKey: auxKey, revision: 1)
+                == .superseded(committedRevision: 2, committedData: auxRev2)
+                && auxWriteCount == 1
+                && auxStore.loadAuxiliaryData(forKey: auxKey) == auxRev2,
+            "[§12.1] older revision 1 returns superseded inside vault lock without physical write"
+        )
+        failAuxWrite = true
+        var rev3Threw = false
+        do { _ = try auxStore.saveAuxiliaryData(auxRev3, forKey: auxKey, revision: 3) } catch { rev3Threw = true }
+        try check(
+            rev3Threw
+                && auxStore.committedAuxiliaryRevision(forKey: auxKey) == 2
+                && auxStore.loadAuxiliaryData(forKey: auxKey) == auxRev2,
+            "[§12.1] failed revision 3 rolls back cached auxiliary blob and preserves committed revision 2"
+        )
+        failAuxWrite = false
+        try check(
+            try auxStore.saveAuxiliaryData(auxRev3, forKey: auxKey, revision: 3) == .committed
+                && auxWriteCount == 3
+                && auxStore.committedAuxiliaryRevision(forKey: auxKey) == 3
+                && makeAuxStore().loadAuxiliaryData(forKey: auxKey) == auxRev3,
+            "[§12.1] retried revision 3 commits and persists across fresh store reopen"
+        )
+
+        // [§14.1] Transient vault read failure followed by recovery preserves existing credentials on saveAuxiliaryData / saveCredential
+        var recoveredVaultBytes: Data?
+        let seedStore = AccountCredentialStore(
+            readVaultData: { recoveredVaultBytes },
+            writeVaultData: { recoveredVaultBytes = $0 }
+        )
+        let seededCred1 = AccountCredential(
+            id: "seeded-codex-1",
+            providerId: "codex",
+            accountLabel: "seeded1@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/sec14-seeded-1/auth.json",
+            metadata: ["accountId": "acct-sec14-1", "workspaceUserId": "user-sec14-1"]
+        )
+        let seededCred2 = AccountCredential(
+            id: "seeded-codex-2",
+            providerId: "codex",
+            accountLabel: "seeded2@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/sec14-seeded-2/auth.json",
+            metadata: ["accountId": "acct-sec14-2", "workspaceUserId": "user-sec14-2"]
+        )
+        try seedStore.saveCredential(seededCred1)
+
+        var sec14ReadCount = 0
+        var sec14WriteCount = 0
+        var sec14FailReads: Set<Int> = [1]
+        let makeRecoveryStore: () -> AccountCredentialStore = {
+            AccountCredentialStore(
+                readVaultData: {
+                    sec14ReadCount += 1
+                    if sec14FailReads.contains(sec14ReadCount) {
+                        throw CredentialStoreError.keychainReadFailed(-25308)
+                    }
+                    return recoveredVaultBytes
+                },
+                writeVaultData: { data in
+                    sec14WriteCount += 1
+                    recoveredVaultBytes = data
+                }
+            )
+        }
+        let makeCleanReader: () -> AccountCredentialStore = {
+            AccountCredentialStore(readVaultData: { recoveredVaultBytes }, writeVaultData: { _ in })
+        }
+
+        // Case 1: Prior read fails (#1), versioned saveAuxiliaryData recovers on read (#2) and preserves seededCred1
+        let rev7Blob = Data("rev-7".utf8)
+        let case1Store = makeRecoveryStore()
+        try check(
+            case1Store.loadAuxiliaryData(forKey: auxKey) == nil && sec14ReadCount == 1 && sec14WriteCount == 0,
+            "[§14.1] initial failed read returns nil with zero writes"
+        )
+        try check(
+            try case1Store.saveAuxiliaryData(rev7Blob, forKey: auxKey, revision: 7) == .committed
+                && sec14ReadCount == 2
+                && sec14WriteCount == 1
+                && case1Store.committedAuxiliaryRevision(forKey: auxKey) == 7,
+            "[§14.1] versioned saveAuxiliaryData recovers on second read and commits rev 7"
+        )
+        let reopenedAfterCase1 = makeCleanReader()
+        try check(
+            reopenedAfterCase1.loadAllCredentials().map(\.id) == ["seeded-codex-1"]
+                && reopenedAfterCase1.loadAuxiliaryData(forKey: auxKey) == rev7Blob,
+            "[§14.1] fresh reopen preserves seeded-codex-1 and rev 7 registry blob after read recovery"
+        )
+
+        // Case 2: Direct saveAuxiliaryData fails closed on read (#1) with 0 writes, then succeeds on retry (#2)
+        sec14ReadCount = 0
+        sec14WriteCount = 0
+        sec14FailReads = [1]
+        let rev8Blob = Data("rev-8".utf8)
+        let case2Store = makeRecoveryStore()
+        var case2ThrewUnavailable = false
+        do {
+            _ = try case2Store.saveAuxiliaryData(rev8Blob, forKey: auxKey, revision: 8)
+        } catch CredentialStoreError.vaultUnavailable {
+            case2ThrewUnavailable = true
+        }
+        try check(
+            case2ThrewUnavailable
+                && sec14ReadCount == 1
+                && sec14WriteCount == 0
+                && case2Store.committedAuxiliaryRevision(forKey: auxKey) == nil
+                && makeCleanReader().loadAllCredentials().map(\.id) == ["seeded-codex-1"],
+            "[§14.1] failed read throws vaultUnavailable with 0 writes and preserves seeded credential"
+        )
+        try check(
+            try case2Store.saveAuxiliaryData(rev8Blob, forKey: auxKey, revision: 8) == .committed
+                && sec14ReadCount == 2
+                && sec14WriteCount == 1
+                && makeCleanReader().loadAllCredentials().map(\.id) == ["seeded-codex-1"]
+                && makeCleanReader().loadAuxiliaryData(forKey: auxKey) == rev8Blob,
+            "[§14.1] retry saveAuxiliaryData after read failure preserves seeded-codex-1 and commits rev 8"
+        )
+
+        // Case 3: Unversioned saveAuxiliaryData & saveCredential preserve credentials after failed read; continuous errors never write
+        sec14ReadCount = 0
+        sec14WriteCount = 0
+        sec14FailReads = [1]
+        let unversionedBlob = Data("secret-unversioned".utf8)
+        let case3AuxStore = makeRecoveryStore()
+        try check(case3AuxStore.loadAllCredentials().isEmpty && sec14ReadCount == 1, "[§14.1] unversioned case starts with failed read")
+        try case3AuxStore.saveAuxiliaryData(unversionedBlob, forKey: "cliProxy.test")
+        let reopenedAfterCase3Aux = makeCleanReader()
+        try check(
+            sec14ReadCount == 2
+                && sec14WriteCount == 1
+                && reopenedAfterCase3Aux.loadAllCredentials().map(\.id) == ["seeded-codex-1"]
+                && reopenedAfterCase3Aux.loadAuxiliaryData(forKey: auxKey) == rev8Blob
+                && reopenedAfterCase3Aux.loadAuxiliaryData(forKey: "cliProxy.test") == unversionedBlob,
+            "[§14.1] unversioned saveAuxiliaryData preserves existing credentials and auxiliary blobs on read recovery"
+        )
+
+        sec14ReadCount = 0
+        sec14WriteCount = 0
+        sec14FailReads = [1]
+        let case3CredStore = makeRecoveryStore()
+        try check(case3CredStore.loadAllCredentials().isEmpty && sec14ReadCount == 1, "[§14.1] credential recovery case starts with failed read")
+        try case3CredStore.saveCredential(seededCred2)
+        let reopenedAfterCred = makeCleanReader()
+        try check(
+            Set(reopenedAfterCred.loadAllCredentials().map(\.id)) == ["seeded-codex-1", "seeded-codex-2"]
+                && reopenedAfterCred.loadAuxiliaryData(forKey: auxKey) == rev8Blob,
+            "[§14.1] saveCredential after transient read failure preserves existing credentials and auxiliary data"
+        )
+
+        var alwaysFailWrites = 0
+        let alwaysFailStore = AccountCredentialStore(
+            readVaultData: { throw CredentialStoreError.keychainReadFailed(-25308) },
+            writeVaultData: { _ in alwaysFailWrites += 1 }
+        )
+        var alwaysFailThrew = false
+        do { _ = try alwaysFailStore.saveAuxiliaryData(Data("rev-9".utf8), forKey: auxKey, revision: 9) } catch { alwaysFailThrew = true }
+        try check(
+            alwaysFailThrew
+                && alwaysFailWrites == 0
+                && Set(makeCleanReader().loadAllCredentials().map(\.id)) == ["seeded-codex-1", "seeded-codex-2"],
+            "[§14.1] persistent read failure performs 0 writes and leaves existing vault intact"
+        )
     }
 
 }

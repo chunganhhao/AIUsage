@@ -24,6 +24,11 @@ public struct AccountCredentialDeduplicationPlan: Equatable, Sendable {
     }
 }
 
+public enum AuxiliaryWriteOutcome: Equatable, Sendable {
+    case committed
+    case superseded(committedRevision: UInt64, committedData: Data?)
+}
+
 private let credentialLog = Logger(subsystem: "com.aiusage.desktop", category: "CredentialStore")
 
 /// Secure credential store backed by macOS Keychain.
@@ -59,6 +64,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
     /// (e.g. the account registry from SecureAccountVault), so the whole app keeps
     /// exactly one keychain item and at most one "Always Allow" prompt.
     private var cachedAuxiliary: [String: Data] = [:]
+    private var committedAuxiliaryRevisions: [String: UInt64] = [:]
     /// `true` only after a definitive Keychain read (`errSecSuccess` or
     /// `errSecItemNotFound`). Permission / decode failures must stay `false`
     /// so we never persist an empty stand-in vault over real credentials.
@@ -115,7 +121,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
         defer { lock.unlock() }
 
         let key = storageKey(credential)
-        var vault = loadCredentialVaultUnsafe()
+        var vault = try loadAuthoritativeCredentialVaultUnsafe()
         vault[key] = credential
         do {
             try saveCredentialVaultUnsafe(vault)
@@ -156,7 +162,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        var vault = loadCredentialVaultUnsafe()
+        var vault = try loadAuthoritativeCredentialVaultUnsafe()
         for credential in credentials {
             vault.removeValue(forKey: storageKey(credential))
         }
@@ -173,7 +179,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        var vault = loadCredentialVaultUnsafe()
+        var vault = try loadAuthoritativeCredentialVaultUnsafe()
         let prefix = providerId.lowercased() + ":"
         let keysToRemove = vault.keys.filter { $0.lowercased().hasPrefix(prefix) }
         if !keysToRemove.isEmpty {
@@ -256,7 +262,8 @@ public final class AccountCredentialStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let allCredentials = loadAllCredentialsUnsafe()
+        guard var vault = try? loadAuthoritativeCredentialVaultUnsafe() else { return false }
+        let allCredentials = Array(vault.values)
         guard credentialDeduplicationPlan(plan, isValidFor: allCredentials) else {
             return false
         }
@@ -276,7 +283,6 @@ public final class AccountCredentialStore: @unchecked Sendable {
             return false
         }
 
-        var vault = loadCredentialVaultUnsafe()
         for key in storageKeysToRemove {
             guard vault.removeValue(forKey: key) != nil else {
                 return false
@@ -377,6 +383,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
     }
 
     private func finishVaultLoadUnsafe(_ dict: [String: AccountCredential]) -> [String: AccountCredential] {
+        guard readVaultHandler == nil else { return dict }
         // One-time cutover from every historical Keychain layout. Gated by a
         // sentinel stored in the vault's auxiliary, so after the first successful
         // run no legacy item is ever read again.
@@ -399,6 +406,11 @@ public final class AccountCredentialStore: @unchecked Sendable {
         guard vaultIsAuthoritative else {
             throw CredentialStoreError.vaultUnavailable
         }
+    }
+
+    private func loadAuthoritativeCredentialVaultUnsafe() throws -> [String: AccountCredential] {
+        try requireAuthoritativeVaultForWriteUnsafe()
+        return cachedCredentialsByStorageKey ?? [:]
     }
 
     /// Debug / 非生产宿主：只在本进程自己的 vault 里记 sentinel，绝不 collect/purge 正式 Keychain。
@@ -489,8 +501,7 @@ public final class AccountCredentialStore: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        let vault = loadCredentialVaultUnsafe()
-        try requireAuthoritativeVaultForWriteUnsafe()
+        let vault = try loadAuthoritativeCredentialVaultUnsafe()
         let previous = cachedAuxiliary[key]
         if let data {
             cachedAuxiliary[key] = data
@@ -499,6 +510,53 @@ public final class AccountCredentialStore: @unchecked Sendable {
         }
         do {
             try saveCredentialVaultUnsafe(vault)
+            if data == nil {
+                committedAuxiliaryRevisions.removeValue(forKey: key)
+            }
+        } catch {
+            if let previous {
+                cachedAuxiliary[key] = previous
+            } else {
+                cachedAuxiliary.removeValue(forKey: key)
+            }
+            throw error
+        }
+    }
+
+    public func committedAuxiliaryRevision(forKey key: String) -> UInt64? {
+        lock.lock()
+        defer { lock.unlock() }
+        return committedAuxiliaryRevisions[key]
+    }
+
+    /// Atomically verifies `revision` is not older than the last durably committed revision for `key`,
+    /// replaces the auxiliary blob, writes the unified vault, and advances the committed revision
+    /// inside the same vault lock region. Stale revisions return `.superseded` without touching
+    /// `cachedAuxiliary` or issuing any physical vault write.
+    @discardableResult
+    public func saveAuxiliaryData(
+        _ data: Data?,
+        forKey key: String,
+        revision: UInt64
+    ) throws -> AuxiliaryWriteOutcome {
+        lock.lock()
+        defer { lock.unlock() }
+
+        if let committed = committedAuxiliaryRevisions[key], revision < committed {
+            return .superseded(committedRevision: committed, committedData: cachedAuxiliary[key])
+        }
+
+        let vault = try loadAuthoritativeCredentialVaultUnsafe()
+        let previous = cachedAuxiliary[key]
+        if let data {
+            cachedAuxiliary[key] = data
+        } else {
+            cachedAuxiliary.removeValue(forKey: key)
+        }
+        do {
+            try saveCredentialVaultUnsafe(vault)
+            committedAuxiliaryRevisions[key] = revision
+            return .committed
         } catch {
             if let previous {
                 cachedAuxiliary[key] = previous
@@ -541,7 +599,9 @@ public final class AccountCredentialStore: @unchecked Sendable {
     }
 
     private func saveCredentialVaultUnsafe(_ credentialsByStorageKey: [String: AccountCredential]) throws {
-        try requireAuthoritativeVaultForWriteUnsafe()
+        guard vaultIsAuthoritative else {
+            throw CredentialStoreError.vaultUnavailable
+        }
         let orderedCredentials = credentialsByStorageKey.values.sorted(by: credentialSort)
         let data = try JSONEncoder().encode(
             CredentialVault(credentials: orderedCredentials, auxiliary: cachedAuxiliary.isEmpty ? nil : cachedAuxiliary)

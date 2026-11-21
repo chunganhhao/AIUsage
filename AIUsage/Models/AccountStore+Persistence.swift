@@ -603,12 +603,53 @@ struct AccountRegistryReconcileResult: Sendable {
     let didChange: Bool
 }
 
+enum AccountRegistrySaveOutcome: Equatable, Sendable {
+    case committed
+    case superseded(committedRevision: UInt64, committedAccounts: [StoredProviderAccount]?)
+}
+
 actor AccountRegistryRefreshWorker {
     static let shared = AccountRegistryRefreshWorker()
+
+    private static let syncFailureLock = NSLock()
+    private nonisolated(unsafe) static var pendingSyncFailureRevision: UInt64?
 
     private var latestRequestedRevision: UInt64 = 0
     private var lastPersistedRevision: UInt64 = 0
     private var lastPersistedAccounts: [StoredProviderAccount]?
+    private var hasPendingPersistRetry = false
+    private var persistGeneration: UInt64 = 0
+    private var persistDebounceNanoseconds: UInt64 = 1_500_000_000
+
+    nonisolated static func recordSyncPersistFailure(revision: UInt64) {
+        syncFailureLock.withLock {
+            pendingSyncFailureRevision = max(pendingSyncFailureRevision ?? 0, revision)
+        }
+    }
+
+    nonisolated static func clearSyncPersistFailure(upTo revision: UInt64) {
+        syncFailureLock.withLock {
+            if let pending = pendingSyncFailureRevision, pending <= revision {
+                pendingSyncFailureRevision = nil
+            }
+        }
+    }
+
+    nonisolated static func hasPendingSyncFailure() -> Bool {
+        syncFailureLock.withLock { pendingSyncFailureRevision != nil }
+    }
+
+    func configurePersistForTesting(debounceNanoseconds: UInt64 = 1_500_000_000) {
+        Self.syncFailureLock.withLock {
+            Self.pendingSyncFailureRevision = nil
+        }
+        latestRequestedRevision = 0
+        lastPersistedRevision = 0
+        lastPersistedAccounts = nil
+        persistGeneration &+= 1
+        hasPendingPersistRetry = false
+        persistDebounceNanoseconds = debounceNanoseconds
+    }
 
     func reconcile(
         currentRegistry: [StoredProviderAccount],
@@ -622,23 +663,60 @@ actor AccountRegistryRefreshWorker {
             allCredentials: allCredentials
         )
         let didChange = snapshot.reconcile(with: providers)
+        let needsPersistRetry = Self.hasPendingSyncFailure()
+            || (hasPendingPersistRetry && snapshot.accountRegistry != lastPersistedAccounts)
         return AccountRegistryReconcileResult(accounts: snapshot.accountRegistry,
-                                             didChange: didChange || snapshot.accountRegistry != currentRegistry)
+                                             didChange: didChange || snapshot.accountRegistry != currentRegistry || needsPersistRetry)
     }
 
     func schedulePersist(_ accounts: [StoredProviderAccount], revision: UInt64) async {
-        latestRequestedRevision = max(latestRequestedRevision, revision)
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        guard revision >= latestRequestedRevision else { return }
+        guard Self.hasPendingSyncFailure() || hasPendingPersistRetry || revision > lastPersistedRevision else { return }
+        persistGeneration &+= 1
+        let generation = persistGeneration
+        latestRequestedRevision = revision
 
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        try? await Task.sleep(nanoseconds: persistDebounceNanoseconds)
+        guard generation == persistGeneration else { return }
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
         guard revision == latestRequestedRevision else { return }
-        guard revision > lastPersistedRevision else { return }
-        guard lastPersistedAccounts != accounts else { return }
+        let currentMainRevision = await MainActor.run { AccountStore.shared.accountRegistryRevision }
+        guard generation == persistGeneration else { return }
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        guard revision == latestRequestedRevision, revision == currentMainRevision else { return }
+        let syncFailurePending = Self.hasPendingSyncFailure()
+        guard syncFailurePending || hasPendingPersistRetry || revision > lastPersistedRevision else { return }
+        guard syncFailurePending || lastPersistedAccounts != accounts else {
+            hasPendingPersistRetry = false
+            return
+        }
 
         do {
-            try SecureAccountVault.shared.saveAccounts(accounts)
-            lastPersistedRevision = revision
-            lastPersistedAccounts = accounts
+            switch try SecureAccountVault.shared.saveAccounts(accounts, revision: revision) {
+            case .committed:
+                Self.clearSyncPersistFailure(upTo: revision)
+                if revision >= lastPersistedRevision {
+                    lastPersistedRevision = revision
+                    lastPersistedAccounts = accounts
+                }
+                if revision >= latestRequestedRevision && !Self.hasPendingSyncFailure() {
+                    hasPendingPersistRetry = false
+                }
+            case .superseded(let committedRevision, let committedAccounts):
+                Self.clearSyncPersistFailure(upTo: committedRevision)
+                if let committedAccounts, committedRevision >= lastPersistedRevision {
+                    lastPersistedRevision = committedRevision
+                    lastPersistedAccounts = committedAccounts
+                }
+                if committedRevision >= latestRequestedRevision && !Self.hasPendingSyncFailure() {
+                    hasPendingPersistRetry = false
+                }
+            }
         } catch {
+            if SecureAccountVault.shared.committedRevision.map({ revision > $0 }) ?? true {
+                hasPendingPersistRetry = true
+            }
             Logger(subsystem: "com.aiusage.desktop", category: "AccountPersistence").error(
                 "Failed to persist account registry from background refresh worker (state kept in memory): \(String(describing: error), privacy: .public)"
             )
@@ -646,11 +724,26 @@ actor AccountRegistryRefreshWorker {
     }
 
     func notePersistedSnapshot(_ accounts: [StoredProviderAccount], revision: UInt64) {
-        latestRequestedRevision = max(latestRequestedRevision, revision)
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        Self.clearSyncPersistFailure(upTo: revision)
         if revision >= lastPersistedRevision {
             lastPersistedRevision = revision
             lastPersistedAccounts = accounts
         }
+        guard revision >= latestRequestedRevision else { return }
+        latestRequestedRevision = revision
+        persistGeneration &+= 1
+        hasPendingPersistRetry = false
+    }
+
+    func noteFailedPersist(revision: UInt64) {
+        if let committed = SecureAccountVault.shared.committedRevision, revision <= committed { return }
+        guard revision > lastPersistedRevision || (revision == lastPersistedRevision && lastPersistedAccounts == nil) else {
+            return
+        }
+        guard revision >= latestRequestedRevision else { return }
+        latestRequestedRevision = revision
+        hasPendingPersistRetry = true
     }
 }
 
@@ -683,7 +776,8 @@ private struct AccountRegistryRefreshSnapshot {
 
     nonisolated mutating func reconcile(with providers: [ProviderData]) -> Bool {
         var didChange = false
-        let now = SharedFormatters.iso8601String(from: Date())
+        let nowDate = Date()
+        let now = SharedFormatters.iso8601String(from: nowDate)
         var reservedStoredIDs = Set<String>()
         let allowUnseenCredentialFallback = providers.count == 1
         let orderedProviders = providers.sorted { lhs, rhs in
@@ -760,7 +854,7 @@ private struct AccountRegistryRefreshSnapshot {
                     updated.sourceFilePath = livePath
                     didChange = true
                 }
-                if updated.lastSeenAt != now {
+                if AccountStore.shouldRefreshLastSeenAt(existing: updated.lastSeenAt, now: nowDate) {
                     updated.lastSeenAt = now
                     didChange = true
                 }
@@ -822,7 +916,7 @@ private struct AccountRegistryRefreshSnapshot {
                         existing.sourceFilePath = livePath
                         didChange = true
                     }
-                    if existing.lastSeenAt != now {
+                    if AccountStore.shouldRefreshLastSeenAt(existing: existing.lastSeenAt, now: nowDate) {
                         existing.lastSeenAt = now
                         didChange = true
                     }
@@ -863,6 +957,21 @@ private struct AccountRegistryRefreshSnapshot {
 
 extension AccountStore {
     // MARK: - Persistence & normalization
+
+    nonisolated static let lastSeenAtRefreshInterval: TimeInterval = 900
+
+    nonisolated static func shouldRefreshLastSeenAt(
+        existing: String?,
+        now: Date,
+        minInterval: TimeInterval = lastSeenAtRefreshInterval
+    ) -> Bool {
+        guard let existing = existing?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existing.isEmpty,
+              let existingDate = SharedFormatters.parseISO8601(existing) else {
+            return true
+        }
+        return now.timeIntervalSince(existingDate) >= minInterval
+    }
 
     func normalizePersistedState() {
         bootstrapCredentialIndexFromRegistry()
@@ -1267,12 +1376,31 @@ extension AccountStore {
         let snapshot = accountRegistry
         let revision = accountRegistryRevision
         do {
-            try SecureAccountVault.shared.saveAccounts(snapshot)
-            Task.detached(priority: .utility) {
-                await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(snapshot, revision: revision)
+            switch try SecureAccountVault.shared.saveAccounts(snapshot, revision: revision) {
+            case .committed:
+                AccountRegistryRefreshWorker.clearSyncPersistFailure(upTo: revision)
+                Task.detached(priority: .utility) {
+                    await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(snapshot, revision: revision)
+                }
+            case .superseded(let committedRevision, let committedAccounts):
+                AccountRegistryRefreshWorker.clearSyncPersistFailure(upTo: committedRevision)
+                if let committedAccounts {
+                    Task.detached(priority: .utility) {
+                        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(
+                            committedAccounts,
+                            revision: committedRevision
+                        )
+                    }
+                }
             }
             return true
         } catch {
+            if SecureAccountVault.shared.committedRevision.map({ revision > $0 }) ?? true {
+                AccountRegistryRefreshWorker.recordSyncPersistFailure(revision: revision)
+                Task.detached(priority: .utility) {
+                    await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: revision)
+                }
+            }
             accountPersistenceLog.error("Failed to persist account registry (state kept in memory): \(String(describing: error), privacy: .public)")
             return false
         }

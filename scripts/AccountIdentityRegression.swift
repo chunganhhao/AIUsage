@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import SQLite3
@@ -40,7 +41,143 @@ struct AccountIdentityRegression {
         })
     }
 
+    static func decodePersistedHiddenFlag(from vaultURL: URL) throws -> Bool? {
+        let reopened = QuotaBackend.AccountCredentialStore(
+            readVaultData: {
+                guard FileManager.default.fileExists(atPath: vaultURL.path) else { return nil }
+                return try Data(contentsOf: vaultURL)
+            },
+            writeVaultData: { _ in }
+        )
+        guard let data = reopened.loadAuxiliaryData(forKey: "providerAccounts.registry") else { return nil }
+        let rows = try JSONDecoder().decode([StoredProviderAccount].self, from: data)
+        return rows.first?.isHidden
+    }
+
+    @MainActor
+    static func runSection12ChildWrite(vaultFileURL: URL, writeLogURL: URL) async throws {
+        final class ChildWriteController: @unchecked Sendable {
+            private let lock = NSLock()
+            let preLockSem = DispatchSemaphore(value: 0)
+            private var trapNextNonHidden = true
+            private var _didTrap = false
+            private var _staleReleased = false
+            private var _staleDone = false
+            private var _staleSuperseded = false
+            let logURL: URL
+
+            init(logURL: URL) { self.logURL = logURL }
+            var didTrap: Bool { lock.withLock { _didTrap } }
+            var staleDone: Bool { lock.withLock { _staleDone } }
+            var staleSuperseded: Bool { lock.withLock { _staleSuperseded } }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let isHidden = accounts.first?.isHidden == true
+                let shouldTrap: Bool = lock.withLock {
+                    if !isHidden && trapNextNonHidden {
+                        trapNextNonHidden = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = preLockSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                let line = ((accounts.first?.isHidden == true) ? "true" : "false") + "\n"
+                lock.withLock {
+                    if let handle = try? FileHandle(forWritingTo: logURL) {
+                        defer { try? handle.close() }
+                        _ = try? handle.seekToEnd()
+                        try? handle.write(contentsOf: Data(line.utf8))
+                    } else {
+                        try? Data(line.utf8).write(to: logURL)
+                    }
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                lock.withLock {
+                    guard accounts.first?.isHidden == false, _staleReleased else { return }
+                    _staleDone = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+
+            func releaseStale() {
+                lock.withLock { _staleReleased = true }
+                preLockSem.signal()
+            }
+        }
+
+        let controller = ChildWriteController(logURL: writeLogURL)
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: vaultFileURL,
+            beforeAcquireLock: { accounts, _ in controller.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in controller.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in controller.afterLock(accounts, outcome) }
+        )
+
+        let cred = credential(
+            "child-sec12",
+            workspace: "ws-child12",
+            user: "user-child12",
+            email: "child12@example.invalid",
+            path: "/tmp/identity-fixtures/child12/auth.json"
+        )
+        AccountCredentialStore.shared.credentials = [cred]
+        let liveCred = try live(cred)
+        let store = AccountStore.shared
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+
+        await store.reconcileAccountRegistry(with: [liveCred])
+        for _ in 0..<100 {
+            if controller.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(controller.didTrap, "[§12.1b-child] stale background write reached pre-lock boundary")
+
+        var callbackFired = false
+        store.hideAccount(entry(liveCred, store: store), onPostRegistryChange: { callbackFired = true })
+        check(callbackFired, "[§12.1b-child] hideAccount callback fired")
+
+        controller.releaseStale()
+        for _ in 0..<200 {
+            if controller.staleDone { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(controller.staleDone && controller.staleSuperseded, "[§12.1b-child] stale writer returned superseded without overwriting disk")
+    }
+
+    @MainActor
+    static func runSection12ChildReopen(vaultFileURL: URL) {
+        SecureAccountVault.shared.configureTestHooks(backingFileURL: vaultFileURL)
+        let store = AccountStore.shared
+        check(
+            store.accountRegistry.count == 1 && store.accountRegistry.first?.isHidden == true,
+            "[§12.1b-reopen] fresh process AccountStore.init reloads isHidden=true"
+        )
+    }
+
     @MainActor static func main() async throws {
+        let cliArgs = CommandLine.arguments
+        if cliArgs.count >= 4 && cliArgs[1] == "--section12-child-write" {
+            try await runSection12ChildWrite(
+                vaultFileURL: URL(fileURLWithPath: cliArgs[2]),
+                writeLogURL: URL(fileURLWithPath: cliArgs[3])
+            )
+            Darwin._exit(0)
+        }
+        if cliArgs.count >= 3 && cliArgs[1] == "--section12-child-reopen" {
+            runSection12ChildReopen(vaultFileURL: URL(fileURLWithPath: cliArgs[2]))
+            Darwin._exit(0)
+        }
+
         let store = AccountStore.shared
         let fingerprintA = ProviderAuthManager.codexSessionFingerprint(from: ["account_id": "business-1", "chatgpt_user_id": "a", "email": "same@example.invalid"])!
         let fingerprintB = ProviderAuthManager.codexSessionFingerprint(from: ["account_id": "business-1", "chatgpt_user_id": "b", "email": "same@example.invalid"])!
@@ -293,6 +430,721 @@ struct AccountIdentityRegression {
 
         // [§54-AGY] Hidden Antigravity Connect-modal visibility & credential-reusing unhide without orphaned duplicates.
         try await testAntigravityHiddenSessionReconnectAndDeduplication(store: store)
+
+        // lastSeenAt Keychain write throttling regression (Fix #3)
+        let refNow = Date(timeIntervalSince1970: 1_800_000_000)
+        check(AccountStore.shouldRefreshLastSeenAt(existing: nil, now: refNow),
+              "[PerfFix3] nil lastSeenAt requires refresh")
+        check(AccountStore.shouldRefreshLastSeenAt(existing: "   ", now: refNow),
+              "[PerfFix3] blank lastSeenAt requires refresh")
+        check(AccountStore.shouldRefreshLastSeenAt(existing: "not-a-date", now: refNow),
+              "[PerfFix3] unparseable lastSeenAt requires refresh")
+        check(!AccountStore.shouldRefreshLastSeenAt(
+            existing: SharedFormatters.iso8601String(from: refNow.addingTimeInterval(-899)),
+            now: refNow
+        ), "[PerfFix3] recent lastSeenAt (< 900s) skips rewrite")
+        check(AccountStore.shouldRefreshLastSeenAt(
+            existing: SharedFormatters.iso8601String(from: refNow.addingTimeInterval(-900)),
+            now: refNow
+        ), "[PerfFix3] stale lastSeenAt (>= 900s) triggers refresh")
+
+        let throttleCred = credential("throttle-codex", workspace: "ws-throttle", user: "user-throttle", email: "throttle@example.invalid")
+        try AccountCredentialStore.shared.saveCredential(throttleCred)
+        let throttleLive = try live(throttleCred)
+        let recentSeen = SharedFormatters.iso8601String(from: Date().addingTimeInterval(-60))
+        let staleSeen = SharedFormatters.iso8601String(from: Date().addingTimeInterval(-960))
+        store.accountRegistry = [
+            StoredProviderAccount(
+                id: "throttle-row",
+                providerId: "codex",
+                email: "throttle@example.invalid",
+                displayName: nil,
+                note: nil,
+                accountId: "ws-throttle",
+                providerResultId: throttleLive.id,
+                credentialId: throttleCred.id,
+                createdAt: staleSeen,
+                lastSeenAt: recentSeen,
+                isHidden: false,
+                isPermanentlyRemoved: false,
+                sourceFilePath: throttleCred.credential,
+                workspaceUserId: "user-throttle"
+            )
+        ]
+        let revBeforeRecentReconcile = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.lastSeenAt == recentSeen
+                && store.accountRegistryRevision == revBeforeRecentReconcile,
+              "[PerfFix3] unchanged account with recent lastSeenAt (<15m) triggers zero registry mutation/Keychain write")
+
+        // Real metadata updates still commit immediately even when lastSeenAt is recent
+        store.accountRegistry[0].sourceFilePath = "/tmp/identity-fixtures/old-path/auth.json"
+        let revBeforeMetaChange = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.sourceFilePath == throttleCred.credential
+                && store.accountRegistry.first?.lastSeenAt == recentSeen
+                && store.accountRegistryRevision > revBeforeMetaChange,
+              "[PerfFix3] real metadata change commits immediately while recent lastSeenAt remains unchurned")
+
+        // Stale lastSeenAt (>=15m) refreshes timestamp on reconcile
+        store.accountRegistry[0].lastSeenAt = staleSeen
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.lastSeenAt != staleSeen
+                && store.accountRegistry.first?.lastSeenAt != nil,
+              "[PerfFix3] stale lastSeenAt (>=15m) updates during reconcile")
+
+        // [§6.3] Failed Keychain persist stays pending and retries on next valid identical poll without RAM/revision churn
+        final class SaveSpy: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _attempts = 0
+            var failAttempts: Set<Int> = []
+            func recordAttempt() throws {
+                let attempt = lock.withLock {
+                    _attempts += 1
+                    return _attempts
+                }
+                if lock.withLock({ failAttempts.contains(attempt) }) {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+            var attempts: Int { lock.withLock { _attempts } }
+        }
+
+        let saveSpy = SaveSpy()
+        saveSpy.failAttempts = [1]
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            onPhysicalWrite: { _, _ in try saveSpy.recordAttempt() }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 20_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 1
+                && SecureAccountVault.shared.accounts.isEmpty
+                && store.accountRegistry.count == 1,
+              "[§6.3] failed Keychain save yields 1 attempt, 0 durable rows, 1 RAM row")
+
+        let revBeforeRetryPoll = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistryRevision == revBeforeRetryPoll,
+              "[§6.3] identical retry poll does not mutate RAM or revision")
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 2 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 2
+                && SecureAccountVault.shared.accounts.count == 1,
+              "[§6.3] next identical poll while lastSeenAt is recent retries and persists row durably")
+
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        check(saveSpy.attempts == 2,
+              "[§6.3] pending retry clears after success so subsequent unchanged poll writes 0 times")
+
+        saveSpy.failAttempts = [3]
+        let throttleCredUpdated = credential(
+            "throttle-codex",
+            workspace: "ws-throttle",
+            user: "user-throttle",
+            email: "throttle@example.invalid",
+            path: "/tmp/identity-fixtures/throttle-codex-v2/auth.json"
+        )
+        let throttleLiveUpdated = try live(throttleCredUpdated)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 3 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 3, "[§6.3] second fail enters pending retry before user edit")
+
+        store.accountRegistry[0].displayName = "User Edited Name"
+        check(store.persistAccountRegistry(), "[§6.3] immediate user save commits synchronously")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        check(saveSpy.attempts == 4
+                && SecureAccountVault.shared.accounts.first?.displayName == "User Edited Name",
+              "[§6.3] user save supersedes pending retry and is never overwritten")
+
+        store.accountRegistry[0].displayName = "Direct Persist Retry"
+        await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: store.accountRegistryRevision)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 5 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 5
+                && SecureAccountVault.shared.accounts.first?.displayName == "Direct Persist Retry",
+              "[§6.3] direct persistAccountRegistry failure is also retried on next valid poll")
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 1_500_000_000)
+
+        // [§8.1] Pre-lock background refresh write produces 0 physical writes and cannot overwrite user hideAccount
+        final class PreLockRaceHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            private let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNextNonHidden = true
+            private var staleReleased = false
+            private var _didTrap = false
+            private var _staleFinished = false
+            private var _staleSuperseded = false
+            private var _physicalWrites: [Bool] = []
+
+            var didTrap: Bool { stateLock.withLock { _didTrap } }
+            var staleFinished: Bool { stateLock.withLock { _staleFinished } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var physicalWrites: [Bool] { stateLock.withLock { _physicalWrites } }
+
+            func releaseTrappedWriter() {
+                stateLock.withLock { staleReleased = true }
+                releaseSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNextNonHidden && accounts.first?.isHidden == false {
+                        trapNextNonHidden = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                stateLock.withLock {
+                    _physicalWrites.append(accounts.first?.isHidden == true)
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                stateLock.withLock {
+                    guard accounts.first?.isHidden == false, staleReleased else { return }
+                    _staleFinished = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+        }
+
+        let raceHook = PreLockRaceHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in raceHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in raceHook.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in raceHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if raceHook.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(raceHook.didTrap, "[§8.1] background refresh reached pre-lock vault save boundary")
+        let revBeforeHide = store.accountRegistryRevision
+
+        // User hides the account while stale background write is paused before AccountCredentialStore.lock
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        check(store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true
+                && raceHook.physicalWrites == [true],
+              "[§8.1] hideAccount commits isHidden=true while stale background writer is trapped")
+
+        raceHook.releaseTrappedWriter()
+        for _ in 0..<100 {
+            if raceHook.staleFinished { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        check(raceHook.staleFinished
+                && raceHook.staleSuperseded
+                && raceHook.physicalWrites == [true]
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] stale background writer is superseded inside vault lock with 0 physical false writes")
+
+        let staleOutcome = try SecureAccountVault.shared.saveAccounts(
+            [store.accountRegistry[0]].map {
+                var copy = $0
+                copy.isHidden = false
+                return copy
+            },
+            revision: revBeforeHide
+        )
+        if case .superseded = staleOutcome {
+            // expected
+        } else {
+            check(false, "[§8.1] direct SecureAccountVault rejects stale revision commit")
+        }
+        check(raceHook.physicalWrites == [true]
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] SecureAccountVault leaves vault isHidden=true with 0 physical writes after rejecting stale revision")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(raceHook.physicalWrites == [true]
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] subsequent identical poll preserves hidden state in RAM and vault")
+
+        // [Gatekeeper #2] Overlapping newer write failure never downgrades vault to older committed revision
+        final class NewerFailHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            private let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNextRev2 = true
+            private var _didTrapRev2 = false
+            var didTrapRev2: Bool { stateLock.withLock { _didTrapRev2 } }
+            func releaseRev2() { releaseSem.signal() }
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                guard accounts.first?.displayName == "Rev2" else { return }
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNextRev2 {
+                        trapNextRev2 = false
+                        _didTrapRev2 = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                if accounts.first?.displayName == "Rev3" {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+        }
+        let newerFailHook = NewerFailHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in newerFailHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in try newerFailHook.onWrite(accounts) }
+        )
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        var baseRow = store.accountRegistry[0]
+        baseRow.displayName = "Rev1"
+        _ = try SecureAccountVault.shared.saveAccounts([baseRow], revision: 1)
+        var rev2Row = baseRow
+        rev2Row.displayName = "Rev2"
+        var rev3Row = baseRow
+        rev3Row.displayName = "Rev3"
+
+        let rev2Task = Task.detached {
+            _ = try? SecureAccountVault.shared.saveAccounts([rev2Row], revision: 2)
+        }
+        for _ in 0..<100 {
+            if newerFailHook.didTrapRev2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        var rev3Threw = false
+        do {
+            _ = try SecureAccountVault.shared.saveAccounts([rev3Row], revision: 3)
+        } catch {
+            rev3Threw = true
+        }
+        check(rev3Threw && SecureAccountVault.shared.committedRevision == 1,
+              "[Gatekeeper #2] rev3 failure preserves committed revision 1")
+        newerFailHook.releaseRev2()
+        await rev2Task.value
+        check(SecureAccountVault.shared.accounts.first?.displayName == "Rev2"
+                && SecureAccountVault.shared.committedRevision == 2,
+              "[Gatekeeper #2] rev2 completion commits rev2 and is not downgraded back to rev1 after rev3 failure")
+
+        // [§10.1] Reversed post-unlock completion order still produces strictly [true] physical writes (stale writer never writes)
+        final class PostUnlockOrderHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            let preLockSem = DispatchSemaphore(value: 0)
+            let postUnlockSem = DispatchSemaphore(value: 0)
+            private var trapNonHiddenPreLock = true
+            private var trapHiddenPostUnlock = true
+            private var staleReleased = false
+            private var _didTrapPreLock = false
+            private var _didTrapPostUnlock = false
+            private var _oldFinishedAfterRelease = false
+            private var _staleSuperseded = false
+            private var _writeOrder: [Bool] = []
+
+            var didTrapPreLock: Bool { stateLock.withLock { _didTrapPreLock } }
+            var didTrapPostUnlock: Bool { stateLock.withLock { _didTrapPostUnlock } }
+            var oldFinishedAfterRelease: Bool { stateLock.withLock { _oldFinishedAfterRelease } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var writeOrder: [Bool] { stateLock.withLock { _writeOrder } }
+
+            func releaseStale() {
+                stateLock.withLock { staleReleased = true }
+                preLockSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let isHidden = accounts.first?.isHidden == true
+                let holdPreLock: Bool = stateLock.withLock {
+                    if !isHidden && trapNonHiddenPreLock {
+                        trapNonHiddenPreLock = false
+                        _didTrapPreLock = true
+                        return true
+                    }
+                    return false
+                }
+                if holdPreLock {
+                    _ = preLockSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                stateLock.withLock { _writeOrder.append(accounts.first?.isHidden == true) }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                let isHidden = accounts.first?.isHidden == true
+                if !isHidden {
+                    stateLock.withLock {
+                        guard staleReleased else { return }
+                        _oldFinishedAfterRelease = true
+                        if case .superseded = outcome {
+                            _staleSuperseded = true
+                        }
+                    }
+                    return
+                }
+                let holdPostUnlock: Bool = stateLock.withLock {
+                    if isHidden && trapHiddenPostUnlock {
+                        trapHiddenPostUnlock = false
+                        _didTrapPostUnlock = true
+                        return true
+                    }
+                    return false
+                }
+                if holdPostUnlock {
+                    _ = postUnlockSem.wait(timeout: .now() + 5)
+                }
+            }
+        }
+
+        let orderHook = PostUnlockOrderHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in orderHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in orderHook.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in orderHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if orderHook.didTrapPreLock { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(orderHook.didTrapPreLock, "[§10.1] background non-hidden write paused before vault lock")
+
+        let releaseOrchestrator = Task.detached {
+            for _ in 0..<200 {
+                if orderHook.didTrapPostUnlock { break }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            // Release older write so it enters vault lock and returns FIRST
+            orderHook.releaseStale()
+            for _ in 0..<200 {
+                if orderHook.oldFinishedAfterRelease { break }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            // Now let hideAccount return SECOND
+            orderHook.postUnlockSem.signal()
+        }
+
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        await releaseOrchestrator.value
+        check(orderHook.didTrapPostUnlock
+                && orderHook.staleSuperseded
+                && orderHook.writeOrder == [true]
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§10.1] reversed return order still rejects stale write inside vault lock with writeOrder == [true]")
+
+        // [§12.1a] Disk-backed vault + simulated Keychain failure after hideAccount preserves durable isHidden=true without replay
+        let sec12TempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-section12-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sec12TempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sec12TempDir) }
+
+        final class DiskDurabilityHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNonHiddenPreLock = true
+            private var failSubsequentWrites = false
+            private var staleReleased = false
+            private var _didTrap = false
+            private var _staleDone = false
+            private var _staleSuperseded = false
+            private var _writes: [Bool] = []
+
+            var didTrap: Bool { stateLock.withLock { _didTrap } }
+            var staleDone: Bool { stateLock.withLock { _staleDone } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var writes: [Bool] { stateLock.withLock { _writes } }
+
+            func armFailAndReleaseStale() {
+                stateLock.withLock {
+                    failSubsequentWrites = true
+                    staleReleased = true
+                }
+                releaseSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNonHiddenPreLock && accounts.first?.isHidden == false {
+                        trapNonHiddenPreLock = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                let shouldFail = stateLock.withLock {
+                    _writes.append(accounts.first?.isHidden == true)
+                    return failSubsequentWrites
+                }
+                if shouldFail {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                stateLock.withLock {
+                    guard staleReleased && accounts.first?.isHidden == false else { return }
+                    _staleDone = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+        }
+
+        let diskVaultURL = sec12TempDir.appendingPathComponent("disk-vault.json")
+        let diskHook = DiskDurabilityHook()
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: diskVaultURL,
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in diskHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in try diskHook.onWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in diskHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if diskHook.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(diskHook.didTrap, "[§12.1a] stale background write trapped before vault lock")
+
+        var hideCallbackFired = false
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: { hideCallbackFired = true })
+        let hiddenOnDiskAfterHide = try decodePersistedHiddenFlag(from: diskVaultURL)
+        check(hideCallbackFired
+                && diskHook.writes == [true]
+                && hiddenOnDiskAfterHide == true,
+              "[§12.1a] hideAccount commits isHidden=true to disk immediately before callback returns")
+
+        diskHook.armFailAndReleaseStale()
+        for _ in 0..<100 {
+            if diskHook.staleDone { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let hiddenOnDiskAfterStale = try decodePersistedHiddenFlag(from: diskVaultURL)
+        check(diskHook.staleDone
+                && diskHook.staleSuperseded
+                && diskHook.writes == [true]
+                && hiddenOnDiskAfterStale == true,
+              "[§12.1a] stale writer produces 0 physical writes and fresh disk reopen still reads isHidden=true")
+
+        // [§12.1b] Cross-process _exit(0) after stale writer release + fresh process AccountStore.init() reopen
+        let childVaultURL = sec12TempDir.appendingPathComponent("child-vault.json")
+        let childLogURL = sec12TempDir.appendingPathComponent("child-writes.log")
+        let writeChild = Process()
+        writeChild.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        writeChild.arguments = ["--section12-child-write", childVaultURL.path, childLogURL.path]
+        try writeChild.run()
+        writeChild.waitUntilExit()
+        check(writeChild.terminationStatus == 0, "[§12.1b] child write + stale release + _exit(0) succeeded")
+        let loggedWrites = try String(contentsOf: childLogURL, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        let childHiddenOnDisk = try decodePersistedHiddenFlag(from: childVaultURL)
+        check(loggedWrites == ["true"] && childHiddenOnDisk == true,
+              "[§12.1b] child process logged strictly [true] physical writes on disk")
+
+        let reopenChild = Process()
+        reopenChild.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        reopenChild.arguments = ["--section12-child-reopen", childVaultURL.path]
+        try reopenChild.run()
+        reopenChild.waitUntilExit()
+        check(reopenChild.terminationStatus == 0,
+              "[§12.1b] fresh child process AccountStore.init() reopened isHidden=true from disk")
+
+        // [§12.1c] Failed latest-revision hideAccount retries on first unchanged poll even with late older ack
+        final class LatestFailureRetryHook: @unchecked Sendable {
+            private let lock = NSLock()
+            private var failNextHiddenWrite = false
+            private var _writes: [Bool] = []
+            var writes: [Bool] { lock.withLock { _writes } }
+            func setFailNextHidden(_ value: Bool) { lock.withLock { failNextHiddenWrite = value } }
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                let isHidden = accounts.first?.isHidden == true
+                let shouldFail = lock.withLock {
+                    if isHidden && failNextHiddenWrite {
+                        failNextHiddenWrite = false
+                        return true
+                    }
+                    return false
+                }
+                if shouldFail {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+                lock.withLock { _writes.append(isHidden) }
+            }
+        }
+
+        let retryHook = LatestFailureRetryHook()
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: nil,
+            resetStore: true,
+            onPhysicalWrite: { _, accounts in try retryHook.onWrite(accounts) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if retryHook.writes == [false] { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        try await Task.sleep(nanoseconds: 25_000_000)
+        let r1Rev = store.accountRegistryRevision
+        let r1Snapshot = store.accountRegistry
+        check(retryHook.writes == [false] && SecureAccountVault.shared.committedRevision == r1Rev,
+              "[§12.1c] initial non-hidden snapshot committed cleanly")
+
+        retryHook.setFailNextHidden(true)
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        let r2Rev = store.accountRegistryRevision
+        check(r2Rev > r1Rev
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == false
+                && SecureAccountVault.shared.committedRevision == r1Rev,
+              "[§12.1c] failed latest hideAccount keeps RAM isHidden=true and vault isHidden=false")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 15_000_000)
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(r1Snapshot, revision: r1Rev)
+        for _ in 0..<100 {
+            if SecureAccountVault.shared.accounts.first?.isHidden == true { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        check(SecureAccountVault.shared.accounts.first?.isHidden == true
+                && SecureAccountVault.shared.committedRevision == r2Rev
+                && retryHook.writes == [false, true],
+              "[§12.1c] late older ack does not cancel first-poll retry of failed latest hideAccount")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 80_000_000)
+        check(retryHook.writes == [false, true],
+              "[§12.1c] subsequent identical poll after recovery writes 0 extra times")
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+
+        // [§8.2] Older detached events arriving during newer debounce never cancel newer commit
+        for variant in ["schedulePersist", "notePersistedSnapshot", "noteFailedPersist"] {
+            SecureAccountVault.shared.configureTestHooks(resetStore: true)
+            await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+            var row = StoredProviderAccount(
+                id: "throttle-row-\(variant)",
+                providerId: "codex",
+                email: "throttle@example.invalid",
+                displayName: "Initial-\(variant)",
+                note: nil,
+                accountId: "ws-throttle",
+                providerResultId: throttleLiveUpdated.id,
+                credentialId: throttleCredUpdated.id,
+                createdAt: staleSeen,
+                lastSeenAt: recentSeen,
+                isHidden: false,
+                isPermanentlyRemoved: false,
+                sourceFilePath: throttleCredUpdated.credential,
+                workspaceUserId: "user-throttle"
+            )
+            store.accountRegistry = [row]
+            let initialRev = store.accountRegistryRevision
+            SecureAccountVault.shared.accounts = [row]
+            await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([row], revision: initialRev)
+
+            row.displayName = "Older-\(variant)"
+            let olderRow = row
+            store.accountRegistry = [olderRow]
+            let olderRev = store.accountRegistryRevision
+
+            row.displayName = "Newest-\(variant)"
+            let newestRow = row
+            store.accountRegistry = [newestRow]
+            let newerRev = store.accountRegistryRevision
+
+            let newerTask = Task.detached {
+                await AccountRegistryRefreshWorker.shared.schedulePersist([newestRow], revision: newerRev)
+            }
+            try await Task.sleep(nanoseconds: 15_000_000)
+
+            switch variant {
+            case "schedulePersist":
+                await AccountRegistryRefreshWorker.shared.schedulePersist([olderRow], revision: olderRev)
+            case "notePersistedSnapshot":
+                await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([olderRow], revision: olderRev)
+            default:
+                await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: olderRev)
+            }
+
+            await newerTask.value
+            check(SecureAccountVault.shared.accounts.first?.displayName == "Newest-\(variant)",
+                  "[§8.2] older \(variant) during newer debounce does not drop newer snapshot")
+        }
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 1_500_000_000)
 
         print("PASS: \(assertions) account identity & OAuth assertions (production save/reconcile/hide/delete/OAuth, isolated storage)")
     }
