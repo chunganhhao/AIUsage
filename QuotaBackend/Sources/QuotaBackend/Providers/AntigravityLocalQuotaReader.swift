@@ -7,6 +7,13 @@ struct AntigravityLocalQuotaReader: Sendable {
     struct ServerProcess: Equatable, Sendable {
         let pid: Int32
         let csrfToken: String
+        let preferredPorts: [Int]
+
+        init(pid: Int32, csrfToken: String, preferredPorts: [Int] = []) {
+            self.pid = pid
+            self.csrfToken = csrfToken
+            self.preferredPorts = preferredPorts
+        }
     }
 
     struct ActiveSession: Equatable, Sendable {
@@ -78,7 +85,8 @@ struct AntigravityLocalQuotaReader: Sendable {
 
     func probeActiveSession() async -> ActiveSession? {
         for server in listProcesses() {
-            for port in listPorts(server.pid) {
+            let ports = server.preferredPorts.isEmpty ? listPorts(server.pid) : server.preferredPorts
+            for port in ports {
                 for scheme in ["http", "https"] {
                     guard let baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)") else { continue }
                     guard let status = await callRPC(
@@ -264,11 +272,73 @@ struct AntigravityLocalQuotaReader: Sendable {
 
     // MARK: - Live Process Discovery & Loopback Transport
 
-    private static func discoverRunningServers() -> [ServerProcess] {
-        guard let output = runProcessCapture(executable: "/bin/ps", arguments: ["-axo", "pid=,args="]) else {
+    static func discoverDaemonHubServers(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isProcessAlive: (Int32) -> Bool = { kill($0, 0) == 0 }
+    ) -> [ServerProcess] {
+        let daemonDir = URL(fileURLWithPath: homeDirectory)
+            .appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+        let dirAttrs = try? daemonDir.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+        guard dirAttrs?.isSymbolicLink != true,
+              let entries = try? FileManager.default.contentsOfDirectory(
+                at: daemonDir,
+                includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey],
+                options: [.skipsHiddenFiles]
+              ) else {
             return []
         }
-        return parseServerProcesses(fromPSOutput: output)
+
+        let hubFiles = entries
+            .filter { $0.lastPathComponent.hasPrefix("hub_") && $0.pathExtension == "json" }
+            .compactMap { url -> (url: URL, mtime: Date)? in
+                let attrs = try? url.resourceValues(forKeys: [.isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey])
+                guard attrs?.isSymbolicLink != true, attrs?.isRegularFile == true else { return nil }
+                return (url, attrs?.contentModificationDate ?? .distantPast)
+            }
+            .sorted { $0.mtime > $1.mtime }
+
+        return hubFiles.compactMap { entry in
+            guard let data = try? Data(contentsOf: entry.url),
+                  let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let pidNumber = json["pid"] as? NSNumber else {
+                return nil
+            }
+            let pid = pidNumber.int32Value
+            guard pid > 0, isProcessAlive(pid),
+                  let rawCsrf = json["csrfToken"] as? String else {
+                return nil
+            }
+            let csrf = rawCsrf.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !csrf.isEmpty else { return nil }
+
+            var ports: [Int] = []
+            for key in ["httpPort", "httpsPort"] {
+                if let port = (json[key] as? NSNumber)?.intValue,
+                   (1...65535).contains(port),
+                   !ports.contains(port) {
+                    ports.append(port)
+                }
+            }
+            return ServerProcess(pid: pid, csrfToken: csrf, preferredPorts: ports)
+        }
+    }
+
+    private static func discoverRunningServers() -> [ServerProcess] {
+        var combined: [ServerProcess] = []
+        var seen = Set<String>()
+        func appendUnique(_ servers: [ServerProcess]) {
+            for server in servers {
+                let key = "\(server.pid):\(server.csrfToken)"
+                if seen.insert(key).inserted {
+                    combined.append(server)
+                }
+            }
+        }
+        appendUnique(discoverDaemonHubServers())
+        if let output = runProcessCapture(executable: "/bin/ps", arguments: ["-axo", "pid=,args="]) {
+            appendUnique(parseServerProcesses(fromPSOutput: output))
+        }
+        return combined
     }
 
     private static func discoverListeningPorts(pid: Int32) -> [Int] {

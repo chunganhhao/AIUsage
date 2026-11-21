@@ -305,6 +305,62 @@ struct PostR6AntiBanCacheRegression {
                 }
             }
 
+            // [personal-build + agy-2.34] daemon/hub_*.json discovery ignores dead PIDs/symlinks, orders newest alive hub first, and uses preferredPorts directly.
+            do {
+                let daemonHome = scratchRoot.appendingPathComponent("agy-daemon-hub-234", isDirectory: true)
+                let daemonDir = daemonHome.appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+                try FileManager.default.createDirectory(at: daemonDir, withIntermediateDirectories: true)
+                let oldHub = daemonDir.appendingPathComponent("hub_50300.json")
+                try Data(#"{"pid":3001,"httpPort":50300,"httpsPort":50299,"csrfToken":"tok-old"}"#.utf8).write(to: oldHub)
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000)], ofItemAtPath: oldHub.path)
+                try Data(#"{"pid":9999,"httpPort":50001,"httpsPort":50000,"csrfToken":"tok-dead"}"#.utf8)
+                    .write(to: daemonDir.appendingPathComponent("hub_50001.json"))
+                let symTarget = daemonHome.appendingPathComponent("sym-target.json")
+                try Data(#"{"pid":4082,"httpPort":50002,"httpsPort":50003,"csrfToken":"tok-sym"}"#.utf8).write(to: symTarget)
+                try FileManager.default.createSymbolicLink(at: daemonDir.appendingPathComponent("hub_50002.json"), withDestinationURL: symTarget)
+                let newHub = daemonDir.appendingPathComponent("hub_50312.json")
+                try Data(#"{"pid":4082,"httpPort":50312,"httpsPort":50311,"csrfToken":"tok-new"}"#.utf8).write(to: newHub)
+                try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_100)], ofItemAtPath: newHub.path)
+
+                let servers234 = AntigravityLocalQuotaReader.discoverDaemonHubServers(
+                    homeDirectory: daemonHome.path,
+                    isProcessAlive: { $0 == 4082 || $0 == 3001 }
+                )
+                let reader234 = AntigravityLocalQuotaReader(
+                    listProcesses: { servers234 },
+                    listPorts: { _ in
+                        fatalError("[personal-build + agy-2.34] preferredPorts must bypass lsof port scan")
+                    },
+                    callRPC: { baseURL, method, csrfToken, _ in
+                        guard baseURL.absoluteString == "http://127.0.0.1:50312", csrfToken == "tok-new" else {
+                            return nil
+                        }
+                        if method.hasSuffix("GetUserStatus") {
+                            return ["userStatus": ["email": "active@example.invalid", "userTier": ["id": "pro", "name": "Pro"]]]
+                        }
+                        if method.hasSuffix("RetrieveUserQuotaSummary") {
+                            return [
+                                "groups": [[
+                                    "displayName": "Gemini 2.5 Pro",
+                                    "buckets": [[
+                                        "bucketId": "gemini-2.5-pro",
+                                        "remainingFraction": 0.77,
+                                        "resetTime": "2099-01-01T00:00:00Z"
+                                    ]]
+                                ]]
+                            ]
+                        }
+                        return nil
+                    }
+                )
+                let hubResult = await reader234.fetchMatchingQuota(expectedEmail: "active@example.invalid")
+                try check(servers234.count == 2
+                            && servers234.first?.csrfToken == "tok-new"
+                            && servers234.first?.preferredPorts == [50312, 50311]
+                            && hubResult?.models.first?.remainingPercent == 77,
+                          "[personal-build + agy-2.34] daemon/hub_*.json discovery reads newest alive hub first and skips dead/symlink entries")
+            }
+
             // [§55-P2] Multi-project credentials sharing an active email require verified project match and preserve existing snapshots when unbound.
             let multiHome = scratchRoot.appendingPathComponent("agy-multi-project-55p2", isDirectory: true)
             let multiAuthA = multiHome.appendingPathComponent("creds/agy-proj-a.json")

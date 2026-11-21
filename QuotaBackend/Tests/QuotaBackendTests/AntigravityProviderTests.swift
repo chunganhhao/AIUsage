@@ -146,6 +146,44 @@ final class AntigravityProviderTests: XCTestCase {
         XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
+    func testDiscoverDaemonHubServersReadsNewestAliveHubAndSkipsDeadAndSymlinks() throws {
+        let dir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agy-daemon-hub-test-\(UUID().uuidString)", isDirectory: true)
+        let daemonDir = dir.appendingPathComponent(".gemini/antigravity/daemon", isDirectory: true)
+        try FileManager.default.createDirectory(at: daemonDir, withIntermediateDirectories: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: dir) }
+
+        let oldAliveURL = daemonDir.appendingPathComponent("hub_50300.json")
+        try Data(#"{"pid":3001,"httpPort":50300,"httpsPort":50299,"lsVersion":"2.34.0","csrfToken":"tok-old"}"#.utf8)
+            .write(to: oldAliveURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_000)], ofItemAtPath: oldAliveURL.path)
+
+        let deadURL = daemonDir.appendingPathComponent("hub_50001.json")
+        try Data(#"{"pid":9999,"httpPort":50001,"httpsPort":50000,"lsVersion":"2.34.0","csrfToken":"tok-dead"}"#.utf8)
+            .write(to: deadURL)
+
+        let symlinkTarget = dir.appendingPathComponent("outside.json")
+        try Data(#"{"pid":4082,"httpPort":50002,"httpsPort":50003,"csrfToken":"tok-symlink"}"#.utf8)
+            .write(to: symlinkTarget)
+        try FileManager.default.createSymbolicLink(
+            at: daemonDir.appendingPathComponent("hub_50002.json"),
+            withDestinationURL: symlinkTarget
+        )
+
+        let newAliveURL = daemonDir.appendingPathComponent("hub_50312.json")
+        try Data(#"{"pid":4082,"httpPort":50312,"httpsPort":50311,"lsVersion":"2.34.0","csrfToken":"tok-new"}"#.utf8)
+            .write(to: newAliveURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_800_000_100)], ofItemAtPath: newAliveURL.path)
+
+        let discovered = AntigravityLocalQuotaReader.discoverDaemonHubServers(
+            homeDirectory: dir.path,
+            isProcessAlive: { $0 == 4082 || $0 == 3001 }
+        )
+        XCTAssertEqual(discovered.count, 2)
+        XCTAssertEqual(discovered.first, .init(pid: 4082, csrfToken: "tok-new", preferredPorts: [50312, 50311]))
+        XCTAssertEqual(discovered.last, .init(pid: 3001, csrfToken: "tok-old", preferredPorts: [50300, 50299]))
+    }
+
     func testLocalIDEReaderEnforcesProjectAttributionWhenRequiredOrMismatched() async throws {
         let cred = try makeCredential(withProjectStub: false, projectId: "proj-123")
 
