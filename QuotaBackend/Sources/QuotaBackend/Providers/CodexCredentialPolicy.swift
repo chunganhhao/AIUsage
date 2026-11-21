@@ -1,4 +1,5 @@
 import CryptoKit
+import Darwin
 import Foundation
 
 /// 一个用户在一个工作区中的订阅身份。名称、套餐和导入路径都不是原生身份。
@@ -285,6 +286,10 @@ public enum CodexGlobalStateSync {
         let fm = FileManager.default
         let statePath = (codexDir as NSString).appendingPathComponent(".codex-global-state.json")
         let backupPath = statePath + ".bak"
+
+        guard ![codexDir, statePath, backupPath].contains(where: { CodexCredentialPolicy.isLegacyCPAArchivePath($0) }) else {
+            return SyncOutcome(wasTargetPreseeded: true, projectCount: 0)
+        }
 
         guard var state = loadStateObject(primaryPath: statePath, backupPath: backupPath, fm: fm) else {
             return SyncOutcome(wasTargetPreseeded: true, projectCount: 0)
@@ -911,7 +916,8 @@ public enum CodexCredentialPolicy {
         candidatePaths: [String],
         excludingIdentity: CodexAccountIdentity,
         loadCredentials: () -> [AccountCredential],
-        fm: FileManager = .default
+        fm: FileManager = .default,
+        homeDirectory: String? = nil
     ) -> Int {
         let normalizedCandidates = candidatePaths.map {
             URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath).standardizedFileURL.path
@@ -959,6 +965,7 @@ public enum CodexCredentialPolicy {
                 + linkedPaths.map { ($0, normalizedCandidates + [primaryPath]) }
 
             for entry in targetGroups {
+                guard !isLegacyCPAArchivePath(entry.path, homeDirectory: homeDirectory) else { continue }
                 let targetStdPath = URL(fileURLWithPath: NSString(string: entry.path).expandingTildeInPath).standardizedFileURL.path
                 guard !targetStdPath.isEmpty,
                       !candidateSet.contains(targetStdPath),
@@ -1431,6 +1438,124 @@ public enum CodexCredentialPolicy {
                 "Codex OAuth refresh failed because of a network error."
             )
         }
+    }
+
+    /// Computes canonical lowercased `<home>/Library/Application Support/AIUsage/CLIProxyAPI/auth` roots once per scan.
+    public static func resolvedLegacyCPAArchiveRoots(homeDirectory: String? = nil) -> Set<String> {
+        let archiveSubpath = "Library/Application Support/AIUsage/CLIProxyAPI/auth"
+        let homes = ([
+            homeDirectory,
+            ProcessInfo.processInfo.environment["HOME"],
+            FileManager.default.homeDirectoryForCurrentUser.path
+        ] as [String?])
+            .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return Set(homes.map {
+            canonicalPath(
+                URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath)
+                    .appendingPathComponent(archiveSubpath, isDirectory: true)
+                    .path
+            ).lowercased()
+        })
+    }
+
+    /// Returns `true` when `rawPath` resolves into, aliases via symlink, or sits beneath
+    /// `<home>/Library/Application Support/AIUsage/CLIProxyAPI/auth`.
+    public static func isLegacyCPAArchivePath(
+        _ rawPath: String,
+        homeDirectory: String? = nil,
+        archiveRoots precomputedRoots: Set<String>? = nil
+    ) -> Bool {
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return false }
+        let expanded = NSString(string: trimmed).expandingTildeInPath
+        let absoluteExpanded = expanded.hasPrefix("/")
+            ? expanded
+            : FileManager.default.currentDirectoryPath + "/" + expanded
+        let archiveRoots = precomputedRoots ?? resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+        guard !archiveRoots.isEmpty else { return false }
+
+        func matchesRoot(_ path: String) -> Bool {
+            let lower = path.lowercased()
+            return archiveRoots.contains { root in lower == root || lower.hasPrefix(root + "/") }
+        }
+
+        func trimTrailingSlashes(_ path: String) -> String {
+            var p = path
+            while p.count > 1 && p.hasSuffix("/") { p.removeLast() }
+            return p
+        }
+
+        var cursorPath = trimTrailingSlashes(absoluteExpanded)
+        while !cursorPath.isEmpty {
+            var probePath = cursorPath
+            var visited = Set<String>()
+            for _ in 0..<16 {
+                guard visited.insert(probePath).inserted else { break }
+                if matchesRoot(canonicalPath(probePath)) { return true }
+                guard let linkDest = try? FileManager.default.destinationOfSymbolicLink(atPath: probePath) else {
+                    break
+                }
+                let parentDir = (probePath as NSString).deletingLastPathComponent
+                let canonicalParent = parentDir.isEmpty ? "/" : canonicalPath(parentDir)
+                let nextPath = linkDest.hasPrefix("/")
+                    ? linkDest
+                    : URL(fileURLWithPath: canonicalParent, isDirectory: true).appendingPathComponent(linkDest).path
+                if matchesRoot(canonicalPath(nextPath)) { return true }
+                probePath = trimTrailingSlashes(nextPath)
+            }
+            if cursorPath == "/" || cursorPath.isEmpty { break }
+            let parent = trimTrailingSlashes((cursorPath as NSString).deletingLastPathComponent)
+            if parent == cursorPath || parent.isEmpty || parent == "/.." { break }
+            cursorPath = parent
+        }
+        return false
+    }
+
+    private static func canonicalPath(_ rawPath: String) -> String {
+        let absoluteRaw = rawPath.hasPrefix("/")
+            ? rawPath
+            : FileManager.default.currentDirectoryPath + "/" + rawPath
+        if let direct = realpath(absoluteRaw, nil) {
+            defer { free(direct) }
+            return String(cString: direct)
+        }
+        var currentPath = absoluteRaw
+        while currentPath.count > 1 && currentPath.hasSuffix("/") { currentPath.removeLast() }
+        var tail: [String] = []
+        while !currentPath.isEmpty {
+            if let pointer = realpath(currentPath, nil) {
+                defer { free(pointer) }
+                var components = String(cString: pointer).split(separator: "/").map(String.init)
+                for component in tail.reversed() {
+                    if component.isEmpty || component == "." { continue }
+                    if component == ".." {
+                        if !components.isEmpty { components.removeLast() }
+                    } else {
+                        components.append(component)
+                    }
+                }
+                return "/" + components.joined(separator: "/")
+            }
+            if currentPath == "/" || currentPath.isEmpty { break }
+            let last = (currentPath as NSString).lastPathComponent
+            var parent = (currentPath as NSString).deletingLastPathComponent
+            while parent.count > 1 && parent.hasSuffix("/") { parent.removeLast() }
+            if parent == currentPath || parent.isEmpty || parent == "/.." { break }
+            tail.append(last)
+            currentPath = parent
+        }
+        var fallback: [String] = []
+        for component in absoluteRaw.split(separator: "/") {
+            let part = String(component)
+            if part.isEmpty || part == "." { continue }
+            if part == ".." {
+                if !fallback.isEmpty { fallback.removeLast() }
+            } else {
+                fallback.append(part)
+            }
+        }
+        return "/" + fallback.joined(separator: "/")
     }
 
     private static func normalized(_ value: String?) -> String? {

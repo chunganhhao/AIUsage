@@ -346,6 +346,7 @@ final class ProviderActivationManager: ObservableObject {
         let fm = FileManager.default
         let codexDir = NSString(string: "~/.codex").expandingTildeInPath
         let targetPath = "\(codexDir)/auth.json"
+        try Self.validateNativeCodexWriteTargets(targetDir: codexDir, targetPath: targetPath)
 
         let email = entry.accountEmail
             ?? entry.storedAccount?.email
@@ -401,6 +402,7 @@ final class ProviderActivationManager: ObservableObject {
         // 目标账号验证完成后再解除代理接管，避免坏文件让当前可用路由先被停掉。
         // 停进程走通知（异步），但文件必须在写账号之前同步归位，否则异步 restore 会覆盖新账号。
         // 先完成 config.toml 与 auth.json 写入，成功后才更新 .codex-global-state.json，避免切换失败时污染 renderer 状态。
+        try Self.validateNativeCodexWriteTargets(targetDir: codexDir, targetPath: targetPath)
         NotificationCenter.default.post(name: .codexSubscriptionAccountActivating, object: nil)
         try CodexConfigManager.shared.restore()
         CodexCredentialPolicy.flushLiveAuthToManagedCopies(
@@ -413,6 +415,7 @@ final class ProviderActivationManager: ObservableObject {
         let managedURL = URL(fileURLWithPath: resolved)
         if reconciled.adoptedLiveCandidate,
            let healedManagedData = reconciled.healedManagedData,
+           !CodexCredentialPolicy.isLegacyCPAArchivePath(managedURL.path),
            managedURL.standardizedFileURL.path != URL(fileURLWithPath: targetPath).standardizedFileURL.path,
            fm.contents(atPath: resolved) == sourceData {
             try? healedManagedData.write(to: managedURL, options: .atomic)
@@ -586,6 +589,7 @@ final class ProviderActivationManager: ObservableObject {
 
             let codexDir = NSString(string: "~/.codex").expandingTildeInPath
             let targetPath = "\(codexDir)/auth.json"
+            try Self.validateNativeCodexWriteTargets(targetDir: codexDir, targetPath: targetPath)
             let reconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
                 managedNativeData: nativeData,
                 managedSourceData: sourceData,
@@ -609,10 +613,12 @@ final class ProviderActivationManager: ObservableObject {
             let genMid = await MainActor.run { self.codexSwitchGeneration }
             if genMid != genBefore { continue }
 
+            try Self.validateNativeCodexWriteTargets(targetDir: codexDir, targetPath: targetPath)
             try CodexConfigManager.shared.restore()
             try writeAuthFileWithBackup(targetDir: codexDir, targetPath: targetPath, data: effectiveData, fm: fm)
             if reconciled.adoptedLiveCandidate,
                let healedManagedData = reconciled.healedManagedData,
+               !CodexCredentialPolicy.isLegacyCPAArchivePath(selected.authFileURL.path),
                selected.authFileURL.standardizedFileURL.path != URL(fileURLWithPath: targetPath).standardizedFileURL.path,
                fm.contents(atPath: selected.authFileURL.path) == sourceData {
                 try? healedManagedData.write(to: selected.authFileURL, options: .atomic)
@@ -992,7 +998,23 @@ final class ProviderActivationManager: ObservableObject {
 
     // MARK: Shared helpers
 
-    private func writeAuthFileWithBackup(targetDir: String, targetPath: String, data: Data, fm: FileManager) throws {
+    static func validateNativeCodexWriteTargets(
+        targetDir: String,
+        targetPath: String,
+        homeDirectory: String? = nil
+    ) throws {
+        for candidate in [targetDir, targetPath, "\(targetPath).bak"] {
+            if CodexCredentialPolicy.isLegacyCPAArchivePath(candidate, homeDirectory: homeDirectory) {
+                throw ProviderError(
+                    "read_only_archive",
+                    "Legacy CPA archive credentials are read-only while managed CPA is paused."
+                )
+            }
+        }
+    }
+
+    func writeAuthFileWithBackup(targetDir: String, targetPath: String, data: Data, fm: FileManager, homeDirectory: String? = nil) throws {
+        try Self.validateNativeCodexWriteTargets(targetDir: targetDir, targetPath: targetPath, homeDirectory: homeDirectory)
         if !fm.fileExists(atPath: targetDir) {
             try fm.createDirectory(atPath: targetDir, withIntermediateDirectories: true)
         }

@@ -1,4 +1,5 @@
 // Exact manager flows with fake app/auth boundaries; real switcher storage tests use a temporary home.
+import CryptoKit
 import Foundation
 import SQLite3
 import AppKit
@@ -116,6 +117,7 @@ final class ProviderActivationManager: ObservableObject {
     // PRODUCTION_CODEX_RESTART
     // PRODUCTION_AGY_RESTART
     // PRODUCTION_AGY_ACTIVATE
+    // PRODUCTION_CODEX_WRITE_BOUNDARY
 }
 enum ProductionCodexStorageParser {
     // PRODUCTION_CODEX_KEYRING
@@ -371,6 +373,155 @@ struct NativeToggleFixture: View {
               && coordFix.calls[0] == (true, true)
               && coordFix.calls[1] == (false, false),
               "Queued manual follow-up refresh kept automatic=true: \(coordFix.calls)")
+
+        // [§47] Native Codex switch/restart write boundary: reject archive dir/auth/bak before restore/write & preserve ordinary switch/restart
+        do {
+            let codexSwitchHome = home.appendingPathComponent("codex-write-boundary-\(UUID().uuidString)")
+            let fm = FileManager.default
+            let archiveDir = codexSwitchHome.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+            let archiveNested = archiveDir.appendingPathComponent("nested", isDirectory: true)
+            let ordinaryDir = codexSwitchHome.appendingPathComponent(".codex", isDirectory: true)
+            try fm.createDirectory(at: archiveNested, withIntermediateDirectories: true)
+            try fm.createDirectory(at: ordinaryDir, withIntermediateDirectories: true)
+
+            func codexJWT(account: String, user: String, jti: String) throws -> String {
+                let payload: [String: Any] = [
+                    "jti": jti, "iat": 1_760_000_000, "exp": 2_000_000_000,
+                    "https://api.openai.com/auth": ["chatgpt_account_id": account, "chatgpt_user_id": user]
+                ]
+                let b64 = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]).base64EncodedString()
+                    .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+                return "e30.\(b64).fixture"
+            }
+            func codexNativeAuthData(account: String, user: String, jti: String) throws -> Data {
+                let tok = try codexJWT(account: account, user: user, jti: jti)
+                return try JSONSerialization.data(withJSONObject: [
+                    "auth_mode": "chatgpt",
+                    "tokens": ["account_id": account, "id_token": tok, "access_token": tok, "refresh_token": "rt-\(jti)"],
+                    "last_refresh": "2026-11-20T12:00:00Z"
+                ], options: [.sortedKeys])
+            }
+            func recursiveManifest(at root: URL) throws -> [String] {
+                let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+                guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: []) else { return [] }
+                var entries: [String] = []
+                for case let item as URL in enumerator {
+                    let vals = try item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                    let rel = item.resolvingSymlinksInPath().standardizedFileURL.path.replacingOccurrences(of: resolvedRoot.path + "/", with: "")
+                    if vals.isSymbolicLink == true {
+                        let dest = (try? fm.destinationOfSymbolicLink(atPath: item.path)) ?? ""
+                        entries.append("L:\(rel)->\(dest)")
+                        enumerator.skipDescendants()
+                    } else if vals.isRegularFile == true {
+                        let d = try Data(contentsOf: item)
+                        let sha = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+                        entries.append("F:\(rel):\(d.count):\(sha)")
+                    }
+                }
+                return entries.sorted()
+            }
+
+            let archiveSeed = archiveDir.appendingPathComponent("aiusage-codex-1.json")
+            let archiveStale = archiveNested.appendingPathComponent("stale.json")
+            let archiveLock = archiveDir.appendingPathComponent("preexisting.lock")
+            try codexNativeAuthData(account: "ws-a", user: "u-a", jti: "arch-1").write(to: archiveSeed)
+            try codexNativeAuthData(account: "ws-b", user: "u-b", jti: "arch-2").write(to: archiveStale)
+            try Data("keep-lock".utf8).write(to: archiveLock)
+            let manifestBefore = try recursiveManifest(at: archiveDir)
+
+            let symlinkDir = codexSwitchHome.appendingPathComponent("alias-codex-dir")
+            try fm.createSymbolicLink(at: symlinkDir, withDestinationURL: archiveDir)
+            let symlinkTargetParent = codexSwitchHome.appendingPathComponent("codex-file-alias", isDirectory: true)
+            let symlinkBakParent = codexSwitchHome.appendingPathComponent("codex-bak-alias", isDirectory: true)
+            try fm.createDirectory(at: symlinkTargetParent, withIntermediateDirectories: true)
+            try fm.createDirectory(at: symlinkBakParent, withIntermediateDirectories: true)
+            let symlinkAuthTarget = symlinkTargetParent.appendingPathComponent("auth.json")
+            let symlinkBakDirTarget = symlinkBakParent.appendingPathComponent("auth.json")
+            try fm.createSymbolicLink(at: symlinkAuthTarget, withDestinationURL: archiveSeed)
+            try fm.createSymbolicLink(at: symlinkBakParent.appendingPathComponent("auth.json.bak"), withDestinationURL: archiveStale)
+
+            let accountAData = try codexNativeAuthData(account: "ws-a", user: "u-a", jti: "acct-a")
+            let accountBData = try codexNativeAuthData(account: "ws-b", user: "u-b", jti: "acct-b1")
+            let accountBRefreshedData = try codexNativeAuthData(account: "ws-b", user: "u-b", jti: "acct-b2")
+
+            for (dir, target) in [
+                (archiveDir.path, archiveSeed.path),
+                (symlinkDir.path, symlinkDir.appendingPathComponent("auth.json").path),
+                (symlinkTargetParent.path, symlinkAuthTarget.path),
+                (symlinkBakParent.path, symlinkBakDirTarget.path)
+            ] {
+                var didRestore = false
+                var preCheckCode: String?
+                do {
+                    try ProviderActivationManager.validateNativeCodexWriteTargets(
+                        targetDir: dir,
+                        targetPath: target,
+                        homeDirectory: codexSwitchHome.path
+                    )
+                    didRestore = true
+                } catch let err as ProviderError {
+                    preCheckCode = err.code
+                }
+                check(preCheckCode == "read_only_archive" && !didRestore,
+                      "[§47] native archive destination guard must reject \(target) before restore")
+
+                var writeCode: String?
+                do {
+                    try manager.writeAuthFileWithBackup(
+                        targetDir: dir,
+                        targetPath: target,
+                        data: accountBData,
+                        fm: fm,
+                        homeDirectory: codexSwitchHome.path
+                    )
+                } catch let err as ProviderError {
+                    writeCode = err.code
+                }
+                check(writeCode == "read_only_archive",
+                      "[§47] writeAuthFileWithBackup must reject archive-backed destination/backup \(target)")
+            }
+
+            // Positive ordinary switch & restart reapply outside the archive
+            let ordinaryAuth = ordinaryDir.appendingPathComponent("auth.json")
+            let ordinaryBak = ordinaryDir.appendingPathComponent("auth.json.bak")
+            try accountAData.write(to: ordinaryAuth)
+            try ProviderActivationManager.validateNativeCodexWriteTargets(
+                targetDir: ordinaryDir.path,
+                targetPath: ordinaryAuth.path,
+                homeDirectory: codexSwitchHome.path
+            )
+            try manager.writeAuthFileWithBackup(
+                targetDir: ordinaryDir.path,
+                targetPath: ordinaryAuth.path,
+                data: accountBData,
+                fm: fm,
+                homeDirectory: codexSwitchHome.path
+            )
+            check(fm.contents(atPath: ordinaryAuth.path) == accountBData
+                  && fm.contents(atPath: ordinaryBak.path) == accountAData,
+                  "[§47] ordinary Codex switch must write target auth.json and preserve outgoing auth.json.bak")
+
+            try ProviderActivationManager.validateNativeCodexWriteTargets(
+                targetDir: ordinaryDir.path,
+                targetPath: ordinaryAuth.path,
+                homeDirectory: codexSwitchHome.path
+            )
+            try manager.writeAuthFileWithBackup(
+                targetDir: ordinaryDir.path,
+                targetPath: ordinaryAuth.path,
+                data: accountBRefreshedData,
+                fm: fm,
+                homeDirectory: codexSwitchHome.path
+            )
+            check(fm.contents(atPath: ordinaryAuth.path) == accountBRefreshedData
+                  && fm.contents(atPath: ordinaryBak.path) == accountAData,
+                  "[§47] ordinary Codex restart reapply must update auth.json while preserving foreign outgoing auth.json.bak")
+
+            let manifestAfter = try recursiveManifest(at: archiveDir)
+            check(manifestAfter == manifestBefore && fm.fileExists(atPath: archiveLock.path),
+                  "[§47] archive manifest & preexisting.lock must remain unchanged across native guard tests and ordinary switch/restart")
+        }
+
         print("Safe switch regression: \(assertions) assertions PASS")
     }
 }

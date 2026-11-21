@@ -1592,6 +1592,24 @@ public actor ProviderEngine {
         )
     }
 
+    private func requiresAntigravityProjectMatch(for credential: AccountCredential) -> Bool {
+        guard let targetEmail = normalizedCredentialEmail(for: credential) else {
+            return true
+        }
+        var matchingCount = 0
+        for candidate in credentialStore.loadCredentials(for: "antigravity") {
+            guard isCredentialEligibleForDispatch(providerId: "antigravity", credential: candidate),
+                  normalizedCredentialEmail(for: candidate) == targetEmail else {
+                continue
+            }
+            matchingCount += 1
+            if matchingCount > 1 {
+                return true
+            }
+        }
+        return false
+    }
+
     private func performCredentialFetch(
         credentialProvider: any CredentialAcceptingProvider,
         credential: AccountCredential,
@@ -1600,9 +1618,14 @@ public actor ProviderEngine {
         localOnly: Bool = false
     ) async throws -> ProviderUsage {
         var usage: ProviderUsage
-        if localOnly, let antigravityProvider = credentialProvider as? AntigravityProvider {
+        if let antigravityProvider = credentialProvider as? AntigravityProvider {
+            let requireProjectMatch = requiresAntigravityProjectMatch(for: credential)
             usage = try await withTimeout(seconds: Self.timeoutSeconds(for: credentialProvider)) {
-                try await antigravityProvider.fetchUsage(with: credential, localOnly: true)
+                try await antigravityProvider.fetchUsage(
+                    with: credential,
+                    localOnly: localOnly,
+                    requireProjectMatch: requireProjectMatch
+                )
             }
         } else if credentialProvider is CodexProvider {
             usage = try await credentialProvider.fetchUsage(with: credential)

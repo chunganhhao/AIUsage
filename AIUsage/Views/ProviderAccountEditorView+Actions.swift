@@ -25,7 +25,7 @@ extension ProviderAccountEditorView {
 
     /// 本机已有的登录，未连接的排在前面；已在同步的也列出来，而不是悄悄隐藏。
     func discoverSessions() -> [DetectedSession] {
-        let monitored = ProviderAuthManager.monitoredSessions(for: providerId)
+        let monitored = ProviderAuthManager.monitoredSessions(for: providerId, includeHidden: false)
         let candidates = ProviderAuthManager.deduplicated(
             ProviderAuthManager.discoverCandidates(for: providerId)
                 + ProviderAuthManager.savedAPIKeyCandidates(for: providerId)
@@ -77,7 +77,10 @@ extension ProviderAccountEditorView {
         case .apiKey:
             showKeyEntry = true
         case .manual:
-            Task { await detect() }
+            Task {
+                await detect()
+                _ = await refreshCoordinator.fetchSingleProvider(providerId)
+            }
         }
     }
 

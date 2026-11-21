@@ -62,15 +62,51 @@ final class AccountStore: ObservableObject {
             ?? credentialId.map { "\(providerId):cred:\($0)".lowercased() }
         let effectiveDisplayName = displayName?.nilIfBlank ?? credentialSnapshot?.displayName
         let requiresCredentialBoundIdentity = AccountIdentityPolicy.isMultiWorkspace(providerId)
+        let isAntigravity = providerId == "antigravity"
+        let incomingCredential = credentialId.flatMap {
+            AccountCredentialStore.shared.loadCredential(providerId: providerId, credentialId: $0)
+        }
         let resolvedSourcePath = sourceFilePath?.nilIfBlank
-            ?? credentialId.flatMap {
-                AccountCredentialStore.shared.loadCredential(providerId: providerId, credentialId: $0)
-            }.flatMap(AccountIdentityPolicy.credentialAuthFilePath)
+            ?? incomingCredential.flatMap(AccountIdentityPolicy.credentialAuthFilePath)
         let incomingIdentity = CodexAccountIdentity(
             accountId: normalizedAccountId, userId: credentialSnapshot?.workspaceUserId, email: effectiveEmail
         )
+        let antigravityCredentialsById: [String: AccountCredential] = {
+            guard isAntigravity else { return [:] }
+            return Dictionary(
+                AccountCredentialStore.shared.loadCredentials(for: providerId).map {
+                    ($0.id.lowercased(), $0)
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
+        }()
+        let incomingProjectId: String? = {
+            guard isAntigravity else { return nil }
+            if let normalizedAccountId, !normalizedAccountId.contains("@") {
+                return normalizedAccountId
+            }
+            return incomingCredential.flatMap(AccountIdentityPolicy.antigravityProjectId)
+        }()
+        func antigravityProjectId(for row: StoredProviderAccount) -> String? {
+            if let rowAccountId = row.normalizedAccountId, !rowAccountId.contains("@") {
+                return rowAccountId
+            }
+            guard let referencedCredId = row.credentialId?.nilIfBlank
+                ?? row.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId),
+                let cred = antigravityCredentialsById[referencedCredId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] else {
+                return nil
+            }
+            return AccountIdentityPolicy.antigravityProjectId(for: cred)
+        }
+        func antigravityProjectsCompatible(with row: StoredProviderAccount) -> Bool {
+            guard let incomingProjectId,
+                  let existingProjectId = antigravityProjectId(for: row) else {
+                return true
+            }
+            return existingProjectId == incomingProjectId
+        }
 
-        if let index = accountRegistry.firstIndex(where: {
+        let exactMatchIndex = accountRegistry.firstIndex(where: {
             guard $0.providerId == providerId else { return false }
             if providerId == "codex" {
                 let storedIdentity = AccountIdentityPolicy.codexIdentity(for: $0)
@@ -88,12 +124,7 @@ final class AccountStore: ObservableObject {
                     return true
                 }
                 // CPA→订阅会 copy 到 AuthImports；墓碑常记着 CPA 原路径，用 metadata.sourcePath 对齐。
-                if let credentialId,
-                   let cred = AccountCredentialStore.shared.loadCredential(
-                    providerId: providerId,
-                    credentialId: credentialId
-                   ),
-                   let metaSource = cred.metadata["sourcePath"],
+                if let metaSource = incomingCredential?.metadata["sourcePath"],
                    AccountIdentityPolicy.sourceFilePathsMatch($0.sourceFilePath, metaSource) {
                     return true
                 }
@@ -105,15 +136,35 @@ final class AccountStore: ObservableObject {
                 return false
             }
             return $0.normalizedEmail == normalizedLookup
-        }) {
+        })
+        let matchedIndex: Int? = exactMatchIndex ?? {
+            guard isAntigravity else { return nil }
+            return accountRegistry.firstIndex(where: {
+                guard $0.providerId == providerId,
+                      !$0.isPermanentlyRemoved,
+                      $0.normalizedEmail == normalizedLookup,
+                      antigravityProjectsCompatible(with: $0) else { return false }
+                let referencedCredId = $0.credentialId?.nilIfBlank
+                    ?? $0.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId)
+                guard let referencedCredId else { return true }
+                return antigravityCredentialsById[referencedCredId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()] == nil
+            })
+        }()
+
+        let targetRecordId: String
+        if let index = matchedIndex {
             let existing = accountRegistry[index]
+            targetRecordId = existing.id
+            let updatedAccountId = isAntigravity
+                ? (incomingProjectId ?? antigravityProjectId(for: existing) ?? normalizedAccountId ?? existing.accountId)
+                : (normalizedAccountId ?? existing.accountId)
             accountRegistry[index] = StoredProviderAccount(
                 id: existing.id,
                 providerId: existing.providerId,
                 email: effectiveEmail,
                 displayName: effectiveDisplayName ?? existing.displayName,
                 note: note?.nilIfBlank ?? existing.note,
-                accountId: normalizedAccountId ?? existing.accountId,
+                accountId: updatedAccountId,
                 providerResultId: normalizedProviderResultId ?? existing.providerResultId,
                 credentialId: credentialId ?? existing.credentialId,
                 createdAt: existing.createdAt,
@@ -124,14 +175,19 @@ final class AccountStore: ObservableObject {
                 workspaceUserId: credentialSnapshot?.workspaceUserId ?? existing.workspaceUserId
             )
         } else {
+            let createdId = UUID().uuidString
+            targetRecordId = createdId
+            let appendedAccountId = isAntigravity
+                ? (incomingProjectId ?? normalizedAccountId)
+                : normalizedAccountId
             accountRegistry.append(
                 StoredProviderAccount(
-                    id: UUID().uuidString,
+                    id: createdId,
                     providerId: providerId,
                     email: effectiveEmail,
                     displayName: effectiveDisplayName,
                     note: note?.nilIfBlank,
-                    accountId: normalizedAccountId,
+                    accountId: appendedAccountId,
                     providerResultId: normalizedProviderResultId,
                     credentialId: credentialId,
                     createdAt: now,
@@ -142,6 +198,26 @@ final class AccountStore: ObservableObject {
                     workspaceUserId: credentialSnapshot?.workspaceUserId
                 )
             )
+        }
+
+        if isAntigravity {
+            let normalizedCredentialId = credentialId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank
+            accountRegistry.removeAll { row in
+                guard row.id != targetRecordId,
+                      row.providerId == providerId,
+                      row.isHidden,
+                      !row.isPermanentlyRemoved,
+                      row.normalizedEmail == normalizedLookup,
+                      antigravityProjectsCompatible(with: row) else { return false }
+                let referencedCredId = (row.credentialId?.nilIfBlank
+                    ?? row.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId))?
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let referencedCredId, !referencedCredId.isEmpty else { return true }
+                if let normalizedCredentialId, referencedCredId.lowercased() == normalizedCredentialId {
+                    return true
+                }
+                return antigravityCredentialsById[referencedCredId.lowercased()] == nil
+            }
         }
 
         _ = normalizeAccountRegistryAgainstCredentials()
@@ -193,6 +269,10 @@ final class AccountStore: ObservableObject {
         // Codex / Antigravity：accountId 必须是 workspace/project 原生 id。
         // accountLogin 常是 user-xxx，写进 registry 会把墓碑和去重搞乱（Free/Business 互挡）。
         let accountId: String? = {
+            if providerId == "antigravity" {
+                return (usage.extra["projectId"]?.value as? String)?.nilIfBlank
+                    ?? usage.usageAccountId?.nilIfBlank.flatMap { $0.contains("@") ? nil : $0 }
+            }
             if let usageAccountId = usage.usageAccountId?.nilIfBlank {
                 return usageAccountId
             }
@@ -262,6 +342,15 @@ final class AccountStore: ObservableObject {
             )
         }
 
+        let resolvedAccountId = AccountIdentityPolicy.preferredAccountId(for: enrichedCredential) ?? accountId
+        if providerId == "antigravity" {
+            if let resolvedAccountId {
+                enrichedCredential.metadata["accountId"] = resolvedAccountId
+            } else if enrichedCredential.metadata["accountId"]?.contains("@") == true {
+                enrichedCredential.metadata.removeValue(forKey: "accountId")
+            }
+        }
+
         let credentialStore = AccountCredentialStore.shared
         try credentialStore.saveCredential(enrichedCredential)
         let deduplicationPlan = credentialStore.planCredentialDeduplication(for: providerId)
@@ -299,7 +388,7 @@ final class AccountStore: ObservableObject {
             email: accountHandle,
             displayName: displayName,
             note: note,
-            accountId: accountId,
+            accountId: AccountIdentityPolicy.preferredAccountId(for: enrichedCredential) ?? resolvedAccountId,
             credentialId: enrichedCredential.id,
             providerResultId: "\(providerId):cred:\(enrichedCredential.id)",
             sourceFilePath: AccountIdentityPolicy.credentialAuthFilePath(enrichedCredential),
@@ -363,20 +452,31 @@ final class AccountStore: ObservableObject {
     func excludedEngineAccountFilters() -> (credentialIDs: Set<String>, codexNativeKeys: Set<String>) {
         var credentialIDs = Set<String>()
         var codexNativeKeys = Set<String>()
-        for account in accountRegistry where account.isHidden || account.isPermanentlyRemoved {
-            if let credId = account.credentialId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(), !credId.isEmpty {
-                credentialIDs.insert(credId)
-            }
-            if let resultCredId = account.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId)?
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-               !resultCredId.isEmpty {
-                credentialIDs.insert(resultCredId)
+        var visibleCredentialIDs = Set<String>()
+        var visibleCodexNativeKeys = Set<String>()
+        for account in accountRegistry {
+            let isExcluded = account.isHidden || account.isPermanentlyRemoved
+            let targetCredIDs = [
+                account.credentialId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
+                account.providerResultId.flatMap(AccountIdentityPolicy.extractCredentialId)?
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            ].compactMap { $0 }.filter { !$0.isEmpty }
+            if isExcluded {
+                credentialIDs.formUnion(targetCredIDs)
+            } else {
+                visibleCredentialIDs.formUnion(targetCredIDs)
             }
             if account.providerId == "codex",
                let nativeKey = AccountIdentityPolicy.codexIdentity(for: account).nativeKey?.lowercased() {
-                codexNativeKeys.insert(nativeKey)
+                if isExcluded {
+                    codexNativeKeys.insert(nativeKey)
+                } else {
+                    visibleCodexNativeKeys.insert(nativeKey)
+                }
             }
         }
+        credentialIDs.subtract(visibleCredentialIDs)
+        codexNativeKeys.subtract(visibleCodexNativeKeys)
         return (credentialIDs, codexNativeKeys)
     }
 

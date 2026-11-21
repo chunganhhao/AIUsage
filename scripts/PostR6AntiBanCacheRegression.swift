@@ -1,6 +1,8 @@
+import CryptoKit
 import Darwin
 import Foundation
 import Network
+import SQLite3
 @testable import QuotaBackend
 @testable import QuotaServerCore
 
@@ -281,24 +283,127 @@ struct PostR6AntiBanCacheRegression {
                         && StubURLProtocol.requests.isEmpty,
                       "[A1 + §28] single-card fetchForCredential uses local IDE RPC only with 0 Google HTTPS calls")
 
-            // [§30.1] Default production AntigravityProvider (including NSHomeDirectory()) has live IDE RPC disabled
-            let defaultProdProvider = AntigravityProvider()
+            // [§30.1 + §55-P1] Production AntigravityProvider disables default IDE loopback RPC even on NSHomeDirectory() (0 Google HTTPS).
             let realHomeProdProvider = AntigravityProvider(homeDirectory: NSHomeDirectory())
-            try check(defaultProdProvider.effectiveLocalQuotaReader == nil && realHomeProdProvider.effectiveLocalQuotaReader == nil,
-                      "[§30.1] default production AntigravityProvider disables private IDE RPC even for NSHomeDirectory()")
-            for modeLocalOnly in [true, false] {
-                var prodCode: String?
-                do {
-                    _ = try await realHomeProdProvider.fetchUsage(with: cred0, localOnly: modeLocalOnly)
-                } catch let err as ProviderError {
-                    prodCode = err.code
+            let isolatedProdProvider = AntigravityProvider(homeDirectory: scratchRoot.path)
+            let explicitNilProdProvider = AntigravityProvider(homeDirectory: NSHomeDirectory(), localQuotaReader: nil)
+            try check(realHomeProdProvider.effectiveLocalQuotaReader == nil
+                        && isolatedProdProvider.effectiveLocalQuotaReader == nil
+                        && explicitNilProdProvider.effectiveLocalQuotaReader == nil,
+                      "[§30.1 + §55-P1] AntigravityProvider disables default IDE RPC on real and isolated homes unless an authorized reader is injected")
+            for disabledProvider in [realHomeProdProvider, isolatedProdProvider, explicitNilProdProvider] {
+                for modeLocalOnly in [true, false] {
+                    var prodCode: String?
+                    do {
+                        _ = try await disabledProvider.fetchUsage(with: cred0, localOnly: modeLocalOnly)
+                    } catch let err as ProviderError {
+                        prodCode = err.code
+                    }
+                    try check(prodCode == "local_only_unavailable",
+                              "[§30.1 + §55-P1] disabled AntigravityProvider fails closed locally (localOnly=\(modeLocalOnly))")
                 }
-                try check(prodCode == "local_only_unavailable",
-                          "[§30.1] default production AntigravityProvider fails closed locally (localOnly=\(modeLocalOnly))")
             }
+
+            // [§55-P2] Multi-project credentials sharing an active email require verified project match and preserve existing snapshots when unbound.
+            let multiHome = scratchRoot.appendingPathComponent("agy-multi-project-55p2", isDirectory: true)
+            let multiAuthA = multiHome.appendingPathComponent("creds/agy-proj-a.json")
+            let multiAuthB = multiHome.appendingPathComponent("creds/agy-proj-b.json")
+            try writeAGYAuth(to: multiAuthA, email: "active@example.invalid", accessToken: "tok-a", refreshToken: "ref-a", projectId: "proj-0")
+            try writeAGYAuth(to: multiAuthB, email: "active@example.invalid", accessToken: "tok-b", refreshToken: "ref-b", projectId: "proj-sibling")
+            let multiCredA = AccountCredential(id: "agy-multi-a", providerId: "antigravity", accountLabel: "active@example.invalid", authMethod: .authFile, credential: multiAuthA.path, metadata: ["projectId": "proj-0"])
+            let multiCredB = AccountCredential(id: "agy-multi-b", providerId: "antigravity", accountLabel: "active@example.invalid", authMethod: .authFile, credential: multiAuthB.path, metadata: ["projectId": "proj-sibling"])
+            let multiCredStore = AccountCredentialStore(readVaultData: { nil }, writeVaultData: { _ in })
+            try multiCredStore.saveCredential(multiCredA)
+            try multiCredStore.saveCredential(multiCredB)
+            let multiBaseProvider = AntigravityProvider(homeDirectory: multiHome.path)
+            for (cred, proj, pct, ts) in [
+                (multiCredA, "proj-0", 80.0, "2026-11-19T10:00:00Z"),
+                (multiCredB, "proj-sibling", 35.0, "2026-11-19T10:05:00Z")
+            ] {
+                var u = ProviderUsage(
+                    provider: "antigravity",
+                    label: "Antigravity",
+                    accountId: "active@example.invalid",
+                    extra: [
+                        "projectId": AnyCodable(proj),
+                        "trackedModels": AnyCodable([AnyCodable(["label": AnyCodable("Gemini"), "remainingPercent": AnyCodable(pct)])])
+                    ]
+                )
+                u.fetchedAt = ts
+                u.accountEmail = "active@example.invalid"
+                var s = UsageNormalizer.normalize(provider: multiBaseProvider, usage: u)
+                s.id = "antigravity:cred:\(cred.id)"
+                s.providerId = "antigravity"
+                s.accountId = "active@example.invalid"
+                s.accountLabel = "active@example.invalid"
+                s.fetchedAt = ts
+                s.remainingPercent = pct
+                let r = ProviderResult(id: "antigravity:cred:\(cred.id)", providerId: "antigravity", accountId: "active@example.invalid", ok: true, usage: u, summary: s)
+                try check(QuotaSnapshotStore.store(homeDirectory: multiHome.path).save(result: r, credential: cred),
+                          "[§55-P2] saved initial snapshot for \(proj)")
+            }
+
+            let unboundEngine55 = ProviderEngine(
+                credentialStore: multiCredStore,
+                providersOverride: [AntigravityProvider(homeDirectory: multiHome.path, localQuotaReader: localReader)],
+                homeDirectory: multiHome.path,
+                now: { baseClock.now() }
+            )
+            await unboundEngine55.hydratePersistedSnapshotsIfNeeded()
+            let unboundResults55 = await unboundEngine55.fetchAll(ids: ["antigravity"], backgroundAutomatic: false).providers
+            let unboundA = unboundResults55.first(where: { $0.id == "antigravity:cred:agy-multi-a" })
+            let unboundB = unboundResults55.first(where: { $0.id == "antigravity:cred:agy-multi-b" })
+            try check(unboundA?.summary?.remainingPercent == 80 && unboundA?.summary?.fetchedAt == "2026-11-19T10:00:00Z"
+                        && unboundB?.summary?.remainingPercent == 35 && unboundB?.summary?.fetchedAt == "2026-11-19T10:05:00Z"
+                        && StubURLProtocol.requests.isEmpty,
+                      "[§55-P2] unbound email-only IDE sample preserves existing project snapshots when multiple projects share email")
+
+            let siblingScopedReader = AntigravityLocalQuotaReader(
+                listProcesses: { [.init(pid: 999, csrfToken: "csrf-secret")] },
+                listPorts: { _ in [12345] },
+                callRPC: { _, endpoint, _, _ in
+                    if endpoint.contains("GetUserStatus") {
+                        return [
+                            "userStatus": [
+                                "email": "active@example.invalid",
+                                "projectId": "proj-sibling",
+                                "userTier": ["id": "pro", "name": "Pro"]
+                            ]
+                        ]
+                    }
+                    if endpoint.contains("RetrieveUserQuotaSummary") {
+                        return [
+                            "groups": [[
+                                "displayName": "Gemini 2.5 Pro",
+                                "buckets": [[
+                                    "bucketId": "gemini-2.5-pro",
+                                    "remainingFraction": 0.9,
+                                    "resetTime": "2099-01-01T00:00:00Z"
+                                ]]
+                            ]]
+                        ]
+                    }
+                    return nil
+                }
+            )
+            let scopedEngine55 = ProviderEngine(
+                credentialStore: multiCredStore,
+                providersOverride: [AntigravityProvider(homeDirectory: multiHome.path, localQuotaReader: siblingScopedReader)],
+                homeDirectory: multiHome.path,
+                now: { baseClock.now() }
+            )
+            await scopedEngine55.hydratePersistedSnapshotsIfNeeded()
+            let scopedResults55 = await scopedEngine55.fetchAll(ids: ["antigravity"], backgroundAutomatic: false).providers
+            let scopedA = scopedResults55.first(where: { $0.id == "antigravity:cred:agy-multi-a" })
+            let scopedB = scopedResults55.first(where: { $0.id == "antigravity:cred:agy-multi-b" })
+            try check(scopedA?.summary?.remainingPercent == 80 && scopedA?.summary?.fetchedAt == "2026-11-19T10:00:00Z"
+                        && scopedB?.summary?.remainingPercent == 90
+                        && StubURLProtocol.requests.isEmpty,
+                      "[§55-P2] project-verified IDE sample updates only the matching project while preserving peer project snapshot")
 
             // [§32.4] Reload Saved Snapshot re-reads replaced on-disk snapshot after warm hydration with 0 HTTP calls
             let snapHome = scratchRoot.appendingPathComponent("agy-snapshot-reload-324", isDirectory: true)
+            let snapProdProvider = AntigravityProvider(homeDirectory: snapHome.path)
             try FileManager.default.createDirectory(at: snapHome, withIntermediateDirectories: true)
             let snapAuthPath = snapHome.appendingPathComponent("creds/agy0.json")
             try writeAGYAuth(to: snapAuthPath, email: "active@example.invalid", accessToken: "secret-agy-tok-0", refreshToken: "secret-agy-ref-0", projectId: "proj-0")
@@ -323,7 +428,7 @@ struct PostR6AntiBanCacheRegression {
                 )
                 usage.fetchedAt = fetchedAt
                 usage.accountEmail = "active@example.invalid"
-                var summary = UsageNormalizer.normalize(provider: realHomeProdProvider, usage: usage)
+                var summary = UsageNormalizer.normalize(provider: snapProdProvider, usage: usage)
                 summary.id = "antigravity:cred:agy-reload-0"
                 summary.providerId = "antigravity"
                 summary.accountId = "active@example.invalid"
@@ -345,7 +450,7 @@ struct PostR6AntiBanCacheRegression {
             try saveAGYDiskSnapshot(fraction: 0.80, fetchedAt: "2026-11-19T10:00:00Z")
             let snapshotFileURL = QuotaSnapshotStore.store(homeDirectory: snapHome.path).fileURL
             let olderBackupBytes = try Data(contentsOf: snapshotFileURL)
-            let reloadEngine = ProviderEngine(credentialStore: reloadCredStore, providersOverride: [realHomeProdProvider], homeDirectory: snapHome.path, now: { baseClock.now() })
+            let reloadEngine = ProviderEngine(credentialStore: reloadCredStore, providersOverride: [snapProdProvider], homeDirectory: snapHome.path, now: { baseClock.now() })
             await reloadEngine.hydratePersistedSnapshotsIfNeeded()
             let initialReload = await reloadEngine.fetchForCredential(providerId: "antigravity", credentialId: "agy-reload-0")
             try check(initialReload?.summary?.fetchedAt == "2026-11-19T10:00:00Z"
@@ -696,18 +801,28 @@ struct PostR6AntiBanCacheRegression {
             final class LocalFractionBox: @unchecked Sendable {
                 private let lock = NSLock()
                 private var fraction = 0.85
-                func set(_ next: Double) { lock.withLock { fraction = next } }
-                func get() -> Double { lock.withLock { fraction } }
+                private var projectId = "proj-alpha"
+                func set(_ next: Double, projectId: String) {
+                    lock.withLock {
+                        fraction = next
+                        self.projectId = projectId
+                    }
+                }
+                func get() -> (fraction: Double, projectId: String) {
+                    lock.withLock { (fraction, projectId) }
+                }
             }
             let localFraction = LocalFractionBox()
             let matchingLocalReader = AntigravityLocalQuotaReader(
                 listProcesses: { [.init(pid: 998, csrfToken: "csrf-b2")] },
                 listPorts: { _ in [12346] },
                 callRPC: { _, endpoint, _, _ in
+                    let state = localFraction.get()
                     if endpoint.contains("GetUserStatus") {
                         return [
                             "userStatus": [
                                 "email": "multi@example.invalid",
+                                "projectId": state.projectId,
                                 "userTier": ["id": "pro", "name": "Pro"]
                             ]
                         ]
@@ -719,7 +834,7 @@ struct PostR6AntiBanCacheRegression {
                                 "buckets": [[
                                     "bucketId": "gemini-5h",
                                     "window": "5h",
-                                    "remainingFraction": localFraction.get(),
+                                    "remainingFraction": state.fraction,
                                     "resetTime": "2099-01-01T00:00:00Z"
                                 ]]
                             ]]
@@ -736,9 +851,9 @@ struct PostR6AntiBanCacheRegression {
             StubURLProtocol.respond(codexUsageURL, body: codexUsageOK)
 
             let engine1 = ProviderEngine(credentialStore: store, providersOverride: [agyProvider, codexProvider], homeDirectory: home.path, now: { clock.now() })
-            localFraction.set(0.85)
+            localFraction.set(0.85, projectId: "proj-alpha")
             let rA = await engine1.fetchForCredential(providerId: "antigravity", credentialId: "agy-ws-a")
-            localFraction.set(0.35)
+            localFraction.set(0.35, projectId: "proj-beta")
             let rB = await engine1.fetchForCredential(providerId: "antigravity", credentialId: "agy-ws-b")
             let rC = await engine1.fetchForCredential(providerId: "codex", credentialId: "codex-ws-a")
             try check(rA?.ok == true && rB?.ok == true && rC?.ok == true, "[B2] saved snapshots for both AGY workspaces and Codex")
@@ -1092,6 +1207,355 @@ struct PostR6AntiBanCacheRegression {
             try await Task.sleep(for: .milliseconds(150))
             try check(StubURLProtocol.requests.count == reqCountBeforeHTTP,
                       "[M3] cold GET /api/dashboard & /api/provider/gemini schedule zero background fetches")
+
+            // [§45] Legacy CPA archive remains recursively read-only across Codex lock/refresh/persist/flush paths
+            do {
+                let archiveHome = home.appendingPathComponent("codex-archive-ro-\(UUID().uuidString)")
+                let archiveDir = archiveHome.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+                let nestedArchiveDir = archiveDir.appendingPathComponent("nested", isDirectory: true)
+                let outsideDir = archiveHome.appendingPathComponent("outside", isDirectory: true)
+                try FileManager.default.createDirectory(at: nestedArchiveDir, withIntermediateDirectories: true)
+                try FileManager.default.createDirectory(at: outsideDir, withIntermediateDirectories: true)
+
+                func recursiveManifest(at root: URL) throws -> [String] {
+                    let fm = FileManager.default
+                    let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+                    guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: []) else { return [] }
+                    var entries: [String] = []
+                    for case let item as URL in enumerator {
+                        let vals = try item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                        let resolvedItem = item.resolvingSymlinksInPath().standardizedFileURL
+                        let rel = resolvedItem.path.replacingOccurrences(of: resolvedRoot.path + "/", with: "")
+                        if vals.isSymbolicLink == true {
+                            let dest = (try? fm.destinationOfSymbolicLink(atPath: item.path)) ?? ""
+                            entries.append("L:\(rel)->\(dest)")
+                            enumerator.skipDescendants()
+                        } else if vals.isRegularFile == true {
+                            let d = try Data(contentsOf: item)
+                            let sha = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+                            entries.append("F:\(rel):\(d.count):\(sha)")
+                        }
+                    }
+                    return entries.sorted()
+                }
+
+                let nowEpoch = Int(Date().timeIntervalSince1970)
+                func signedJWT(jti: String, iat: Int) throws -> String {
+                    let payload: [String: Any] = [
+                        "jti": jti, "iat": iat, "exp": nowEpoch + 864_000,
+                        "https://api.openai.com/auth": ["chatgpt_account_id": "ws-arch-1", "chatgpt_user_id": "u-arch-1"]
+                    ]
+                    let encoded = try JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]).base64EncodedString()
+                        .replacingOccurrences(of: "+", with: "-").replacingOccurrences(of: "/", with: "_").replacingOccurrences(of: "=", with: "")
+                    return "e30.\(encoded).fixture"
+                }
+
+                let freshTok = try signedJWT(jti: "arch-fresh", iat: nowEpoch)
+                let staleTok = try signedJWT(jti: "arch-stale", iat: nowEpoch - 9 * 86_400)
+                let rotatedTok = try signedJWT(jti: "arch-rotated", iat: nowEpoch + 1)
+
+                let preExistingLock = archiveDir.appendingPathComponent("preexisting.lock")
+                try Data("existing-lock".utf8).write(to: preExistingLock)
+                let freshArch = archiveDir.appendingPathComponent("aiusage-codex-fresh.json")
+                let staleArch = nestedArchiveDir.appendingPathComponent("aiusage-codex-stale.json")
+                try JSONSerialization.data(withJSONObject: [
+                    "type": "codex", "account_id": "ws-arch-1", "user_id": "u-arch-1",
+                    "access_token": freshTok, "refresh_token": "r-arch-fresh",
+                    "last_refresh": SharedFormatters.iso8601String(from: Date())
+                ]).write(to: freshArch)
+                try JSONSerialization.data(withJSONObject: [
+                    "type": "codex", "account_id": "ws-arch-1", "user_id": "u-arch-1",
+                    "access_token": staleTok, "refresh_token": "r-arch-stale",
+                    "last_refresh": "2020-01-01T00:00:00Z"
+                ]).write(to: staleArch)
+
+                let outsideTarget = outsideDir.appendingPathComponent("outside-real.json")
+                try JSONSerialization.data(withJSONObject: [
+                    "type": "codex", "account_id": "ws-arch-1", "user_id": "u-arch-1",
+                    "access_token": staleTok, "id_token": staleTok, "refresh_token": "r-outside-real",
+                    "last_refresh": "2020-01-01T00:00:00Z"
+                ]).write(to: outsideTarget)
+                let outsideTargetBefore = try Data(contentsOf: outsideTarget)
+                let insideSymlinkOut = archiveDir.appendingPathComponent("inside-symlink.json")
+                let aliasFile = outsideDir.appendingPathComponent("alias-file.json")
+                let aliasDir = outsideDir.appendingPathComponent("alias-dir")
+                let aliasNestedDir = outsideDir.appendingPathComponent("alias-nested-dir")
+                let brokenHop1 = outsideDir.appendingPathComponent("broken-hop1.json")
+                let brokenHop2 = outsideDir.appendingPathComponent("broken-hop2.json")
+                try FileManager.default.createSymbolicLink(at: insideSymlinkOut, withDestinationURL: outsideTarget)
+                try FileManager.default.createSymbolicLink(at: aliasFile, withDestinationURL: freshArch)
+                try FileManager.default.createSymbolicLink(at: aliasDir, withDestinationURL: archiveDir)
+                try FileManager.default.createSymbolicLink(at: aliasNestedDir, withDestinationURL: nestedArchiveDir)
+                try FileManager.default.createSymbolicLink(atPath: brokenHop1.path, withDestinationPath: archiveDir.appendingPathComponent("nonexistent/missing.json").path)
+                try FileManager.default.createSymbolicLink(atPath: brokenHop2.path, withDestinationPath: "broken-hop1.json")
+                let dotDotAcrossSymlink = aliasNestedDir.path + "/../missing-dotdot.json"
+                let upperCaseArchive = archiveHome.appendingPathComponent("Library/Application Support/AIUsage/CLIPROXYAPI/AUTH/nested/aiusage-codex-stale.json").path
+
+                try check(CodexCredentialPolicy.isLegacyCPAArchivePath(freshArch.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(staleArch.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(aliasFile.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(aliasDir.appendingPathComponent("nested/aiusage-codex-stale.json").path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(insideSymlinkOut.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(brokenHop1.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(brokenHop2.path, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(dotDotAcrossSymlink, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath(upperCaseArchive, homeDirectory: archiveHome.path)
+                            && CodexCredentialPolicy.isLegacyCPAArchivePath("~/Library/Application Support/AIUsage/CLIProxyAPI/auth/fixture.json")
+                            && !CodexCredentialPolicy.isLegacyCPAArchivePath(outsideTarget.path, homeDirectory: archiveHome.path),
+                          "[§45] archive path detector catches direct, nested, 1/2-hop broken symlinks, dot-dot across symlink, case/tilde variants, and internal-symlink paths without blocking outside files")
+
+                let manifestBefore = try recursiveManifest(at: archiveDir)
+                let archProvider = CodexProvider(homeDirectory: archiveHome.path)
+                let archCred = AccountCredential(providerId: "codex", authMethod: .authFile, credential: freshArch.path, metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1"])
+                let oauthURL = "https://auth.openai.com/oauth/token"
+                let usageURL = "https://chatgpt.com/backend-api/wham/usage"
+                StubURLProtocol.respond(oauthURL, status: 200, body: String(decoding: try JSONSerialization.data(withJSONObject: ["access_token": rotatedTok, "refresh_token": "r-rot"]), as: UTF8.self))
+                StubURLProtocol.respond(usageURL) { req in
+                    let auth = req.headers["Authorization"] ?? ""
+                    return (auth == "Bearer \(freshTok)" || auth == "Bearer \(rotatedTok)") ? (200, #"{"plan_type":"plus"}"#) : (401, "{}")
+                }
+                let oauthBefore = StubURLProtocol.requests.filter { $0.url == oauthURL }.count
+                _ = try await archProvider.fetchUsage(with: archCred)
+                for roTarget in [staleArch, aliasFile, aliasDir.appendingPathComponent("nested/aiusage-codex-stale.json")] {
+                    let c = AccountCredential(providerId: "codex", authMethod: .authFile, credential: roTarget.path, metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1"])
+                    _ = try? await archProvider.fetchUsage(with: c)
+                }
+                let oauthAfterDirect = StubURLProtocol.requests.filter { $0.url == oauthURL }.count
+                try check(oauthAfterDirect == oauthBefore, "[§45] direct & aliased archive reads must not invoke OAuth refresh")
+
+                let loadedFresh = try archProvider.loadCredentials(from: freshArch.path)
+                let loadedOutsideTarget = try archProvider.loadCredentials(from: outsideTarget.path)
+                let mintedArch = CodexProvider.Credentials(
+                    authFile: freshArch.path, accessToken: rotatedTok, refreshToken: "r-rot", idToken: loadedFresh.idToken,
+                    accountId: "ws-arch-1", accountEmail: nil, jwtPlanType: nil, jwtUserId: "u-arch-1", needsRefresh: false, isApiKeyMode: false
+                )
+                archProvider.persistRefreshedCredentials(mintedArch, replacing: loadedFresh, to: freshArch.path)
+                archProvider.persistRefreshedCredentials(mintedArch, replacing: loadedFresh, to: aliasFile.path)
+                archProvider.persistRefreshedCredentials(mintedArch, replacing: loadedOutsideTarget, to: insideSymlinkOut.path)
+                let manifestAfterPersist = try recursiveManifest(at: archiveDir)
+                let outsideUnchanged = (try Data(contentsOf: outsideTarget)) == outsideTargetBefore
+                try check(manifestAfterPersist == manifestBefore && outsideUnchanged,
+                          "[§45] archive manifest, valid-token symlink target, and pre-existing lock stay identical after fresh/stale/alias usage & direct persist")
+
+                // Ordinary managed copy outside archive with saved sourcePath pointing to archive refreshes normally without modifying archive
+                let managedOutside = outsideDir.appendingPathComponent("managed-codex.json")
+                try JSONSerialization.data(withJSONObject: [
+                    "last_refresh": "2020-01-01T00:00:00Z",
+                    "tokens": ["account_id": "ws-arch-1", "id_token": staleTok, "access_token": staleTok, "refresh_token": "r-managed"]
+                ]).write(to: managedOutside)
+                let managedCred = AccountCredential(
+                    id: "managed-arch-src", providerId: "codex", authMethod: .authFile, credential: managedOutside.path,
+                    metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1", "sourcePath": aliasFile.path]
+                )
+                _ = try await archProvider.fetchUsage(with: managedCred)
+                let reloadedManaged = try archProvider.loadCredentials(from: managedOutside.path)
+                let manifestAfterManaged = try recursiveManifest(at: archiveDir)
+                try check(reloadedManaged.accessToken == rotatedTok
+                            && manifestAfterManaged == manifestBefore
+                            && FileManager.default.fileExists(atPath: preExistingLock.path),
+                          "[§45] ordinary managed Codex copy refreshes & saves outside archive while archive & pre-existing lock remain untouched")
+
+                // flushLiveAuthToManagedCopies + OfficialWarmupProcess.healStagedCodexAuth skip archive/aliases while healing writable outside copies
+                let liveFlushSource = outsideDir.appendingPathComponent("live-flush.json")
+                let flushOutside = outsideDir.appendingPathComponent("flush-outside.json")
+                let warmupOutside = outsideDir.appendingPathComponent("warmup-outside.json")
+                let stagedWarmupSource = outsideDir.appendingPathComponent("staged-warmup.json")
+                let flushBaselineData = try JSONSerialization.data(withJSONObject: [
+                    "last_refresh": "2020-01-01T00:00:00Z",
+                    "tokens": ["account_id": "ws-arch-1", "id_token": staleTok, "access_token": staleTok, "refresh_token": "r-flush-stale"]
+                ])
+                let flushNewerData = try JSONSerialization.data(withJSONObject: [
+                    "last_refresh": SharedFormatters.iso8601String(from: Date(timeIntervalSince1970: TimeInterval(nowEpoch + 10))),
+                    "tokens": ["account_id": "ws-arch-1", "id_token": rotatedTok, "access_token": rotatedTok, "refresh_token": "r-flush-new"]
+                ])
+                try flushNewerData.write(to: liveFlushSource)
+                try flushNewerData.write(to: stagedWarmupSource)
+                try flushBaselineData.write(to: flushOutside)
+                try flushBaselineData.write(to: warmupOutside)
+                let archStaleCred = AccountCredential(id: "arch-stale", providerId: "codex", authMethod: .authFile, credential: staleArch.path, metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1"])
+                let archAliasCred = AccountCredential(id: "arch-alias", providerId: "codex", authMethod: .authFile, credential: aliasFile.path, metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1"])
+                let flushOutCred = AccountCredential(id: "flush-out", providerId: "codex", authMethod: .authFile, credential: flushOutside.path, metadata: ["accountId": "ws-arch-1", "workspaceUserId": "u-arch-1"])
+                let flushWritten = CodexCredentialPolicy.flushLiveAuthToManagedCopies(
+                    candidatePaths: [liveFlushSource.path],
+                    excludingIdentity: CodexAccountIdentity(accountId: "other-ws", userId: "other-u"),
+                    loadCredentials: { [archStaleCred, archAliasCred, flushOutCred] },
+                    homeDirectory: archiveHome.path
+                )
+                let healResult = OfficialWarmupProcess.healStagedCodexAuth(
+                    stagedAuth: stagedWarmupSource,
+                    stagedBaselineData: flushBaselineData,
+                    destinations: [staleArch.path, aliasFile.path, insideSymlinkOut.path, warmupOutside.path],
+                    expectedIdentity: CodexAccountIdentity(accountId: "ws-arch-1", userId: "u-arch-1"),
+                    boundary: ManagedAuthImportBoundary(bundleIdentifier: "com.test", applicationSupportDirectory: outsideDir.appendingPathComponent("AppSupport")),
+                    homeURL: archiveHome
+                )
+                let reloadedFlushOut = try archProvider.loadCredentials(from: flushOutside.path)
+                let reloadedWarmupOut = try archProvider.loadCredentials(from: warmupOutside.path)
+                let manifestAfterFlushWarmup = try recursiveManifest(at: archiveDir)
+                let outsideStillUnchanged = (try Data(contentsOf: outsideTarget)) == outsideTargetBefore
+                try check(flushWritten == 1
+                            && healResult
+                            && reloadedFlushOut.accessToken == rotatedTok
+                            && reloadedWarmupOut.accessToken == rotatedTok
+                            && outsideStillUnchanged
+                            && manifestAfterFlushWarmup == manifestBefore,
+                          "[§45] flushLiveAuthToManagedCopies & healStagedCodexAuth heal outside copies only while leaving archive & symlinks untouched")
+            }
+
+            // [§49] CodexSessionProviderMigrator skips archive-backed roots, files, SQLite indexes, and symlinked -wal sidecars
+            do {
+                let fm = FileManager.default
+                func manifest(at root: URL) throws -> [String] {
+                    guard let enumerator = fm.enumerator(at: root, includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey], options: []) else { return [] }
+                    let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+                    var out: [String] = []
+                    for case let item as URL in enumerator {
+                        let vals = try item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+                        let rel = item.path.hasPrefix(prefix) ? String(item.path.dropFirst(prefix.count)) : item.path
+                        if vals.isSymbolicLink == true {
+                            out.append("L:\(rel)->\((try? fm.destinationOfSymbolicLink(atPath: item.path)) ?? "")")
+                        } else if vals.isRegularFile == true {
+                            let d = try Data(contentsOf: item)
+                            let sha = SHA256.hash(data: d).map { String(format: "%02x", $0) }.joined()
+                            out.append("F:\(rel):\(d.count):\(sha)")
+                        }
+                    }
+                    return out.sorted()
+                }
+                func writeSession(_ url: URL, id: String, provider: String) throws {
+                    try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    let line = try JSONSerialization.data(withJSONObject: [
+                        "timestamp": "2026-09-05T00:00:00.000Z",
+                        "type": "session_meta",
+                        "payload": ["id": id, "model_provider": provider]
+                    ], options: [.sortedKeys])
+                    try (line + Data("\n{\"type\":\"response_item\",\"payload\":{\"text\":\"ok\"}}\n".utf8)).write(to: url, options: .atomic)
+                }
+                func readSessionProvider(_ url: URL) throws -> String? {
+                    let raw = try String(contentsOf: url, encoding: .utf8)
+                    guard let first = raw.split(separator: "\n").first,
+                          let obj = try JSONSerialization.jsonObject(with: Data(first.utf8)) as? [String: Any],
+                          let payload = obj["payload"] as? [String: Any] else { return nil }
+                    return payload["model_provider"] as? String
+                }
+                func createDB(_ url: URL, table: String) throws {
+                    try fm.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+                    var db: OpaquePointer?
+                    defer { if let db { sqlite3_close(db) } }
+                    try check(sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK, "create sqlite db")
+                    let sql = "CREATE TABLE \(table) (id TEXT PRIMARY KEY, model_provider TEXT NOT NULL); INSERT INTO \(table) VALUES ('legacy','aiusage-proxy'),('native','openai');"
+                    try check(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, "seed sqlite db")
+                }
+                func legacyRowCount(_ url: URL, table: String) throws -> Int {
+                    var db: OpaquePointer?
+                    defer { if let db { sqlite3_close(db) } }
+                    try check(sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, "open readonly db")
+                    var stmt: OpaquePointer?
+                    defer { sqlite3_finalize(stmt) }
+                    try check(sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM \(table) WHERE model_provider = 'aiusage-proxy'", -1, &stmt, nil) == SQLITE_OK, "prepare count")
+                    try check(sqlite3_step(stmt) == SQLITE_ROW, "step count")
+                    return Int(sqlite3_column_int(stmt, 0))
+                }
+
+                let migHome = home.appendingPathComponent("codex-migrator-ro-\(UUID().uuidString)")
+                let migArchive = migHome.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+                let migArchSessions = migArchive.appendingPathComponent("archive-sessions", isDirectory: true)
+                let migArchSqlite = migArchive.appendingPathComponent("archive-sqlite", isDirectory: true)
+                try fm.createDirectory(at: migArchSessions, withIntermediateDirectories: true)
+                try fm.createDirectory(at: migArchSqlite, withIntermediateDirectories: true)
+                let migLock = migArchive.appendingPathComponent("preexisting.lock")
+                try Data("keep-lock".utf8).write(to: migLock)
+                try Data("keep-wal".utf8).write(to: migArchive.appendingPathComponent("wal-target.bin"))
+                let migArchRollout = migArchSessions.appendingPathComponent("archived-rollout.jsonl")
+                let migArchStateDB = migArchSqlite.appendingPathComponent("state_9.sqlite")
+                let migArchCatalogDB = migArchSqlite.appendingPathComponent("codex-dev.db")
+                try writeSession(migArchRollout, id: "arch-sess", provider: "aiusage-proxy")
+                try createDB(migArchStateDB, table: "threads")
+                try createDB(migArchCatalogDB, table: "local_thread_catalog")
+                let migManifestBefore = try manifest(at: migArchive)
+
+                let migCodex = migHome.appendingPathComponent(".codex", isDirectory: true)
+                let migOrdinaryRollout = migCodex.appendingPathComponent("sessions/2026/09/05/ordinary.jsonl")
+                try writeSession(migOrdinaryRollout, id: "ord-sess", provider: "aiusage-proxy")
+                try fm.createSymbolicLink(at: migCodex.appendingPathComponent("sessions/2026/09/05/aliased-leaf.jsonl"), withDestinationURL: migArchRollout)
+                try fm.createSymbolicLink(at: migCodex.appendingPathComponent("sessions/aliased-subdir"), withDestinationURL: migArchSessions)
+                try fm.createSymbolicLink(at: migCodex.appendingPathComponent("archived_sessions"), withDestinationURL: migArchSessions)
+                let migOrdinaryDB = migCodex.appendingPathComponent("state_1.sqlite")
+                let migWalDB = migCodex.appendingPathComponent("state_2.sqlite")
+                try createDB(migOrdinaryDB, table: "threads")
+                try createDB(migWalDB, table: "threads")
+                let migWalDBBefore = try Data(contentsOf: migWalDB)
+                try fm.createSymbolicLink(at: migCodex.appendingPathComponent("state_2.sqlite-wal"), withDestinationURL: migArchive.appendingPathComponent("wal-target.bin"))
+                try fm.createSymbolicLink(at: migCodex.appendingPathComponent("sqlite"), withDestinationURL: migArchSqlite)
+
+                let migReport = try CodexSessionProviderMigrator.migrate(homeDirectory: migHome.path)
+                let migWalVerifyCopy = migHome.appendingPathComponent("verify-wal-state.sqlite")
+                try fm.copyItem(at: migWalDB, to: migWalVerifyCopy)
+                let migOrdProvider = try readSessionProvider(migOrdinaryRollout)
+                let migOrdDBLegacy = try legacyRowCount(migOrdinaryDB, table: "threads")
+                let migWalDBLegacy = try legacyRowCount(migWalVerifyCopy, table: "threads")
+                let migWalUnchanged = (try Data(contentsOf: migWalDB)) == migWalDBBefore
+                let migArchProvider = try readSessionProvider(migArchRollout)
+                let migArchStateLegacy = try legacyRowCount(migArchStateDB, table: "threads")
+                let migArchCatalogLegacy = try legacyRowCount(migArchCatalogDB, table: "local_thread_catalog")
+                let migManifestAfter = try manifest(at: migArchive)
+                try check(migReport.migratedFiles == 1
+                            && migReport.migratedDatabaseRows == 1
+                            && migOrdProvider == "openai"
+                            && migOrdDBLegacy == 0
+                            && migWalUnchanged
+                            && migWalDBLegacy == 1
+                            && migArchProvider == "aiusage-proxy"
+                            && migArchStateLegacy == 1
+                            && migArchCatalogLegacy == 1
+                            && migManifestAfter == migManifestBefore
+                            && fm.fileExists(atPath: migLock.path),
+                          "[§49] CodexSessionProviderMigrator skips aliased roots/subdirs/SQLite/-wal while migrating ordinary session & index and keeping archive byte-identical (files=\(migReport.migratedFiles) db=\(migReport.migratedDatabaseRows) ord=\(migOrdProvider ?? "nil") ordDB=\(migOrdDBLegacy) walUnchanged=\(migWalUnchanged) walDB=\(migWalDBLegacy) arch=\(migArchProvider ?? "nil") archState=\(migArchStateLegacy) archCat=\(migArchCatalogLegacy) manifestEq=\(migManifestAfter == migManifestBefore) lock=\(fm.fileExists(atPath: migLock.path)))")
+
+                let migHome2 = home.appendingPathComponent("codex-migrator-whole-\(UUID().uuidString)")
+                let migArchive2 = migHome2.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+                try writeSession(migArchive2.appendingPathComponent("sessions/arch2.jsonl"), id: "arch2-sess", provider: "aiusage-proxy")
+                try createDB(migArchive2.appendingPathComponent("state_8.sqlite"), table: "threads")
+                try fm.createDirectory(at: migHome2, withIntermediateDirectories: true)
+                try fm.createSymbolicLink(at: migHome2.appendingPathComponent(".codex"), withDestinationURL: migArchive2)
+                let mig2Before = try manifest(at: migArchive2)
+                let migReport2 = try CodexSessionProviderMigrator.migrate(homeDirectory: migHome2.path)
+                let mig2After = try manifest(at: migArchive2)
+                try check(migReport2.scannedFiles == 0
+                            && migReport2.migratedFiles == 0
+                            && migReport2.migratedDatabaseRows == 0
+                            && mig2After == mig2Before,
+                          "[§49] CodexSessionProviderMigrator scans & migrates nothing when ~/.codex resolves directly into CLIProxyAPI/auth")
+
+                // [§53] Mid-scan archive-root repointing: write checks resolve fresh archiveRoots after discovery
+                let migHome3 = home.appendingPathComponent("codex-migrator-repoint-\(UUID().uuidString)")
+                let migV1 = migHome3.appendingPathComponent("archive-v1", isDirectory: true)
+                let migV2 = migHome3.appendingPathComponent("archive-v2", isDirectory: true)
+                try fm.createDirectory(at: migV1, withIntermediateDirectories: true)
+                try writeSession(migV2.appendingPathComponent("sessions/2026/09/05/race.jsonl"), id: "race-sess", provider: "aiusage-proxy")
+                try createDB(migV2.appendingPathComponent("state_8.sqlite"), table: "threads")
+                let migAuthLink = migHome3.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth")
+                try fm.createDirectory(at: migAuthLink.deletingLastPathComponent(), withIntermediateDirectories: true)
+                try fm.createSymbolicLink(at: migAuthLink, withDestinationURL: migV1)
+                try fm.createSymbolicLink(at: migHome3.appendingPathComponent(".codex"), withDestinationURL: migV2)
+                let mig3Before = try manifest(at: migV2)
+                CodexSessionProviderMigrator.afterDiscoveryHookForTesting = {
+                    let staging = migAuthLink.deletingLastPathComponent().appendingPathComponent(".swap-\(UUID().uuidString)")
+                    try? fm.createSymbolicLink(at: staging, withDestinationURL: migV2)
+                    _ = rename(staging.path, migAuthLink.path)
+                }
+                defer { CodexSessionProviderMigrator.afterDiscoveryHookForTesting = nil }
+                let migReport3 = try CodexSessionProviderMigrator.migrate(homeDirectory: migHome3.path)
+                CodexSessionProviderMigrator.afterDiscoveryHookForTesting = nil
+                let mig3After = try manifest(at: migV2)
+                let mig3JournalExists = fm.fileExists(atPath: CodexSessionProviderMigrator.archiveURL(homeDirectory: migHome3.path).path)
+                try check(migReport3.scannedFiles == 1
+                            && migReport3.migratedFiles == 0
+                            && migReport3.migratedDatabaseRows == 0
+                            && !mig3JournalExists
+                            && mig3After == mig3Before,
+                          "[§53] CodexSessionProviderMigrator write checks resolve fresh archiveRoots after discovery and block mid-scan repointed archive (scanned=\(migReport3.scannedFiles) files=\(migReport3.migratedFiles) db=\(migReport3.migratedDatabaseRows) journal=\(mig3JournalExists))")
+            }
         }
 
         print("PASS: Post-R6 MasterPlan v3 backend/HTTP/cache regression (\(assertionCount) assertions, zero real vault/network side effects)")

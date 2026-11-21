@@ -49,6 +49,8 @@ for key,marker in [
     t=t.replace('// PRODUCTION_'+key,code)
 keyring_helpers=function('    static func codexUsesKeyring(')+'\n'+function('    static func codexConfigUsesKeyring(')
 t=t.replace('// PRODUCTION_CODEX_KEYRING',keyring_helpers)
+codex_write_boundary=function('    static func validateNativeCodexWriteTargets(')+'\n'+function('    func writeAuthFileWithBackup(')
+t=t.replace('// PRODUCTION_CODEX_WRITE_BOUNDARY',codex_write_boundary)
 coord_flow='\n'.join([
     function('    func refreshAllProviders(', coord),
     function('    func stabilizedBulkRefreshProviders(\n        _ incomingProviders:', pipeline),

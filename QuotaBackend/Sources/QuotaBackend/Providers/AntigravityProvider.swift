@@ -57,7 +57,6 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     var effectiveLocalQuotaReader: AntigravityLocalQuotaReader? {
-        // shortcut: private IDE loopback RPC has no published Google authorization (§30.1), re-enable only when a documented and authorized interface is established
         localQuotaReaderOverride
     }
 
@@ -73,6 +72,14 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     public func fetchUsage(with credential: AccountCredential, localOnly: Bool) async throws -> ProviderUsage {
+        try await fetchUsage(with: credential, localOnly: localOnly, requireProjectMatch: false)
+    }
+
+    func fetchUsage(
+        with credential: AccountCredential,
+        localOnly: Bool,
+        requireProjectMatch: Bool
+    ) async throws -> ProviderUsage {
         guard credential.authMethod == .authFile || credential.authMethod == .oauth else {
             throw ProviderError("unsupported_auth_method", "Antigravity supports auth file and OAuth credentials.")
         }
@@ -82,9 +89,22 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         if let error = AntigravityAccountProtection.suspension(in: authContext.rawData) { throw error }
         let sourceURL = credential.metadata["sourcePath"].map { URL(fileURLWithPath: NSString(string: $0).expandingTildeInPath) }
         let sourceData = sourceURL.flatMap { try? Data(contentsOf: $0) }
+        let expectedProjectId = [
+            authContext.authFile.projectId,
+            credential.metadata["projectId"],
+            credential.metadata["project_id"]
+        ]
+        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+        .first(where: { !$0.isEmpty })
         let session: URLSession? = nil
         do {
-            var usage = try await fetchForAuthContext(authContext, session: session, localOnly: localOnly)
+            var usage = try await fetchForAuthContext(
+                authContext,
+                session: session,
+                localOnly: localOnly,
+                expectedProjectId: expectedProjectId,
+                requireProjectMatch: requireProjectMatch
+            )
             usage.usageAccountId = authContext.authFile.email ?? authContext.url.lastPathComponent
             if usage.accountEmail?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty != false {
                 usage.accountEmail = credential.accountLabel?.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -110,19 +130,29 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     }
 
     /// Core fetch logic for a single auth context (local Antigravity IDE RPC only; no third-party Google consumer HTTPS calls)
-    private func fetchForAuthContext(_ authContext: AuthContext, session: URLSession?, localOnly: Bool = false) async throws -> ProviderUsage {
+    private func fetchForAuthContext(
+        _ authContext: AuthContext,
+        session: URLSession?,
+        localOnly: Bool = false,
+        expectedProjectId: String? = nil,
+        requireProjectMatch: Bool = false
+    ) async throws -> ProviderUsage {
         let authFile = authContext.authFile
         _ = session
         _ = localOnly
 
         guard let localReader = effectiveLocalQuotaReader,
-              let local = await localReader.fetchMatchingQuota(expectedEmail: authFile.email) else {
+              let local = await localReader.fetchMatchingQuota(
+                expectedEmail: authFile.email,
+                expectedProjectId: expectedProjectId,
+                requireProjectMatch: requireProjectMatch
+              ) else {
             throw ProviderError(
                 "local_only_unavailable",
                 "Direct third-party Antigravity consumer API checks are disabled for policy compliance; showing local IDE session or last-known cached snapshot only."
             )
         }
-        let subscription = SubscriptionInfo(tierId: local.tierId, tierName: local.tierName, projectId: authFile.projectId)
+        let subscription = SubscriptionInfo(tierId: local.tierId, tierName: local.tierName, projectId: local.projectId ?? expectedProjectId)
         let quota = QuotaSnapshot(models: local.models, isGrouped: true)
         let transport = "loopback_rpc"
         var usage = buildUsage(

@@ -134,7 +134,8 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         )
         // 有其他副本时每次都在锁内对齐一次（不需要刷新时不发网络请求），
         // 已经分叉的副本不必等到下次刷新才修好。
-        if !creds.isApiKeyMode, !deferProactiveRefresh(creds: creds, paths: refreshPaths),
+        if !creds.isApiKeyMode, !refreshPaths.isEmpty,
+           !deferProactiveRefresh(creds: creds, paths: refreshPaths),
            creds.needsRefresh || refreshPaths.count > 1 || creds.sameSecondAlternateAccess != nil, let refreshToken = creds.refreshToken {
             do {
                 let outcome = try await refreshCredentialsOutcome(
@@ -162,7 +163,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         do {
             let result = try await read(effectiveCreds, source)
-            if !effectiveCreds.isApiKeyMode {
+            if !effectiveCreds.isApiKeyMode, !refreshPaths.isEmpty {
                 await syncValidatedCopies(
                     effectiveCreds,
                     at: refreshPaths,
@@ -177,7 +178,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             var candidateCreds = effectiveCreds
             let maxRecoveryAttempts = max(3, refreshPaths.count * 2 + 2)
 
-            if credentialFailure == nil, !effectiveCreds.isApiKeyMode {
+            if credentialFailure == nil, !effectiveCreds.isApiKeyMode, !refreshPaths.isEmpty {
                 for _ in 0..<maxRecoveryAttempts {
                     guard let refreshToken = candidateCreds.refreshToken ?? creds.refreshToken else { break }
                     let outcome: RefreshOutcome
@@ -210,7 +211,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
                     do {
                         let result = try await read(refreshed, source)
-                        if !refreshed.isApiKeyMode {
+                        if !refreshed.isApiKeyMode, !refreshPaths.isEmpty {
                             await syncValidatedCopies(
                                 refreshed,
                                 at: refreshPaths,
@@ -273,6 +274,9 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         }
 
         let expandedCredential = NSString(string: credentialPath).expandingTildeInPath
+        guard !isLegacyCPAArchivePath(expandedCredential) else {
+            throw ProviderError("read_only_archive", "Legacy CPA archive credentials are read-only while managed CPA is paused.")
+        }
         let normalizedCredential = AccountCredentialStore.normalizedAuthFilePath(expandedCredential)
         let explicitSource = stringValue(sourcePath).map { NSString(string: $0).expandingTildeInPath }
         let fallbackCandidates = [
@@ -357,12 +361,13 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         var effective = sourceCreds
         var recoveryRejectedAccess = rejectedAccess
         var recoveryRejectedRefresh = rejectedRefreshTokens
-        if !sourceCreds.isApiKeyMode, sourceCreds.needsRefresh, let rt = sourceCreds.refreshToken {
+        let writableRecoveryPaths = [expandedSource, expandedCredential].filter { !isLegacyCPAArchivePath($0) }
+        if !sourceCreds.isApiKeyMode, sourceCreds.needsRefresh, !writableRecoveryPaths.isEmpty, let rt = sourceCreds.refreshToken {
             do {
                 let outcome = try await refreshCredentialsOutcome(
                     sourceCreds,
                     refreshToken: rt,
-                    persistTo: [expandedSource, expandedCredential],
+                    persistTo: writableRecoveryPaths,
                     rejectedAccessTokens: recoveryRejectedAccess,
                     rejectedRefreshTokens: recoveryRejectedRefresh
                 )
@@ -380,22 +385,24 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         let result = try await read(effective, sourceInfo(for: URL(fileURLWithPath: expandedCredential), mode: "manual"))
         if !effective.isApiKeyMode {
             if effective.accessToken == sourceCreds.accessToken, targetData != sourceData {
-                do {
-                    guard FileManager.default.contents(atPath: expandedCredential) == targetData else {
-                        throw ProviderError("account_mismatch", "The auth file changed during recovery.")
+                if !isLegacyCPAArchivePath(expandedCredential) {
+                    do {
+                        guard FileManager.default.contents(atPath: expandedCredential) == targetData else {
+                            throw ProviderError("account_mismatch", "The auth file changed during recovery.")
+                        }
+                        let targetURL = URL(fileURLWithPath: expandedCredential)
+                        try sourceData.write(to: targetURL, options: .atomic)
+                        CredentialWriteRecorder.current?.record(url: targetURL, data: sourceData)
+                    } catch let error as ProviderError {
+                        throw error
+                    } catch {
+                        codexLog.warning("Failed to sync authoritative auth to managed copy at \(expandedCredential, privacy: .private): \(error.localizedDescription)")
                     }
-                    let targetURL = URL(fileURLWithPath: expandedCredential)
-                    try sourceData.write(to: targetURL, options: .atomic)
-                    CredentialWriteRecorder.current?.record(url: targetURL, data: sourceData)
-                } catch let error as ProviderError {
-                    throw error
-                } catch {
-                    codexLog.warning("Failed to sync authoritative auth to managed copy at \(expandedCredential, privacy: .private): \(error.localizedDescription)")
                 }
-            } else {
+            } else if !writableRecoveryPaths.isEmpty {
                 await syncValidatedCopies(
                     effective,
-                    at: [expandedSource, expandedCredential],
+                    at: writableRecoveryPaths,
                     rejectedAccessTokens: recoveryRejectedAccess,
                     rejectedRefreshTokens: recoveryRejectedRefresh
                 )
@@ -815,12 +822,13 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         rejectedAccessTokens: Set<String> = [],
         rejectedRefreshTokens: Set<String> = []
     ) async {
-        let key = Self.refreshLockKey(creds: validated, path: paths.first, refreshToken: validated.refreshToken ?? "")
+        let writablePaths = uniqueRefreshPaths(paths).filter { !isLegacyCPAArchivePath($0) }
+        guard !writablePaths.isEmpty else { return }
+        let key = Self.refreshLockKey(creds: validated, path: writablePaths.first, refreshToken: validated.refreshToken ?? "")
         _ = try? await CodexOAuthRefreshSerializer.shared.run(key: key) {
-            let lockFD = try await self.acquireRefreshFileLock(paths: paths)
+            let lockFD = try await self.acquireRefreshFileLock(paths: writablePaths)
             defer { Self.releaseRefreshFileLock(lockFD) }
-            let unique = self.uniqueRefreshPaths(paths)
-            guard let copies = try? self.sameAccountCopies(of: validated, at: unique) else { return }
+            guard let copies = try? self.sameAccountCopies(of: validated, at: writablePaths) else { return }
             self.syncStaleCopies(
                 copies,
                 to: validated,
@@ -856,7 +864,10 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         rejectedAccessTokens: Set<String>,
         rejectedRefreshTokens: Set<String>
     ) async throws -> RefreshOutcome {
-        let paths = uniqueRefreshPaths(paths)
+        let paths = uniqueRefreshPaths(paths).filter { !isLegacyCPAArchivePath($0) }
+        guard !paths.isEmpty else {
+            throw ProviderError("read_only_archive", "Legacy CPA archive credentials are read-only while managed CPA is paused.")
+        }
         let lockFD = try await acquireRefreshFileLock(paths: paths)
         defer { Self.releaseRefreshFileLock(lockFD) }
         var copies = try sameAccountCopies(of: creds, at: paths)
@@ -881,9 +892,12 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         ) {
             current = selected
         } else if copies.isEmpty,
+                  !isLegacyCPAArchivePath(creds.authFile),
                   (!rejectedAccess.contains(creds.accessToken) && !creds.needsRefresh)
                     || (!fallbackRefreshToken.isEmpty && !rejectedRefresh.contains(fallbackRefreshToken)) {
             current = creds
+        } else if copies.isEmpty, isLegacyCPAArchivePath(creds.authFile) {
+            throw ProviderError("read_only_archive", "Legacy CPA archive credentials are read-only while managed CPA is paused.")
         } else {
             throw ProviderError("refresh_token_reused", "Codex OAuth refresh token has already been used.")
         }
@@ -1027,12 +1041,19 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         ["refresh_token_reused", "refresh_token_invalid", "refresh_token_expired"].contains(error.code)
     }
 
+    private func isLegacyCPAArchivePath(_ path: String) -> Bool {
+        CodexCredentialPolicy.isLegacyCPAArchivePath(path, homeDirectory: homeDirectory)
+    }
+
     private func credentialRefreshPaths(
         credentialPath: String?,
         sourcePath: String?,
         credentialId: String,
         nativeIdentityKey: String?
     ) -> [String] {
+        if let credentialPath, isLegacyCPAArchivePath(credentialPath) {
+            return []
+        }
         let fallbackLivePaths = [
             "\(homeDirectory)/.codex/auth.json",
             "\(homeDirectory)/.codex/auth.json.bak"
@@ -1043,7 +1064,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             return NSString(string: trimmed).expandingTildeInPath
         }
         let linked = CodexLinkedCredentialCopies.paths(forCredentialId: credentialId, nativeIdentityKey: nativeIdentityKey)
-        return uniqueRefreshPaths(local + linked)
+        return uniqueRefreshPaths(local + linked).filter { !isLegacyCPAArchivePath($0) }
     }
 
     private func uniqueRefreshPaths(_ paths: [String]) -> [String] {
@@ -1059,15 +1080,17 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
     // Advisory only: clients that do not take this lock can still rotate tokens.
     private func acquireRefreshFileLock(paths: [String]) async throws -> Int32? {
-        guard !paths.isEmpty else { return nil }
+        let lockable = paths.filter { !isLegacyCPAArchivePath($0) }
+        guard !lockable.isEmpty else { return nil }
         let native = "\(homeDirectory)/.codex/auth.json"
         let nativePath = AccountCredentialStore.normalizedAuthFilePath(native)
-        let nativeIsShared = paths.contains { AccountCredentialStore.normalizedAuthFilePath($0) == nativePath }
+        let nativeIsShared = lockable.contains { AccountCredentialStore.normalizedAuthFilePath($0) == nativePath }
         // Linked copies may arrive in a different order in another process.
-        let bases = (nativeIsShared ? [native] : paths).map {
+        let bases = (nativeIsShared ? [native] : lockable).map {
             URL(fileURLWithPath: $0).resolvingSymlinksInPath().standardizedFileURL.path
         }
         let lockBase = bases.sorted()[0]
+        guard !isLegacyCPAArchivePath(lockBase) else { return nil }
         let fd = open(lockBase + ".lock", O_CREAT | O_RDWR | O_NOFOLLOW | O_CLOEXEC, 0o600)
         guard fd >= 0 else {
             throw ProviderError("refresh_lock_failed", "Cannot open the Codex credential refresh lock.")
@@ -1190,7 +1213,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
         consumedAccessToken: String? = nil,
         consumedRefreshToken: String? = nil
     ) {
-        guard !creds.isApiKeyMode, !creds.hasInternalIdentityConflict else { return }
+        guard !creds.isApiKeyMode, !creds.hasInternalIdentityConflict, !isLegacyCPAArchivePath(path) else { return }
         // sourcePath 常是共享的 ~/.codex/auth.json；写回前核对当前内容，不能覆盖后来登录的成员。
         guard let originalData = FileManager.default.contents(atPath: path),
               let disk = try? loadCredentials(from: path, data: originalData), !disk.isApiKeyMode,
@@ -1332,11 +1355,11 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             throw ProviderError("account_mismatch", "The auth file contains conflicting Codex account claims. Reconnect this account.")
         }
 
-        let refreshPaths = [authContext.url.path]
+        let refreshPaths = isLegacyCPAArchivePath(authContext.url.path) ? [] : [authContext.url.path]
         var rejectedAccessTokens = Set<String>()
         var rejectedRefreshTokens = Set<String>()
 
-        if !creds.isApiKeyMode, creds.needsRefresh,
+        if !creds.isApiKeyMode, creds.needsRefresh, !refreshPaths.isEmpty,
            !deferProactiveRefresh(creds: creds, paths: refreshPaths), let refreshToken = creds.refreshToken {
             let outcome = try await refreshCredentialsOutcome(
                 creds,
@@ -1354,7 +1377,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
         do {
             let response = try await requestUsage(creds: creds, url: usageURL)
-            if !creds.isApiKeyMode {
+            if !creds.isApiKeyMode, !refreshPaths.isEmpty {
                 await syncValidatedCopies(
                     creds,
                     at: refreshPaths,
@@ -1373,7 +1396,7 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
             postProcessUsage(&usage, fileURL: authContext.url)
             return usage
         } catch let error as ProviderError where error.code == "unauthorized" {
-            guard !creds.isApiKeyMode else { throw error }
+            guard !creds.isApiKeyMode, !refreshPaths.isEmpty else { throw error }
             var credentialFailure: ProviderError?
             rejectedAccessTokens.insert(creds.accessToken)
             var candidateCreds = creds
@@ -1411,12 +1434,14 @@ public struct CodexProvider: MultiAccountProviderFetcher, CredentialAcceptingPro
 
                 do {
                     let response = try await requestUsage(creds: refreshed, url: usageURL)
-                    await syncValidatedCopies(
-                        refreshed,
-                        at: refreshPaths,
-                        rejectedAccessTokens: rejectedAccessTokens,
-                        rejectedRefreshTokens: rejectedRefreshTokens
-                    )
+                    if !refreshPaths.isEmpty {
+                        await syncValidatedCopies(
+                            refreshed,
+                            at: refreshPaths,
+                            rejectedAccessTokens: rejectedAccessTokens,
+                            rejectedRefreshTokens: rejectedRefreshTokens
+                        )
+                    }
                     var usage = parseResponse(
                         response,
                         accountId: refreshed.accountId,

@@ -15,13 +15,45 @@ struct AntigravityLocalQuotaReader: Sendable {
         let email: String
         let tierId: String?
         let tierName: String?
+        let projectId: String?
+
+        init(
+            baseURL: URL,
+            csrfToken: String,
+            email: String,
+            tierId: String?,
+            tierName: String?,
+            projectId: String? = nil
+        ) {
+            self.baseURL = baseURL
+            self.csrfToken = csrfToken
+            self.email = email
+            self.tierId = tierId
+            self.tierName = tierName
+            self.projectId = projectId
+        }
     }
 
     struct LocalQuotaResult: Sendable {
         let email: String
         let tierId: String?
         let tierName: String?
+        let projectId: String?
         let models: [AntigravityProvider.ModelQuota]
+
+        init(
+            email: String,
+            tierId: String?,
+            tierName: String?,
+            projectId: String? = nil,
+            models: [AntigravityProvider.ModelQuota]
+        ) {
+            self.email = email
+            self.tierId = tierId
+            self.tierName = tierName
+            self.projectId = projectId
+            self.models = models
+        }
     }
 
     typealias ProcessLister = @Sendable () -> [ServerProcess]
@@ -60,6 +92,8 @@ struct AntigravityLocalQuotaReader: Sendable {
                     let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
                     guard !email.isEmpty else { continue }
                     let userTier = userStatus["userTier"] as? [String: Any]
+                    let statusProjects = Self.embeddedProjectIds(in: [status, userStatus])
+                    if Set(statusProjects.map { $0.lowercased() }).count > 1 { continue }
                     let tierId = (userTier?["id"] as? String)?
                         .trimmingCharacters(in: .whitespacesAndNewlines)
                     let tierName = (userTier?["name"] as? String)?
@@ -69,7 +103,8 @@ struct AntigravityLocalQuotaReader: Sendable {
                         csrfToken: server.csrfToken,
                         email: email,
                         tierId: tierId?.isEmpty == false ? tierId : nil,
-                        tierName: tierName?.isEmpty == false ? tierName : nil
+                        tierName: tierName?.isEmpty == false ? tierName : nil,
+                        projectId: statusProjects.first
                     )
                 }
             }
@@ -81,7 +116,11 @@ struct AntigravityLocalQuotaReader: Sendable {
         await probeActiveSession()?.email
     }
 
-    func fetchMatchingQuota(expectedEmail: String?) async -> LocalQuotaResult? {
+    func fetchMatchingQuota(
+        expectedEmail: String?,
+        expectedProjectId: String? = nil,
+        requireProjectMatch: Bool = false
+    ) async -> LocalQuotaResult? {
         guard let lhs = expectedEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !lhs.isEmpty,
               let session = await probeActiveSession(),
@@ -109,6 +148,31 @@ struct AntigravityLocalQuotaReader: Sendable {
                 return nil
             }
         }
+        let embeddedProjects = Self.embeddedProjectIds(in: [
+            session.projectId.map { ["projectId": $0] },
+            summary,
+            payload,
+            summary["userStatus"] as? [String: Any],
+            payload["userStatus"] as? [String: Any]
+        ])
+        if Set(embeddedProjects.map { $0.lowercased() }).count > 1 {
+            return nil
+        }
+        let observedProjectId = embeddedProjects.first
+        let normalizedExpectedProject = expectedProjectId?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        if let normalizedExpectedProject, !normalizedExpectedProject.isEmpty {
+            if let observedLower = observedProjectId?.lowercased(),
+               observedLower != normalizedExpectedProject {
+                return nil
+            }
+            if requireProjectMatch && observedProjectId == nil {
+                return nil
+            }
+        } else if requireProjectMatch {
+            return nil
+        }
         guard let models = AntigravityProvider.parseQuotaSummaryPayload(payload), !models.isEmpty else {
             return nil
         }
@@ -116,8 +180,24 @@ struct AntigravityLocalQuotaReader: Sendable {
             email: session.email,
             tierId: session.tierId,
             tierName: session.tierName,
+            projectId: observedProjectId,
             models: models
         )
+    }
+
+    private static func embeddedProjectIds(in dictionaries: [[String: Any]?]) -> [String] {
+        let keys = ["cloudaicompanionProject", "projectId", "project_id"]
+        var results: [String] = []
+        for dict in dictionaries {
+            guard let dict else { continue }
+            for key in keys {
+                if let raw = (dict[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !raw.isEmpty {
+                    results.append(raw)
+                }
+            }
+        }
+        return results
     }
 
     // MARK: - Process & Port Parsing

@@ -734,6 +734,9 @@ public enum OfficialWarmupProcess {
                     : (boundary.readableManagedPath(expanded) != nil)
                 guard permitted else { continue }
             }
+            if forHealing, CodexCredentialPolicy.isLegacyCPAArchivePath(expanded, homeDirectory: homeURL.path) {
+                continue
+            }
             let normalized = AccountCredentialStore.normalizedAuthFilePath(expanded)
             guard !normalized.isEmpty,
                   normalized != normalizedSource,
@@ -746,7 +749,7 @@ public enum OfficialWarmupProcess {
         return result
     }
     @discardableResult
-    private static func healStagedCodexAuth(
+    static func healStagedCodexAuth(
         stagedAuth: URL,
         stagedBaselineData: Data,
         destinations: [String],
@@ -767,6 +770,7 @@ public enum OfficialWarmupProcess {
 
         var durableSaves = 0
         for path in destinations {
+            guard !CodexCredentialPolicy.isLegacyCPAArchivePath(path, homeDirectory: homeURL.path) else { continue }
             if isManagedImportPath(path, homeURL: homeURL) {
                 guard boundary.writableManagedPath(path) != nil else { continue }
             }

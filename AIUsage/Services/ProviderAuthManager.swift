@@ -193,32 +193,6 @@ enum ProviderAuthManager {
         return discoverCandidates(for: providerId).filter { !isCandidateManaged($0, monitored: monitored) }
     }
 
-    static func monitoredSessions(for providerId: String) -> ProviderMonitoredSessionIndex {
-        let credentials = AccountCredentialStore.shared.loadCredentials(for: providerId)
-        return ProviderMonitoredSessionIndex(
-            sourceIdentifiers: Set(credentials.compactMap { credential in
-                guard sourceIdentifierIsStableIdentity(for: credential) else { return nil }
-                return credential.metadata["sourceIdentifier"]
-                    ?? credential.metadata["sourcePath"]
-                    ?? authFileSourceIdentifier(for: credential.credential, authMethod: credential.authMethod)
-            }),
-            sessionFingerprints: Set(credentials.compactMap { credential in
-                if providerId == "codex" {
-                    return CodexAccountIdentity(credential: credential).key
-                        ?? credential.metadata["sessionFingerprint"].flatMap { $0.hasPrefix("codex:") ? $0 : nil }
-                }
-                return normalizedHandle(credential.metadata["sessionFingerprint"])
-            }),
-            accountHandles: Set(credentials.compactMap { credential in
-                normalizedHandle(
-                    credential.metadata["accountHandle"]
-                        ?? credential.metadata["accountEmail"]
-                        ?? credential.accountLabel
-                )
-            })
-        )
-    }
-
     static func authenticateCandidate(
         _ candidate: ProviderAuthCandidate,
         localOnly: Bool = false,

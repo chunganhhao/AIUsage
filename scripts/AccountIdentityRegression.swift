@@ -291,6 +291,9 @@ struct AccountIdentityRegression {
         // [M1] Non-Codex (Antigravity) Pause/Hide & Delete Tombstone Isolation: preserve credentialId, survive normalize & reconcile, exact engine exclusion filters.
         try await testAntigravityHideAndTombstoneIsolation(store: store)
 
+        // [§54-AGY] Hidden Antigravity Connect-modal visibility & credential-reusing unhide without orphaned duplicates.
+        try await testAntigravityHiddenSessionReconnectAndDeduplication(store: store)
+
         print("PASS: \(assertions) account identity & OAuth assertions (production save/reconcile/hide/delete/OAuth, isolated storage)")
     }
 
@@ -396,6 +399,271 @@ struct AccountIdentityRegression {
               "[M1] tombstoned Antigravity IDE session suppresses ephemeral copy even with new UUID path")
         check(!store.hasHiddenRegistryMatch(providerId: "antigravity", normalizedEmail: "paused@example.invalid", normalizedAccountId: "proj-other", sourceFilePath: "/tmp/new-ephemeral-copy/uuid3.json"),
               "[M1] distinct projectId with same email is not suppressed by Antigravity tombstone")
+    }
+
+    @MainActor
+    static func testAntigravityHiddenSessionReconnectAndDeduplication(store: AccountStore) async throws {
+        store.accountRegistry = []
+        AccountCredentialStore.shared.credentials = []
+
+        let existingCred = AccountCredential(
+            id: "agy-hidden-1",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-hidden/hidden.json",
+            metadata: [
+                "projectId": "aicode-consumers",
+                "accountEmail": "hidden-reconnect@example.invalid",
+                "accountHandle": "hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid"
+            ]
+        )
+        try AccountCredentialStore.shared.saveCredential(existingCred)
+
+        // Include an orphaned hidden row for the same project, the hidden credential-backed row,
+        // a permanent tombstone, and an unrelated soft-hidden project row under the same email.
+        store.accountRegistry = [
+            StoredProviderAccount(
+                id: "orphan-hidden-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "aicode-consumers",
+                providerResultId: "antigravity:cred:deleted-stale-cred",
+                credentialId: nil,
+                createdAt: "2026-11-10T00:00:00Z",
+                lastSeenAt: "2026-11-10T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/stale-oauth.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "hidden-cred-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "aicode-consumers",
+                providerResultId: "antigravity:cred:agy-hidden-1",
+                credentialId: "agy-hidden-1",
+                createdAt: "2026-11-11T00:00:00Z",
+                lastSeenAt: "2026-11-11T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/agy-hidden/hidden.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "tombstone-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "tombstoned-proj",
+                providerResultId: "antigravity:cred:tombstoned-dead-cred",
+                credentialId: nil,
+                createdAt: "2026-11-09T00:00:00Z",
+                lastSeenAt: "2026-11-09T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: true,
+                sourceFilePath: "/tmp/tombstoned.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "orphan-other-proj-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "other-project",
+                providerResultId: "antigravity:cred:deleted-other-cred",
+                credentialId: nil,
+                createdAt: "2026-11-08T00:00:00Z",
+                lastSeenAt: "2026-11-08T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/other-proj.json",
+                workspaceUserId: nil
+            )
+        ]
+
+        let candidate = ProviderAuthCandidate(
+            id: "antigravity:antigravity-ide:hidden-reconnect@example.invalid",
+            providerId: "antigravity",
+            sourceIdentifier: "antigravity-ide:hidden-reconnect@example.invalid",
+            sessionFingerprint: "hidden-reconnect@example.invalid",
+            title: "hidden-reconnect@example.invalid",
+            subtitle: nil,
+            detail: "",
+            modifiedAt: Date(),
+            authMethod: .authFile,
+            credentialValue: "/tmp/new-ide-copy.json",
+            sourcePath: "/tmp/new-ide-copy.json",
+            shouldCopyFile: false,
+            identityScope: .sharedSource
+        )
+
+        check(
+            ProviderAuthManager.isCandidateManaged(
+                candidate,
+                monitored: ProviderAuthManager.monitoredSessions(for: "antigravity", includeHidden: true)
+            ),
+            "[§54-AGY] includeHidden: true keeps hidden Antigravity session suppressed in background discovery"
+        )
+        check(
+            !ProviderAuthManager.isCandidateManaged(
+                candidate,
+                monitored: ProviderAuthManager.monitoredSessions(for: "antigravity", includeHidden: false)
+            ),
+            "[§54-AGY] includeHidden: false surfaces soft-hidden Antigravity session as connectable in Connect dialog"
+        )
+
+        let incomingCred = AccountCredential(
+            id: "new-ephemeral-id",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy.json",
+            metadata: [
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        var incomingUsage = ProviderUsage(provider: "antigravity", label: "Antigravity")
+        incomingUsage.accountEmail = "hidden-reconnect@example.invalid"
+        incomingUsage.usageAccountId = "hidden-reconnect@example.invalid"
+
+        let resultId = try store.registerAuthenticatedCredential(
+            incomingCred,
+            usage: incomingUsage,
+            note: nil,
+            providerDisplayTitle: "Antigravity",
+            insertImmediateProviderData: { _, _, _, _ in },
+            ensureProviderSelected: { _ in }
+        )
+
+        check(resultId == "antigravity:cred:agy-hidden-1",
+              "[§54-AGY] reconnect from project-less IDE candidate reuses existing Antigravity credential ID")
+        let savedCred = AccountCredentialStore.shared.loadCredential(providerId: "antigravity", credentialId: "agy-hidden-1")
+        check(savedCred?.metadata["projectId"] == "aicode-consumers",
+              "[§54-AGY] reconnect preserves existing projectId metadata on reused credential")
+        let agyRows = store.accountRegistry.filter {
+            $0.providerId == "antigravity" && $0.normalizedEmail == "hidden-reconnect@example.invalid"
+        }
+        check(agyRows.contains(where: {
+                $0.id == "hidden-cred-row"
+                    && $0.credentialId == "agy-hidden-1"
+                    && $0.accountId == "aicode-consumers"
+                    && !$0.isHidden
+                    && !$0.isPermanentlyRemoved
+              })
+                && !agyRows.contains(where: { $0.id == "orphan-hidden-row" })
+                && agyRows.contains(where: { $0.id == "tombstone-row" && $0.isHidden && $0.isPermanentlyRemoved })
+                && agyRows.contains(where: { $0.id == "orphan-other-proj-row" && $0.isHidden && $0.accountId == "other-project" }),
+              "[§54-AGY] reconnect unhides matching project, removes same-project hidden orphan, and preserves tombstones/other projects")
+        check(!store.excludedEngineAccountFilters().credentialIDs.contains("agy-hidden-1"),
+              "[§54-AGY] reconnected credential ID is removed from excludedEngineAccountFilters")
+
+        // Multi-project guard: adding a second live project credential prevents guessing when incoming projectId is nil,
+        // and project-qualified reconnect preserves both tombstones and distinct soft-hidden projects.
+        let siblingCred = AccountCredential(
+            id: "agy-hidden-2",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-hidden/other.json",
+            metadata: [
+                "projectId": "other-project",
+                "accountEmail": "hidden-reconnect@example.invalid",
+                "accountHandle": "hidden-reconnect@example.invalid"
+            ]
+        )
+        try AccountCredentialStore.shared.saveCredential(siblingCred)
+        store.accountRegistry.append(
+            StoredProviderAccount(
+                id: "sibling-proj-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "other-project",
+                providerResultId: "antigravity:cred:agy-hidden-2",
+                credentialId: "agy-hidden-2",
+                createdAt: "2026-11-11T00:00:00Z",
+                lastSeenAt: "2026-11-11T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/agy-hidden/other.json",
+                workspaceUserId: nil
+            )
+        )
+        let ambiguousIncomingCred = AccountCredential(
+            id: "new-ephemeral-ambiguous",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy-ambiguous.json",
+            metadata: [
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        check(
+            store.existingAuthenticatedCredential(
+                incomingCredential: ambiguousIncomingCred,
+                providerId: "antigravity",
+                accountHandle: "hidden-reconnect@example.invalid",
+                accountId: "hidden-reconnect@example.invalid",
+                sessionFingerprint: "hidden-reconnect@example.invalid",
+                sourceIdentifier: "antigravity-ide:hidden-reconnect@example.invalid",
+                sourceIdentifierIsStable: false
+            ) == nil,
+            "[§54-AGY] project-less incoming credential does not guess when email spans multiple projects"
+        )
+
+        if let hiddenIndex = store.accountRegistry.firstIndex(where: { $0.id == "hidden-cred-row" }) {
+            store.accountRegistry[hiddenIndex].isHidden = true
+        }
+        let incomingCredWithProject = AccountCredential(
+            id: "new-ephemeral-with-project",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy-2.json",
+            metadata: [
+                "projectId": "aicode-consumers",
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        var usageWithProject = ProviderUsage(provider: "antigravity", label: "Antigravity")
+        usageWithProject.accountEmail = "hidden-reconnect@example.invalid"
+        usageWithProject.usageAccountId = "hidden-reconnect@example.invalid"
+        usageWithProject.extra["projectId"] = AnyCodable("aicode-consumers")
+
+        let projectResultId = try store.registerAuthenticatedCredential(
+            incomingCredWithProject,
+            usage: usageWithProject,
+            note: nil,
+            providerDisplayTitle: "Antigravity",
+            insertImmediateProviderData: { _, _, _, _ in },
+            ensureProviderSelected: { _ in }
+        )
+        check(projectResultId == "antigravity:cred:agy-hidden-1",
+              "[§54-AGY] project-qualified reconnect reuses matching project credential")
+        check(
+            store.accountRegistry.contains(where: { $0.id == "hidden-cred-row" && !$0.isHidden && $0.accountId == "aicode-consumers" })
+                && store.accountRegistry.contains(where: { $0.id == "sibling-proj-row" && $0.credentialId == "agy-hidden-2" && $0.isHidden })
+                && store.accountRegistry.contains(where: { $0.id == "tombstone-row" && $0.isHidden && $0.isPermanentlyRemoved }),
+            "[§54-AGY] project-qualified reconnect unhides target project while keeping sibling soft-hidden project and tombstone intact"
+        )
     }
 
     static func testProductionCredentialStoreFaultInjection() throws {

@@ -127,15 +127,86 @@ final class AntigravityProviderTests: XCTestCase {
         super.tearDown()
     }
 
-    func testDefaultProductionProviderDisablesLiveIDEReaderevenForRealHomeDirectory() async throws {
-        let prodProvider = AntigravityProvider(homeDirectory: NSHomeDirectory())
-        XCTAssertNil(prodProvider.effectiveLocalQuotaReader)
+    func testProductionProviderDisablesDefaultIDEReaderOnRealAndIsolatedHomes() async throws {
+        let realHomeProd = AntigravityProvider(homeDirectory: NSHomeDirectory())
+        let isolatedProd = AntigravityProvider(homeDirectory: "/tmp/agy-isolated-home")
+        let explicitNilProvider = AntigravityProvider(homeDirectory: NSHomeDirectory(), localQuotaReader: nil)
+        XCTAssertNil(realHomeProd.effectiveLocalQuotaReader)
+        XCTAssertNil(isolatedProd.effectiveLocalQuotaReader)
+        XCTAssertNil(explicitNilProvider.effectiveLocalQuotaReader)
+
+        for disabledProvider in [realHomeProd, isolatedProd, explicitNilProvider] {
+            do {
+                _ = try await disabledProvider.fetchUsage(with: makeCredential(withProjectStub: false))
+                XCTFail("Expected local_only_unavailable when default production IDE RPC is disabled")
+            } catch let error as ProviderError {
+                XCTAssertEqual(error.code, "local_only_unavailable")
+            }
+        }
+        XCTAssertTrue(StubURLProtocol.requests.isEmpty)
+    }
+
+    func testLocalIDEReaderEnforcesProjectAttributionWhenRequiredOrMismatched() async throws {
+        let cred = try makeCredential(withProjectStub: false, projectId: "proj-123")
+
+        let mismatchedProjectReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 42, csrfToken: "csrf-local")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "user@example.com", "projectId": "proj-other", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return Self.json(Self.fullSummary)
+                }
+                return nil
+            }
+        )
+        let mismatchedProvider = AntigravityProvider(homeDirectory: "/tmp/agy-mismatch", localQuotaReader: mismatchedProjectReader)
         do {
-            _ = try await prodProvider.fetchUsage(with: makeCredential(withProjectStub: false))
-            XCTFail("Expected local_only_unavailable when default production provider has live IDE RPC disabled")
+            _ = try await mismatchedProvider.fetchUsage(with: cred, localOnly: true, requireProjectMatch: false)
+            XCTFail("Expected local_only_unavailable on mismatched projectId")
         } catch let error as ProviderError {
             XCTAssertEqual(error.code, "local_only_unavailable")
         }
+
+        let unboundReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 42, csrfToken: "csrf-local")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "user@example.com", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return Self.json(Self.fullSummary)
+                }
+                return nil
+            }
+        )
+        let unboundProvider = AntigravityProvider(homeDirectory: "/tmp/agy-unbound", localQuotaReader: unboundReader)
+        do {
+            _ = try await unboundProvider.fetchUsage(with: cred, localOnly: true, requireProjectMatch: true)
+            XCTFail("Expected local_only_unavailable when requireProjectMatch is true and sample has no projectId")
+        } catch let error as ProviderError {
+            XCTAssertEqual(error.code, "local_only_unavailable")
+        }
+
+        let matchingReader = AntigravityLocalQuotaReader(
+            listProcesses: { [.init(pid: 42, csrfToken: "csrf-local")] },
+            listPorts: { _ in [60432] },
+            callRPC: { _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {
+                    return ["userStatus": ["email": "user@example.com", "projectId": "proj-123", "userTier": ["id": "pro", "name": "Pro"]]]
+                }
+                if method.hasSuffix("RetrieveUserQuotaSummary") {
+                    return Self.json(Self.fullSummary)
+                }
+                return nil
+            }
+        )
+        let matchingProvider = AntigravityProvider(homeDirectory: "/tmp/agy-matching", localQuotaReader: matchingReader)
+        let matchedUsage = try await matchingProvider.fetchUsage(with: cred, localOnly: true, requireProjectMatch: true)
+        XCTAssertEqual(matchedUsage.extra["projectId"]?.value as? String, "proj-123")
         XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 
@@ -223,17 +294,26 @@ final class AntigravityProviderTests: XCTestCase {
         (try? JSONSerialization.jsonObject(with: Data(text.utf8))) as? [String: Any] ?? [:]
     }
 
-    private func makeCredential(withProjectStub: Bool = true) throws -> AccountCredential {
+    private func makeCredential(withProjectStub: Bool = true, projectId: String? = nil) throws -> AccountCredential {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent("antigravity-tests-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
 
         let authFile = directory.appendingPathComponent("antigravity-user@example.com.json")
-        try Data(#"{"access_token":"test-token","email":"user@example.com"}"#.utf8).write(to: authFile)
+        var payload: [String: Any] = ["access_token": "test-token", "email": "user@example.com"]
+        if let projectId {
+            payload["project_id"] = projectId
+        }
+        try JSONSerialization.data(withJSONObject: payload).write(to: authFile)
         if withProjectStub {
             StubURLProtocol.respond(Self.loadCodeAssist, status: 200, body: #"{"currentTier":{"id":"pro","name":"Pro"},"cloudaicompanionProject":"proj-123"}"#)
         }
-        return AccountCredential(providerId: "antigravity", authMethod: .authFile, credential: authFile.path)
+        return AccountCredential(
+            providerId: "antigravity",
+            authMethod: .authFile,
+            credential: authFile.path,
+            metadata: projectId.map { ["projectId": $0] } ?? [:]
+        )
     }
 }

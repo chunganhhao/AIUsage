@@ -36,6 +36,20 @@ nonisolated enum AccountIdentityPolicy {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank
     }
 
+    static func antigravityProjectId(for credential: AccountCredential) -> String? {
+        normalizedLookupValue(credential.metadata["projectId"] ?? credential.metadata["project_id"])
+            ?? normalizedLookupValue(credential.metadata["accountId"]).flatMap { $0.contains("@") ? nil : $0 }
+    }
+
+    static func preferredAccountId(for credential: AccountCredential) -> String? {
+        if credential.providerId.lowercased() == "antigravity" {
+            return (credential.metadata["projectId"]?.nilIfBlank
+                ?? credential.metadata["project_id"]?.nilIfBlank)
+                ?? credential.metadata["accountId"]?.nilIfBlank.flatMap { $0.contains("@") ? nil : $0 }
+        }
+        return credential.metadata["accountId"]?.nilIfBlank
+    }
+
     static func extractCredentialId(from providerDataId: String) -> String? {
         guard let range = providerDataId.range(of: ":cred:") else { return nil }
         return String(providerDataId[range.upperBound...]).nilIfBlank
@@ -993,13 +1007,51 @@ extension AccountStore {
         let normalizedAccountId = normalizedAccountLookupValue(accountId)
         let normalizedFingerprint = normalizedAccountLookupValue(sessionFingerprint)
         let normalizedSourceIdentifier = normalizedAccountLookupValue(sourceIdentifier)
+        let providerCredentials = AccountCredentialStore.shared.loadCredentials(for: providerId)
+        let isAntigravity = providerId.lowercased() == "antigravity"
+        let incomingProjectId = isAntigravity
+            ? AccountIdentityPolicy.antigravityProjectId(for: incomingCredential)
+            : nil
+        let allowAntigravityEmailFallback: Bool = {
+            guard isAntigravity,
+                  let normalizedHandle,
+                  normalizedHandle.contains("@") else {
+                return false
+            }
+            guard incomingProjectId == nil else { return true }
+            let matchingEmailProjects = Set(providerCredentials.compactMap { credential -> String? in
+                let existingEmail = normalizedAccountLookupValue(
+                    credential.metadata["accountEmail"]
+                        ?? credential.metadata["accountHandle"]
+                        ?? credential.accountLabel
+                )
+                guard existingEmail == normalizedHandle else { return nil }
+                return AccountIdentityPolicy.antigravityProjectId(for: credential)
+            })
+            return matchingEmailProjects.count <= 1
+        }()
 
-        return AccountCredentialStore.shared.loadCredentials(for: providerId).first { credential in
+        return providerCredentials.first { credential in
             if AccountCredentialStore.credentialsShareCanonicalIdentity(
                 credential,
                 incomingCredential
             ) {
                 return true
+            }
+            if allowAntigravityEmailFallback,
+               let normalizedHandle {
+                let existingProjectId = AccountIdentityPolicy.antigravityProjectId(for: credential)
+                let projectsDoNotConflict = existingProjectId == nil
+                    || incomingProjectId == nil
+                    || existingProjectId == incomingProjectId
+                let existingEmail = normalizedAccountLookupValue(
+                    credential.metadata["accountEmail"]
+                        ?? credential.metadata["accountHandle"]
+                        ?? credential.accountLabel
+                )
+                if projectsDoNotConflict, existingEmail == normalizedHandle {
+                    return true
+                }
             }
             let isMultiWs = AccountIdentityPolicy.isMultiWorkspace(providerId)
 
@@ -1070,7 +1122,7 @@ extension AccountStore {
                 ?? credential.metadata["accountHandle"]?.nilIfBlank
                 ?? credential.accountLabel?.nilIfBlank,
             displayName: credential.metadata["displayName"]?.nilIfBlank,
-            accountId: credential.metadata["accountId"]?.nilIfBlank,
+            accountId: AccountIdentityPolicy.preferredAccountId(for: credential),
             validatedAt: credential.metadata["lastValidatedAt"]?.nilIfBlank
                 ?? credential.lastUsedAt?.nilIfBlank,
             workspaceUserId: CodexAccountIdentity(credential: credential).userId
@@ -1134,7 +1186,7 @@ extension AccountStore {
                 ?? credential.metadata["accountHandle"]?.nilIfBlank
                 ?? credential.accountLabel?.nilIfBlank
             let displayName = credential.metadata["displayName"]?.nilIfBlank
-            let accountId = credential.metadata["accountId"]?.nilIfBlank
+            let accountId = AccountIdentityPolicy.preferredAccountId(for: credential)
             let validatedAt = credential.metadata["lastValidatedAt"]?.nilIfBlank
                 ?? credential.lastUsedAt?.nilIfBlank
             let expectedResultId = "\(account.providerId):cred:\(credential.id)"
