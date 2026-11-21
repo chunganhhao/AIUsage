@@ -127,18 +127,18 @@ final class AntigravityProviderTests: XCTestCase {
         super.tearDown()
     }
 
-    func testProductionProviderDisablesDefaultIDEReaderOnRealAndIsolatedHomes() async throws {
+    func testPersonalBuildEnablesLiveIDEReaderOnRealHomeAndIsolatesTestHomes() async throws {
         let realHomeProd = AntigravityProvider(homeDirectory: NSHomeDirectory())
         let isolatedProd = AntigravityProvider(homeDirectory: "/tmp/agy-isolated-home")
         let explicitNilProvider = AntigravityProvider(homeDirectory: NSHomeDirectory(), localQuotaReader: nil)
-        XCTAssertNil(realHomeProd.effectiveLocalQuotaReader)
+        XCTAssertNotNil(realHomeProd.effectiveLocalQuotaReader)
         XCTAssertNil(isolatedProd.effectiveLocalQuotaReader)
         XCTAssertNil(explicitNilProvider.effectiveLocalQuotaReader)
 
-        for disabledProvider in [realHomeProd, isolatedProd, explicitNilProvider] {
+        for disabledProvider in [isolatedProd, explicitNilProvider] {
             do {
                 _ = try await disabledProvider.fetchUsage(with: makeCredential(withProjectStub: false))
-                XCTFail("Expected local_only_unavailable when default production IDE RPC is disabled")
+                XCTFail("Expected local_only_unavailable when isolated or explicit-nil local IDE RPC is disabled")
             } catch let error as ProviderError {
                 XCTAssertEqual(error.code, "local_only_unavailable")
             }
@@ -207,6 +207,10 @@ final class AntigravityProviderTests: XCTestCase {
         let matchingProvider = AntigravityProvider(homeDirectory: "/tmp/agy-matching", localQuotaReader: matchingReader)
         let matchedUsage = try await matchingProvider.fetchUsage(with: cred, localOnly: true, requireProjectMatch: true)
         XCTAssertEqual(matchedUsage.extra["projectId"]?.value as? String, "proj-123")
+
+        let legacySentinelCred = try makeCredential(withProjectStub: false, projectId: "aicode-consumers")
+        let sentinelUpgradedUsage = try await matchingProvider.fetchUsage(with: legacySentinelCred, localOnly: true, requireProjectMatch: false)
+        XCTAssertEqual(sentinelUpgradedUsage.extra["projectId"]?.value as? String, "proj-123")
         XCTAssertTrue(StubURLProtocol.requests.isEmpty)
     }
 

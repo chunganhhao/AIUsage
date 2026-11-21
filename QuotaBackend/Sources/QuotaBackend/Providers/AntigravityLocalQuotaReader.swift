@@ -159,10 +159,7 @@ struct AntigravityLocalQuotaReader: Sendable {
             return nil
         }
         let observedProjectId = embeddedProjects.first
-        let normalizedExpectedProject = expectedProjectId?
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-            .lowercased()
-        if let normalizedExpectedProject, !normalizedExpectedProject.isEmpty {
+        if let normalizedExpectedProject = Self.normalizedProjectId(expectedProjectId)?.lowercased() {
             if let observedLower = observedProjectId?.lowercased(),
                observedLower != normalizedExpectedProject {
                 return nil
@@ -185,15 +182,31 @@ struct AntigravityLocalQuotaReader: Sendable {
         )
     }
 
+    static func normalizedProjectId(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let lower = trimmed.lowercased()
+        if lower == "unknown" || lower == "aicode-consumers" {
+            return nil
+        }
+        return trimmed
+    }
+
     private static func embeddedProjectIds(in dictionaries: [[String: Any]?]) -> [String] {
         let keys = ["cloudaicompanionProject", "projectId", "project_id"]
         var results: [String] = []
         for dict in dictionaries {
             guard let dict else { continue }
             for key in keys {
-                if let raw = (dict[key] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
-                   !raw.isEmpty {
-                    results.append(raw)
+                if let rawString = dict[key] as? String,
+                   let normalized = normalizedProjectId(rawString) {
+                    results.append(normalized)
+                } else if let nested = dict[key] as? [String: Any],
+                          let rawId = nested["id"] as? String,
+                          let normalized = normalizedProjectId(rawId) {
+                    results.append(normalized)
                 }
             }
         }

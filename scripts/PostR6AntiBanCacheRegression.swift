@@ -283,15 +283,16 @@ struct PostR6AntiBanCacheRegression {
                         && StubURLProtocol.requests.isEmpty,
                       "[A1 + §28] single-card fetchForCredential uses local IDE RPC only with 0 Google HTTPS calls")
 
-            // [§30.1 + §55-P1] Production AntigravityProvider disables default IDE loopback RPC even on NSHomeDirectory() (0 Google HTTPS).
+            // [personal-build + §55-P2] Real user home enables .live 127.0.0.1 IDE loopback (0 Google HTTPS),
+            // while isolated test homes and explicit localQuotaReader: nil fail closed with local_only_unavailable.
             let realHomeProdProvider = AntigravityProvider(homeDirectory: NSHomeDirectory())
             let isolatedProdProvider = AntigravityProvider(homeDirectory: scratchRoot.path)
             let explicitNilProdProvider = AntigravityProvider(homeDirectory: NSHomeDirectory(), localQuotaReader: nil)
-            try check(realHomeProdProvider.effectiveLocalQuotaReader == nil
+            try check(realHomeProdProvider.effectiveLocalQuotaReader != nil
                         && isolatedProdProvider.effectiveLocalQuotaReader == nil
                         && explicitNilProdProvider.effectiveLocalQuotaReader == nil,
-                      "[§30.1 + §55-P1] AntigravityProvider disables default IDE RPC on real and isolated homes unless an authorized reader is injected")
-            for disabledProvider in [realHomeProdProvider, isolatedProdProvider, explicitNilProdProvider] {
+                      "[personal-build] AntigravityProvider enables .live IDE RPC on NSHomeDirectory() while isolating non-user/explicit-nil homes")
+            for disabledProvider in [isolatedProdProvider, explicitNilProdProvider] {
                 for modeLocalOnly in [true, false] {
                     var prodCode: String?
                     do {
@@ -300,7 +301,7 @@ struct PostR6AntiBanCacheRegression {
                         prodCode = err.code
                     }
                     try check(prodCode == "local_only_unavailable",
-                              "[§30.1 + §55-P1] disabled AntigravityProvider fails closed locally (localOnly=\(modeLocalOnly))")
+                              "[personal-build] isolated/explicit-nil AntigravityProvider fails closed locally (localOnly=\(modeLocalOnly))")
                 }
             }
 

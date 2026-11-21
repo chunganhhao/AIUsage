@@ -14,6 +14,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     let homeDirectory: String
     let timeoutSeconds: Double
     private let localQuotaReaderOverride: AntigravityLocalQuotaReader?
+    private let hasExplicitLocalQuotaReaderOverride: Bool
 
     // Antigravity 2.x 按模型组计量（每组一个 5 小时窗口 + 一个每周窗口，Pro 账号另有独立的 Gemini 4 Argon 周窗口）。
     // daily 部署是 IDE 实际计量的那份，prod 兜底；两者都拿不到时再退回旧的按模型接口。
@@ -46,6 +47,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         self.homeDirectory = homeDirectory
         self.timeoutSeconds = timeoutSeconds
         self.localQuotaReaderOverride = nil
+        self.hasExplicitLocalQuotaReaderOverride = false
     }
 
     init(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
@@ -54,10 +56,14 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         self.homeDirectory = homeDirectory
         self.timeoutSeconds = timeoutSeconds
         self.localQuotaReaderOverride = localQuotaReader
+        self.hasExplicitLocalQuotaReaderOverride = true
     }
 
     var effectiveLocalQuotaReader: AntigravityLocalQuotaReader? {
-        localQuotaReaderOverride
+        if hasExplicitLocalQuotaReaderOverride { return localQuotaReaderOverride }
+        let normalizedHome = URL(fileURLWithPath: homeDirectory).standardizedFileURL.path
+        let normalizedReal = URL(fileURLWithPath: FileManager.default.homeDirectoryForCurrentUser.path).standardizedFileURL.path
+        return normalizedHome == normalizedReal ? .live : nil
     }
 
     public func fetchUsage() async throws -> ProviderUsage {
@@ -94,8 +100,8 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
             credential.metadata["projectId"],
             credential.metadata["project_id"]
         ]
-        .compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
-        .first(where: { !$0.isEmpty })
+        .compactMap(AntigravityLocalQuotaReader.normalizedProjectId)
+        .first
         let session: URLSession? = nil
         do {
             var usage = try await fetchForAuthContext(
@@ -152,7 +158,11 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
                 "Direct third-party Antigravity consumer API checks are disabled for policy compliance; showing local IDE session or last-known cached snapshot only."
             )
         }
-        let subscription = SubscriptionInfo(tierId: local.tierId, tierName: local.tierName, projectId: local.projectId ?? expectedProjectId)
+        let subscription = SubscriptionInfo(
+            tierId: local.tierId,
+            tierName: local.tierName,
+            projectId: local.projectId ?? expectedProjectId ?? authFile.projectId
+        )
         let quota = QuotaSnapshot(models: local.models, isGrouped: true)
         let transport = "loopback_rpc"
         var usage = buildUsage(
