@@ -29,7 +29,14 @@ final class CallAnalyticsStore: ObservableObject {
         isRefreshing = true
         defer { isRefreshing = false }
 
-        let result = await engine.computeSnapshot(rangeKey: rangeKey, cutoff: cutoff, end: end, rescan: rescan)
+        let excluded = AgentVisibility.hiddenCallSources(hidden: AppSettings.shared.hiddenSidebarSections)
+        let result = await engine.computeSnapshot(
+            rangeKey: rangeKey,
+            cutoff: cutoff,
+            end: end,
+            rescan: rescan,
+            excludedSources: excluded
+        )
         snapshot = result
         Self.saveCache(result)
         log.debug("Call analytics refreshed: \(result.entries.count, privacy: .public) entries, range \(rangeKey, privacy: .public)")

@@ -13,6 +13,8 @@ struct ProviderAuthCandidate {
     var sourceIdentifier = "antigravity-ide:fixture@example.invalid"
     var sessionFingerprint: String? = "fixture@example.invalid"
     var identityScope = IdentityScope.sharedSource
+    var workspaceId: String? = nil
+    var capturesWorkspaceIdentity: Bool = false
 }
 
 enum ProviderRegistry {
@@ -30,6 +32,10 @@ enum ProviderAuthManager {
     static var injected: ProviderAuthCandidate!
     static func unmanagedCandidates(for _: String) -> [ProviderAuthCandidate] { [injected] }
     // PRODUCTION_AUTHENTICATE_CANDIDATE
+    // PRODUCTION_NORMALIZED_AGY_WORKSPACE
+    private static func stageDeferredAuthFileIfNeeded(
+        for candidate: ProviderAuthCandidate
+    ) throws -> (directoryURL: URL, fileURL: URL)? { nil }
     // PRODUCTION_VALIDATE
     // PRODUCTION_VALIDATE_LOCAL_METADATA
     // PRODUCTION_COPY_IMPORTED_AUTH_FILE
@@ -57,6 +63,7 @@ extension String { var nilIfBlank: String? { isEmpty ? nil : self } }
 actor ConcurrentImportGate {
     private var calls = 0
     private var firstStarted = false
+    private var released = false
     private var startedWaiter: CheckedContinuation<Void, Never>?
     private var releaseWaiter: CheckedContinuation<Void, Never>?
 
@@ -69,6 +76,9 @@ actor ConcurrentImportGate {
             await withCheckedContinuation { releaseWaiter = $0 }
             return ["userStatus": ["email": "fixture@example.invalid", "userTier": ["id": "pro", "name": "Pro"]]]
         }
+        if released {
+            return ["userStatus": ["email": "fixture@example.invalid", "userTier": ["id": "pro", "name": "Pro"]]]
+        }
         return nil
     }
 
@@ -79,6 +89,7 @@ actor ConcurrentImportGate {
     }
 
     func releaseFirst() {
+        released = true
         releaseWaiter?.resume()
         releaseWaiter = nil
     }

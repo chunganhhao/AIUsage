@@ -423,6 +423,9 @@ private actor Attempts {
         try check(QuotaBurnRate.windowDuration(label: "5GB RAM") == nil, "5GB does not match 5h burn-rate window")
     }
     static func warmup(_ home: URL) async throws {
+        try check(WarmupSettings().autoChainReset == false, "WarmupSettings.autoChainReset defaults to false")
+        let decodedDefaults = try JSONDecoder().decode(WarmupSettings.self, from: Data("{}".utf8))
+        try check(decodedDefaults.autoChainReset == false, "WarmupSettings decodes autoChainReset as false when omitted")
         var settings = WarmupSettings(); settings.enabled = true
         let now = Date(); let calendar: Calendar = { var value = Calendar(identifier: .gregorian); value.timeZone = TimeZone(secondsFromGMT: 0)!; return value }()
         settings.hour = calendar.component(.hour, from: now); settings.minute = calendar.component(.minute, from: now)
@@ -473,7 +476,8 @@ private actor Attempts {
         try check(corruptFailed, "corrupt uncertainty fence fails closed")
 
         let chainHome = home.appendingPathComponent("autochain")
-        try settings.save(home: chainHome)
+        var chainSettings = settings; chainSettings.autoChainReset = true
+        try chainSettings.save(home: chainHome)
         let chainAttempts = Attempts(); let chain = ScheduledWarmup(home: chainHome)
         try await chain.tick(observations: [.init(targetID: target.id, fetchedAt: now, activeUntil: nil)], now: now, calendar: calendar, jitter: 0, postResetDelay: { 600 }) { t in await chainAttempts.add(t.id) }
         let c1 = await chainAttempts.count(); try check(c1 == 1, "auto-chain initial warmup dispatches")
@@ -516,7 +520,7 @@ private actor Attempts {
         let day1Due = calendar.date(from: DateComponents(year: 2026, month: 11, day: 14, hour: 7, minute: 0, second: 0))!
         let day2Base = calendar.date(byAdding: .day, value: 1, to: day1Due)!
         let rolloverHome = home.appendingPathComponent("rollover")
-        var rolloverSettings = WarmupSettings(); rolloverSettings.enabled = true
+        var rolloverSettings = WarmupSettings(); rolloverSettings.enabled = true; rolloverSettings.autoChainReset = true
         rolloverSettings.hour = 7; rolloverSettings.minute = 0; rolloverSettings.targets = [target]
         try rolloverSettings.save(home: rolloverHome)
         let rolloverAttempts = Attempts(); let rollover = ScheduledWarmup(home: rolloverHome)
@@ -1610,6 +1614,327 @@ private actor Attempts {
                 && Set(makeCleanReader().loadAllCredentials().map(\.id)) == ["seeded-codex-1", "seeded-codex-2"],
             "[§14.1] persistent read failure performs 0 writes and leaves existing vault intact"
         )
+
+        // Codex §6.1, §6.2, §6.5, §6.9 regressions
+        do {
+            let leanHome = fm.temporaryDirectory.appendingPathComponent("master-lean-cut-\(UUID())", isDirectory: true)
+            defer { try? fm.removeItem(at: leanHome) }
+
+            // §6.1 AntigravityLocalQuotaReader:
+            // (a) cached A from probeActiveEmail does not approve B when IDE switches before fetchMatchingQuota
+            final class SwitchState: @unchecked Sendable {
+                private let lock = NSLock()
+                var activeEmail = "a@example.test"
+                var activeProject = "proj-a"
+                var flipDuringQuota = false
+                var primaryCalls = 0
+                var fallbackCalls = 0
+                var statusCalls = 0
+                func snapshot() -> (email: String, project: String) {
+                    lock.lock(); defer { lock.unlock() }
+                    return (activeEmail, activeProject)
+                }
+                func setActive(email: String, project: String) {
+                    lock.lock(); activeEmail = email; activeProject = project; lock.unlock()
+                }
+                func markQuotaAndMaybeFlip() {
+                    lock.lock()
+                    if flipDuringQuota {
+                        activeEmail = "b@example.test"
+                        activeProject = "proj-b"
+                    }
+                    lock.unlock()
+                }
+                func bumpPrimary() { lock.lock(); primaryCalls += 1; lock.unlock() }
+                func bumpFallback() { lock.lock(); fallbackCalls += 1; lock.unlock() }
+                func bumpStatus() { lock.lock(); statusCalls += 1; lock.unlock() }
+            }
+            let preSwitchState = SwitchState()
+            let preSwitchReader = AntigravityLocalQuotaReader(
+                listProcesses: {
+                    preSwitchState.bumpPrimary()
+                    return [AntigravityLocalQuotaReader.ServerProcess(pid: 4242, csrfToken: "tok", preferredPorts: [19001])]
+                },
+                listPorts: { _ in [] },
+                callRPC: { _, methodPath, _, _ in
+                    if methodPath.hasSuffix("GetUserStatus") {
+                        preSwitchState.bumpStatus()
+                        let cur = preSwitchState.snapshot()
+                        return ["userStatus": ["email": cur.email, "cloudaicompanionProject": cur.project]]
+                    }
+                    if methodPath.hasSuffix("RetrieveUserQuotaSummary") {
+                        return ["groups": [["displayName": "Gemini Pro", "buckets": [["bucketId": "gemini-pro", "remainingFraction": 0.23, "resetTime": "2027-01-01T00:00:00Z"]]]]]
+                    }
+                    return nil
+                },
+                fallbackListProcesses: {
+                    preSwitchState.bumpFallback()
+                    return []
+                },
+                sessionCacheTTL: 5.0
+            )
+            let probedEmail1 = await preSwitchReader.probeActiveEmail()
+            preSwitchState.setActive(email: "b@example.test", project: "proj-b")
+            let cachedHintEmail = await preSwitchReader.probeActiveEmail()
+            let blockedPreSwitch = await preSwitchReader.fetchMatchingQuota(
+                expectedEmail: "a@example.test",
+                expectedProjectId: "proj-a",
+                requireProjectMatch: true
+            )
+            try check(
+                probedEmail1 == "a@example.test"
+                    && cachedHintEmail == "a@example.test"
+                    && blockedPreSwitch == nil
+                    && preSwitchState.fallbackCalls == 0,
+                "[§6.1] cached probeActiveEmail never validates B quota under A after IDE switch before fetchMatchingQuota"
+            )
+
+            // (b) mid-flight A -> B switch during RetrieveUserQuotaSummary on identity-less summary is rejected on post-check
+            let midSwitchState = SwitchState()
+            midSwitchState.flipDuringQuota = true
+            let midSwitchReader = AntigravityLocalQuotaReader(
+                listProcesses: { [AntigravityLocalQuotaReader.ServerProcess(pid: 4243, csrfToken: "tok", preferredPorts: [19002])] },
+                listPorts: { _ in [] },
+                callRPC: { _, methodPath, _, _ in
+                    if methodPath.hasSuffix("GetUserStatus") {
+                        midSwitchState.bumpStatus()
+                        let cur = midSwitchState.snapshot()
+                        return ["userStatus": ["email": cur.email, "cloudaicompanionProject": cur.project]]
+                    }
+                    if methodPath.hasSuffix("RetrieveUserQuotaSummary") {
+                        midSwitchState.markQuotaAndMaybeFlip()
+                        return ["groups": [["displayName": "Gemini Pro", "buckets": [["bucketId": "gemini-pro", "remainingFraction": 0.23, "resetTime": "2027-01-01T00:00:00Z"]]]]]
+                    }
+                    return nil
+                },
+                sessionCacheTTL: 5.0
+            )
+            let blockedMidSwitch = await midSwitchReader.fetchMatchingQuota(
+                expectedEmail: "a@example.test",
+                expectedProjectId: "proj-a",
+                requireProjectMatch: true
+            )
+            try check(
+                blockedMidSwitch == nil && midSwitchState.statusCalls == 2,
+                "[§6.1] mid-flight A->B switch during identity-less RetrieveUserQuotaSummary is rejected by post-quota status re-check"
+            )
+
+            // (c) stable A/proj-a succeeds + scheduling hint still caches within TTL without ps fallback
+            let stableState = SwitchState()
+            let stableReader = AntigravityLocalQuotaReader(
+                listProcesses: {
+                    stableState.bumpPrimary()
+                    return [AntigravityLocalQuotaReader.ServerProcess(pid: 4244, csrfToken: "tok", preferredPorts: [19003])]
+                },
+                listPorts: { _ in [] },
+                callRPC: { _, methodPath, _, _ in
+                    if methodPath.hasSuffix("GetUserStatus") {
+                        stableState.bumpStatus()
+                        let cur = stableState.snapshot()
+                        return ["userStatus": ["email": cur.email, "cloudaicompanionProject": cur.project]]
+                    }
+                    if methodPath.hasSuffix("RetrieveUserQuotaSummary") {
+                        return ["groups": [["displayName": "Gemini Pro", "buckets": [["bucketId": "gemini-pro", "remainingFraction": 0.23, "resetTime": "2027-01-01T00:00:00Z"]]]]]
+                    }
+                    return nil
+                },
+                fallbackListProcesses: {
+                    stableState.bumpFallback()
+                    return []
+                },
+                sessionCacheTTL: 5.0
+            )
+            let hint1 = await stableReader.probeActiveSession()
+            let hint2 = await stableReader.probeActiveSession()
+            let stableQuota = await stableReader.fetchMatchingQuota(
+                expectedEmail: "a@example.test",
+                expectedProjectId: "proj-a",
+                requireProjectMatch: true
+            )
+            try check(
+                hint1?.email == "a@example.test"
+                    && hint2?.email == "a@example.test"
+                    && stableQuota?.email == "a@example.test"
+                    && stableQuota?.projectId == "proj-a"
+                    && stableState.fallbackCalls == 0
+                    && stableState.primaryCalls == 2
+                    && stableState.statusCalls == 3,
+                "[§6.1] stable identity-less quota post-verifies and succeeds while probeActiveSession still reuses TTL without ps fallback"
+            )
+
+            // §6.2 CallAnalyticsEngine excludedSources preserves today's archive bucket on disk while hiding it from snapshot
+            let caHome = leanHome.appendingPathComponent("call-analytics-preserve", isDirectory: true)
+            let caTz = TimeZone(secondsFromGMT: 0)!
+            let caClock = CallAnalyticsClock(timeZone: caTz)
+            let caNow = Date()
+            let caTodayStart = caClock.calendar.startOfDay(for: caNow)
+            let caTodayKey = caClock.dayKey(caNow)
+            let caISO = ISO8601DateFormatter().string(from: caNow)
+            let codexSessionsDir = caHome.appendingPathComponent(".codex/sessions", isDirectory: true)
+            try fm.createDirectory(at: codexSessionsDir, withIntermediateDirectories: true)
+            let codexSessionFile = codexSessionsDir.appendingPathComponent("today.jsonl")
+            let codexLine = #"{"timestamp":"\#(caISO)","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}"}}"#
+            try Data((Array(repeating: codexLine, count: 7).joined(separator: "\n") + "\n").utf8).write(to: codexSessionFile)
+            let caEnv = ["XDG_DATA_HOME": leanHome.appendingPathComponent("empty-xdg").path, "CODEX_HOME": caHome.appendingPathComponent(".codex").path]
+            let caEngine = CallAnalyticsEngine(homeDirectory: caHome.path, timeZone: caTz, environment: caEnv)
+            let visibleSnap = await caEngine.computeSnapshot(rangeKey: "today", cutoff: caTodayStart, excludedSources: [])
+            let visibleCount = visibleSnap.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count }
+            let storedBeforeHide = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]?.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count } ?? 0
+            await caEngine.syncToday(excludedSources: [.codex])
+            let hiddenSnap = await caEngine.computeSnapshot(rangeKey: "today", cutoff: caTodayStart, excludedSources: [.codex])
+            let hiddenVisibleCount = hiddenSnap.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count }
+            let storedAfterHiddenWhileLogPresent = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]?.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count } ?? 0
+            try fm.removeItem(at: codexSessionFile)
+            await caEngine.syncToday(excludedSources: [.codex])
+            let storedAfterHiddenAndLogRemoved = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]?.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count } ?? 0
+            try Data((Array(repeating: codexLine, count: 9).joined(separator: "\n") + "\n").utf8).write(to: codexSessionFile)
+            _ = await caEngine.computeSnapshot(rangeKey: "today", cutoff: caTodayStart, excludedSources: [])
+            let storedAfterNonHiddenReplace = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]?.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count } ?? 0
+            try fm.removeItem(at: codexSessionFile)
+            _ = await caEngine.computeSnapshot(rangeKey: "today", cutoff: caTodayStart, excludedSources: [])
+            let storedAfterNonHiddenDelete = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]
+            let emptyHiddenHome = leanHome.appendingPathComponent("call-analytics-empty-hidden", isDirectory: true)
+            let emptyHiddenEngine = CallAnalyticsEngine(homeDirectory: emptyHiddenHome.path, timeZone: caTz, environment: caEnv)
+            await emptyHiddenEngine.syncToday(excludedSources: [.claude, .codex, .opencode, .antigravity])
+            let hiddenMarkedComplete = CallAnalyticsArchiveStore(homeDirectory: emptyHiddenHome.path).fullHistoryImported
+
+            // Today replace path with another excluded source preserves excluded entries & agentInvocations on disk
+            let mixArchive = CallAnalyticsArchiveStore(homeDirectory: caHome.path)
+            _ = mixArchive.freeze(
+                computed: [
+                    caTodayKey: CallAnalyticsDayBucket(
+                        entries: [
+                            CallAnalyticsEntry(source: .claude, kind: .builtin, name: "Bash", server: nil, dayKey: caTodayKey, count: 3),
+                            CallAnalyticsEntry(source: .codex, kind: .builtin, name: "exec_command", server: nil, dayKey: caTodayKey, count: 7)
+                        ],
+                        agentInvocations: [AgentInvocationCount(source: .claude, agent: "main", count: 2)]
+                    )
+                ],
+                todayKey: caTodayKey,
+                completedFullHistory: true
+            )
+            try Data((Array(repeating: codexLine, count: 9).joined(separator: "\n") + "\n").utf8).write(to: codexSessionFile)
+            let mixEngine = CallAnalyticsEngine(homeDirectory: caHome.path, timeZone: caTz, environment: caEnv)
+            _ = await mixEngine.computeSnapshot(rangeKey: "today", cutoff: caTodayStart, excludedSources: [.claude])
+            let mixedDay = CallAnalyticsArchiveStore(homeDirectory: caHome.path).allDays[caTodayKey]
+            let mixedCodex = mixedDay?.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count } ?? 0
+            let mixedClaude = mixedDay?.entries.filter { $0.source == .claude }.reduce(0) { $0 + $1.count } ?? 0
+            let mixedInvocations = mixedDay?.agentInvocations ?? []
+
+            // Frozen past day survives source-log deletion after hidden sync and unhides cleanly on fresh engine
+            let frozenHome = leanHome.appendingPathComponent("call-analytics-frozen", isDirectory: true)
+            let frozenSessionsDir = frozenHome.appendingPathComponent(".codex/sessions", isDirectory: true)
+            try fm.createDirectory(at: frozenSessionsDir, withIntermediateDirectories: true)
+            let frozenEnv = ["XDG_DATA_HOME": leanHome.appendingPathComponent("empty-xdg").path, "CODEX_HOME": frozenHome.appendingPathComponent(".codex").path]
+            let caYesterday = caTodayStart.addingTimeInterval(-86400)
+            let caYesterdayISO = ISO8601DateFormatter().string(from: caYesterday)
+            let yesterdayFile = frozenSessionsDir.appendingPathComponent("yesterday.jsonl")
+            let yesterdayLine = #"{"timestamp":"\#(caYesterdayISO)","type":"response_item","payload":{"type":"function_call","name":"exec_command","arguments":"{}"}}"#
+            try Data((Array(repeating: yesterdayLine, count: 7).joined(separator: "\n") + "\n").utf8).write(to: yesterdayFile)
+            let frozenEngine = CallAnalyticsEngine(homeDirectory: frozenHome.path, timeZone: caTz, environment: frozenEnv)
+            let frozenInitial = await frozenEngine.computeSnapshot(rangeKey: "all", cutoff: nil, excludedSources: [])
+            let frozenInitialCount = frozenInitial.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count }
+            await frozenEngine.syncToday(excludedSources: [.codex])
+            try fm.removeItem(at: yesterdayFile)
+            let frozenReopenedEngine = CallAnalyticsEngine(homeDirectory: frozenHome.path, timeZone: caTz, environment: frozenEnv)
+            let frozenRestoredSnap = await frozenReopenedEngine.computeSnapshot(rangeKey: "all", cutoff: nil, excludedSources: [])
+            let frozenRestoredCount = frozenRestoredSnap.entries.filter { $0.source == .codex }.reduce(0) { $0 + $1.count }
+
+            try check(
+                visibleCount == 7
+                    && storedBeforeHide == 7
+                    && hiddenVisibleCount == 0
+                    && !hiddenSnap.sources.contains(where: { $0.source == .codex })
+                    && storedAfterHiddenWhileLogPresent == 7
+                    && storedAfterHiddenAndLogRemoved == 7
+                    && storedAfterNonHiddenReplace == 9
+                    && storedAfterNonHiddenDelete == nil
+                    && !hiddenMarkedComplete
+                    && mixedCodex == 9
+                    && mixedClaude == 3
+                    && mixedInvocations == [AgentInvocationCount(source: .claude, agent: "main", count: 2)]
+                    && frozenInitialCount == 7
+                    && frozenRestoredCount == 7,
+                "[§6.2] excluded Codex scan hides snapshot rows without erasing today's archive bucket or marking full history complete"
+            )
+
+            // §6.5 OpenCodeCostProvider: commit on preallocated reused WAL with equal mtime, size, and 32-byte header is never skipped
+            let ocCostHome = leanHome.appendingPathComponent("oc-cost", isDirectory: true)
+            let ocCostXdg = ocCostHome.appendingPathComponent("xdg", isDirectory: true)
+            let ocCostDir = ocCostXdg.appendingPathComponent("opencode", isDirectory: true)
+            try fm.createDirectory(at: ocCostDir, withIntermediateDirectories: true)
+            let ocCostDBURL = ocCostDir.appendingPathComponent("opencode.db")
+            let ocCostWALURL = ocCostDir.appendingPathComponent("opencode.db-wal")
+            var costDB: OpaquePointer?
+            try check(sqlite3_open_v2(ocCostDBURL.path, &costDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK, "open opencode WAL db")
+            defer { if let costDB { sqlite3_close(costDB) } }
+            let padText = String(repeating: "x", count: 65536)
+            let nowMillis = Int64(Date().timeIntervalSince1970 * 1000)
+            let msg50 = #"{"role":"assistant","providerID":"anthropic","modelID":"claude-sonnet-4","tokens":{"input":40,"output":10,"cache":{"read":0,"write":0}},"cost":0.01}"#
+            try check(sqlite3_exec(
+                costDB,
+                "PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT); CREATE TABLE pad (x TEXT); INSERT INTO pad VALUES ('\(padText)'); DELETE FROM pad; DROP TABLE pad; PRAGMA wal_checkpoint(RESTART); INSERT INTO message VALUES ('m1', 's1', \(nowMillis), '\(msg50)');",
+                nil, nil, nil
+            ) == SQLITE_OK, "seed preallocated WAL message 1")
+            let ocProvider = OpenCodeCostProvider(homeDirectory: ocCostHome.path, timeZone: TimeZone(secondsFromGMT: 0)!, environment: ["XDG_DATA_HOME": ocCostXdg.path])
+            let usage1 = try await ocProvider.fetchUsage()
+            func fileStats(_ url: URL) throws -> (mtime: Date, size: Int, header: Data) {
+                let attrs = try fm.attributesOfItem(atPath: url.path)
+                let handle = try FileHandle(forReadingFrom: url)
+                defer { try? handle.close() }
+                let header = (try? handle.read(upToCount: 32)) ?? Data()
+                return ((attrs[.modificationDate] as? Date) ?? Date(), (attrs[.size] as? Int) ?? 0, header)
+            }
+            let dbStats1 = try fileStats(ocCostDBURL)
+            let walStats1 = try fileStats(ocCostWALURL)
+            try check(sqlite3_exec(costDB, "INSERT INTO message VALUES ('m2', 's1', \(nowMillis), '\(msg50)');", nil, nil, nil) == SQLITE_OK, "commit message 2 onto reused WAL")
+            try fm.setAttributes([.modificationDate: dbStats1.mtime], ofItemAtPath: ocCostDBURL.path)
+            try fm.setAttributes([.modificationDate: walStats1.mtime], ofItemAtPath: ocCostWALURL.path)
+            let dbStats2 = try fileStats(ocCostDBURL)
+            let walStats2 = try fileStats(ocCostWALURL)
+            let usage2 = try await ocProvider.fetchUsage()
+            try check(walStats2.size == walStats1.size && dbStats2.size == dbStats1.size,
+                      "[§6.5] reused WAL commit keeps identical db/wal sizes (wal1=\(walStats1.size) wal2=\(walStats2.size))")
+            try check(walStats2.header == walStats1.header && dbStats2.header == dbStats1.header,
+                      "[§6.5] reused WAL commit keeps identical 32-byte db/wal headers")
+            try check(abs(walStats2.mtime.timeIntervalSince(walStats1.mtime)) < 0.001 && abs(dbStats2.mtime.timeIntervalSince(dbStats1.mtime)) < 0.001,
+                      "[§6.5] restored mtimes match pre-commit mtimes")
+            try check((usage1.extra["overall.totalTokens"]?.value as? Int) == 50 && (usage2.extra["overall.totalTokens"]?.value as? Int) == 100,
+                      "[§6.5] OpenCodeCostProvider picks up new SQLite commit on reused WAL (usage1=\(usage1.extra["overall.totalTokens"]?.value as? Int ?? -1) usage2=\(usage2.extra["overall.totalTokens"]?.value as? Int ?? -1))")
+
+            // §6.9 CallAnalyticsInventory excludes hidden sources before listing dirs, reading files, or constructing resolvers
+            let invHome = leanHome.appendingPathComponent("inventory-gate", isDirectory: true)
+            let invEnv = ["XDG_CONFIG_HOME": invHome.appendingPathComponent(".config").path, "CLAUDE_CONFIG_DIR": invHome.appendingPathComponent(".claude").path]
+            try write("---\nname: claude-s\n---\n", invHome.appendingPathComponent(".claude/skills/claude-s/SKILL.md"))
+            try write(#"{"mcpServers":{"claude-mcp":{"command":"echo"}}}"#, invHome.appendingPathComponent(".claude.json"))
+            try write("---\nname: oc-s\n---\n", invHome.appendingPathComponent(".config/opencode/skills/oc-s/SKILL.md"))
+            try write(#"{"mcp":{"oc-mcp":{"command":["echo"]}}}"#, invHome.appendingPathComponent(".config/opencode/opencode.json"))
+            try write("---\nname: codex-s\n---\n", invHome.appendingPathComponent(".codex/skills/codex-s/SKILL.md"))
+            try write("[mcp_servers.codex_mcp]\ncommand = \"echo\"\n", invHome.appendingPathComponent(".codex/config.toml"))
+            var controlTouched: [CallSourceKind] = []
+            let controlInv = CallAnalyticsInventory(homeDirectory: invHome.path, environment: invEnv) { source, _ in
+                controlTouched.append(source)
+            }
+            let controlSkills = controlInv.installedSkills()
+            let controlMCP = controlInv.installedMCPServers()
+            var excludedTouched: [(CallSourceKind, String)] = []
+            let leanInv = CallAnalyticsInventory(homeDirectory: invHome.path, environment: invEnv) { source, path in
+                excludedTouched.append((source, path))
+            }
+            let leanSkills = leanInv.installedSkills(excludedSources: [.claude, .opencode])
+            let leanMCP = leanInv.installedMCPServers(excludedSources: [.claude, .opencode])
+            try check(
+                Set(controlTouched).contains(.claude)
+                    && Set(controlTouched).contains(.opencode)
+                    && controlSkills.contains(InstalledItem(source: .claude, name: "claude-s"))
+                    && controlMCP.contains(InstalledItem(source: .opencode, name: "oc-mcp"))
+                    && !excludedTouched.contains(where: { $0.0 == .claude || $0.0 == .opencode || $0.1.contains(".claude") || $0.1.contains("opencode") })
+                    && Set(excludedTouched.map(\.0)) == Set([.codex, .antigravity])
+                    && leanSkills == [InstalledItem(source: .codex, name: "codex-s")]
+                    && leanMCP == [InstalledItem(source: .codex, name: "codex_mcp")],
+                "[§6.9] CallAnalyticsInventory excludes claude and opencode before touching hidden paths or resolvers"
+            )
+        }
     }
 
 }

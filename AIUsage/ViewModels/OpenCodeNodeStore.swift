@@ -77,6 +77,19 @@ final class OpenCodeNodeStore: ObservableObject {
         return (home as NSString).appendingPathComponent(".config/aiusage/opencode-global-config.json")
     }
 
+    static func hasPersistedManagedProxyRoute(atPath path: String? = nil) -> Bool {
+        let resolvedPath = path ?? storePath
+        guard let data = FileManager.default.contents(atPath: resolvedPath),
+              let file = try? JSONDecoder.profileDecoder.decode(StoreFile.self, from: data) else {
+            return false
+        }
+        let activeIds = Set(file.activeNodeIds ?? (file.activeNodeId.map { [$0] } ?? []))
+        let proxyOnlyIds = Set(file.proxyOnlyNodeIds ?? [])
+        let candidateIds = activeIds.union(proxyOnlyIds)
+        guard !candidateIds.isEmpty else { return false }
+        return file.nodes.contains { $0.proxyEnabled && candidateIds.contains($0.id) }
+    }
+
     private(set) var lastSaveError: String?
 
     init() {
@@ -533,16 +546,17 @@ final class OpenCodeNodeStore: ObservableObject {
             return
         }
 
-        // A missing/modified/precedence-shifted config is not a valid active
-        // route. Keep the state visible for recovery, but do not start a proxy
-        // that OpenCode cannot currently reach. The isManaged fallback keeps
-        // pre-session versions recoverable after upgrade.
+        // Config ownership applies only to active managed routes; proxy-only
+        // listeners are user-configured standalone local forwards and still
+        // restore independently when proxyAutoRestoreOnLaunch is enabled.
         let state = configManager.managementState
-        guard state == .managed || (state == .unmanaged && configManager.isManaged) else { return }
+        let canRestoreActiveManagedRoutes = state == .managed || (state == .unmanaged && configManager.isManaged)
 
         var toRestore: [OpenCodeNode] = []
-        for node in activeNodes where node.proxyEnabled {
-            toRestore.append(node)
+        if canRestoreActiveManagedRoutes {
+            for node in activeNodes where node.proxyEnabled {
+                toRestore.append(node)
+            }
         }
         for id in proxyOnlyNodeIds where !activeNodeIds.contains(id) {
             if let node = nodes.first(where: { $0.id == id && $0.proxyEnabled }) {

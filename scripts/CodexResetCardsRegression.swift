@@ -83,6 +83,8 @@ struct CodexResetCardsRegression {
         try await testUICoordinator()
         try await testLoadConsumeOrdering()
         await testRegistryProtection()
+        await testSameIDResetOverviewConsistency()
+        await testExplicitAccountHideOverviewAndLateRefresh()
         try await testRetryRefreshOrdering()
         if failures > 0 { print("FAILED: \(failures) / \(assertions) assertions"); exit(1) }
         print("PASS: \(assertions) Codex reset-card coordinator/conversion/concurrency assertions")
@@ -175,6 +177,245 @@ struct CodexResetCardsRegression {
             }
         }
         print("Registry regression: 6 production apply paths × response/worker/worker-without-registry-revision suspension; real AccountStore and worker")
+    }
+
+    @MainActor static func testSameIDResetOverviewConsistency() async {
+        let a = credential("A", user: "a")
+        AccountCredentialStore.shared.credentials = [a]
+        let healthySameIDA = result(a, count: 3)
+        var criticalSameIDA = result(a, count: 0)
+        criticalSameIDA.summary!.status = "critical"
+        criticalSameIDA.summary!.statusLabel = "Critical"
+        criticalSameIDA.summary!.headline = HeadlineInfo(
+            eyebrow: criticalSameIDA.summary!.headline.eyebrow,
+            primary: criticalSameIDA.summary!.headline.primary,
+            secondary: "0% left",
+            supporting: criticalSameIDA.summary!.headline.supporting
+        )
+        criticalSameIDA.summary!.sourceFilePath = "/fixture/old-same-id/auth.json"
+        let criticalOverviewJSON = #"{"generatedAt":"fixture-stale","activeProviders":1,"attentionProviders":1,"criticalProviders":1,"resetSoonProviders":0,"localCostMonthUsd":0,"localWeekTokens":0,"stats":[],"alerts":[{"id":"codex:cred:A:status-critical","tone":"critical","providerId":"codex:cred:A","title":"Codex needs attention","body":"0% left"}]}"#
+        let criticalSnapshotJSON = "{\"generatedAt\":\"fixture-stale\",\"overview\":\(criticalOverviewJSON),\"providers\":\(String(data: try! JSONEncoder().encode([criticalSameIDA]), encoding: .utf8)!)}"
+        let criticalSnapshot = try! JSONDecoder().decode(DashboardSnapshot.self, from: Data(criticalSnapshotJSON.utf8))
+        let criticalRemote = try! JSONDecoder().decode(DashboardResponse.self, from: Data(criticalSnapshotJSON.utf8))
+
+        for path in ["dashboard", "dashboard-remote"] {
+            AppSettings.shared.backendMode = "local"
+            let coordinator = ProviderRefreshCoordinator()
+            coordinator.accountStore.accountRegistry = []
+            let initialCritical = coordinator.localizedProviderResults(from: [criticalSameIDA], language: "en").map(\.provider)
+            coordinator.providers = initialCritical
+            coordinator.overview = coordinator.recomputedOverview(
+                for: initialCritical,
+                baseOverview: nil,
+                generatedAt: "fixture-initial",
+                language: "en"
+            )
+            check(coordinator.overview?.criticalProviders == 1 && coordinator.overview?.alerts.map(\.id) == ["codex:cred:A:status-critical"],
+                  "[§11.2] \(path): precondition sets initial critical alert for codex:cred:A")
+
+            var responseGate: CheckedContinuation<Void, Never>?
+            let waitForResponse: () async -> Void = {
+                await withCheckedContinuation { responseGate = $0 }
+            }
+            coordinator.engine.all = { await waitForResponse(); return criticalSnapshot }
+            APIService.shared.dashboard = { await waitForResponse(); return criticalRemote }
+            coordinator.engine.fetch = { _ in healthySameIDA }
+
+            let staleBulk = Task {
+                path == "dashboard-remote"
+                    ? await coordinator.fetchDashboardRemote(showMessageOnFailure: false)
+                    : await coordinator.fetchDashboardLocal()
+            }
+            while responseGate == nil { await Task.yield() }
+            let refreshed = await coordinator.refreshCodexAccountAfterReset(credentialId: "A", identity: CodexAccountIdentity(credential: a))
+            check(refreshed, "[§11.2] \(path): post-reset targeted refresh accepted")
+            check(coordinator.overview?.criticalProviders == 0 && coordinator.overview?.alerts.isEmpty == true,
+                  "[§11.2] \(path): targeted reset clears stale critical alert before stale bulk settles")
+
+            responseGate?.resume()
+            _ = await staleBulk.value
+            check(coordinator.providers.map(\.id) == ["codex:cred:A"]
+                    && coordinator.providers.first?.status == .healthy
+                    && coordinator.overview?.activeProviders == 1
+                    && coordinator.overview?.attentionProviders == 0
+                    && coordinator.overview?.criticalProviders == 0
+                    && coordinator.overview?.alerts.isEmpty == true,
+                  "[§11.2] \(path): same-ID stale critical response must not restore stale critical alert over post-reset healthy row")
+        }
+    }
+
+    @MainActor static func testExplicitAccountHideOverviewAndLateRefresh() async {
+        AppSettings.shared.backendMode = "local"
+        let credA = credential("A", user: "a")
+        let credB = credential("B", user: "b")
+        AccountCredentialStore.shared.credentials = [credA, credB]
+
+        func makeCriticalResult(_ cred: AccountCredential) -> ProviderResult {
+            var res = result(cred, count: 0)
+            res.summary!.status = "critical"
+            res.summary!.statusLabel = "Critical"
+            res.summary!.headline = HeadlineInfo(
+                eyebrow: res.summary!.headline.eyebrow,
+                primary: res.summary!.headline.primary,
+                secondary: "0% left",
+                supporting: res.summary!.headline.supporting
+            )
+            return res
+        }
+
+        let coordinator = ProviderRefreshCoordinator()
+        defer { coordinator.accountStore.accountRegistry = [] }
+
+        let criticalAResult = makeCriticalResult(credA)
+        let criticalARow = coordinator.localizedProviderResults(from: [criticalAResult], language: "en")[0].provider
+        let healthyBRow = coordinator.localizedProviderResults(from: [result(credB, count: 5)], language: "en")[0].provider
+
+        func makeStored(_ cred: AccountCredential, live: ProviderData, email: String) -> StoredProviderAccount {
+            StoredProviderAccount(
+                id: "stored-\(cred.id)",
+                providerId: "codex",
+                email: email,
+                displayName: email,
+                note: nil,
+                accountId: live.accountId,
+                providerResultId: live.id,
+                credentialId: cred.id,
+                createdAt: "2026-11-22T00:00:00Z",
+                lastSeenAt: "2026-11-22T01:00:00Z",
+                isHidden: false,
+                isPermanentlyRemoved: false,
+                sourceFilePath: live.sourceFilePath,
+                workspaceUserId: live.workspaceUserId
+            )
+        }
+
+        // (a) Standalone explicit account hide (auto-refresh off) clears overview critical alert immediately
+        let storedA = makeStored(credA, live: criticalARow, email: "a@fixture.test")
+        coordinator.accountStore.accountRegistry = [storedA]
+        coordinator.providers = [criticalARow]
+        coordinator.overview = coordinator.recomputedOverview(
+            for: [criticalARow],
+            baseOverview: nil,
+            generatedAt: "2026-11-22T01:00:00Z",
+            language: "en"
+        )
+        check(coordinator.overview?.alerts.map(\.id) == ["codex:cred:A:status-critical"],
+              "[§15.1] precondition sets critical alert for explicit account A")
+        let entryA = ProviderAccountEntry(
+            id: storedA.id,
+            providerId: "codex",
+            providerTitle: "Codex",
+            providerSubtitle: nil,
+            liveProvider: criticalARow,
+            storedAccount: storedA
+        )
+        coordinator.accountStore.hideAccounts([entryA]) {
+            coordinator.removeLiveProviders(matching: [entryA])
+            coordinator.reapplyVisibleSortedProviders()
+        }
+        check(coordinator.accountStore.accountRegistry.first(where: { $0.credentialId == "A" })?.isHidden == true,
+              "[§15.1] (a) real AccountStore marks account A hidden")
+        check(coordinator.providers.isEmpty
+                && coordinator.overview?.activeProviders == 0
+                && coordinator.overview?.attentionProviders == 0
+                && coordinator.overview?.criticalProviders == 0
+                && coordinator.overview?.alerts.isEmpty == true,
+              "[§15.1] (a) standalone explicit account hide clears row and Inbox critical alert immediately")
+
+        // (b) Exact Codex §15.1 repro: hide account A while targeted refresh is suspended
+        coordinator.accountStore.accountRegistry = [storedA]
+        coordinator.providers = [criticalARow]
+        coordinator.overview = coordinator.recomputedOverview(
+            for: [criticalARow],
+            baseOverview: nil,
+            generatedAt: "2026-11-22T01:05:00Z",
+            language: "en"
+        )
+        var targetedGate: CheckedContinuation<Void, Never>?
+        coordinator.engine.fetch = { _ in
+            await withCheckedContinuation { targetedGate = $0 }
+            return criticalAResult
+        }
+        let targetedTask = Task {
+            await coordinator.fetchAccountByCredential(credentialId: "A", providerId: "codex")
+        }
+        while targetedGate == nil { await Task.yield() }
+        coordinator.accountStore.hideAccounts([entryA]) {
+            coordinator.removeLiveProviders(matching: [entryA])
+            coordinator.reapplyVisibleSortedProviders()
+        }
+        check(coordinator.providers.isEmpty
+                && coordinator.overview?.activeProviders == 0
+                && coordinator.overview?.alerts.isEmpty == true,
+              "[§15.1] (b) hiding account while targeted refresh suspended clears row and overview before completion")
+        targetedGate?.resume()
+        let lateResult = await targetedTask.value
+        check(lateResult.status == .failure
+                && coordinator.accountStore.accountRegistry.first(where: { $0.credentialId == "A" })?.isHidden == true
+                && coordinator.providers.isEmpty
+                && coordinator.overview?.activeProviders == 0
+                && coordinator.overview?.attentionProviders == 0
+                && coordinator.overview?.criticalProviders == 0
+                && coordinator.overview?.alerts.isEmpty == true,
+              "[§15.1] (b) rejected late targeted refresh after explicit hide leaves zero rows and zero Inbox alerts")
+
+        // (c) Partial explicit hide with two accounts keeps B visible and drops only A's critical alert
+        let storedB = makeStored(credB, live: healthyBRow, email: "b@fixture.test")
+        coordinator.accountStore.accountRegistry = [storedA, storedB]
+        coordinator.providers = [criticalARow, healthyBRow]
+        coordinator.overview = coordinator.recomputedOverview(
+            for: [criticalARow, healthyBRow],
+            baseOverview: nil,
+            generatedAt: "2026-11-22T01:10:00Z",
+            language: "en"
+        )
+        check(coordinator.overview?.activeProviders == 2 && coordinator.overview?.alerts.map(\.id) == ["codex:cred:A:status-critical"],
+              "[§15.1] (c) two-account precondition starts with critical alert from A alongside healthy B")
+        coordinator.accountStore.hideAccounts([entryA]) {
+            coordinator.removeLiveProviders(matching: [entryA])
+            coordinator.reapplyVisibleSortedProviders()
+        }
+        check(coordinator.providers.map(\.id) == ["codex:cred:B"]
+                && coordinator.overview?.activeProviders == 1
+                && coordinator.overview?.attentionProviders == 0
+                && coordinator.overview?.criticalProviders == 0
+                && coordinator.overview?.alerts.isEmpty == true,
+              "[§15.1] (c) hiding A while keeping B visible preserves B row and clears A critical alert from Inbox")
+
+        // (d) Provider scanning disable via removeProviders(matchingBaseProviderId:) also syncs overview
+        coordinator.accountStore.accountRegistry = [storedA]
+        coordinator.providers = [criticalARow]
+        coordinator.overview = coordinator.recomputedOverview(
+            for: [criticalARow],
+            baseOverview: nil,
+            generatedAt: "2026-11-22T01:15:00Z",
+            language: "en"
+        )
+        coordinator.removeProviders(matchingBaseProviderId: "codex")
+        check(coordinator.providers.isEmpty
+                && coordinator.overview?.activeProviders == 0
+                && coordinator.overview?.criticalProviders == 0
+                && coordinator.overview?.alerts.isEmpty == true,
+              "[§15.1] (d) removeProviders(matchingBaseProviderId:) syncs overview and clears Inbox alerts")
+
+        // Deletion can remove the credential binding without ever having a live row.
+        var storedOnlyA = storedA
+        storedOnlyA.providerResultId = nil
+        let storedOnlyEntry = ProviderAccountEntry(id: storedOnlyA.id, providerId: "codex",
+                                                    providerTitle: "Codex", providerSubtitle: nil,
+                                                    liveProvider: nil, storedAccount: storedOnlyA)
+        coordinator.accountStore.accountRegistry = [storedOnlyA, storedB]
+        coordinator.providers = [healthyBRow]
+        coordinator.refreshError = ("Codex account A timed out", "codex", "a")
+        let deleted = coordinator.accountStore.deleteAccounts([storedOnlyEntry]) { removed in
+            coordinator.removeLiveProviders(matching: removed)
+            coordinator.reapplyVisibleSortedProviders()
+        }
+        check(deleted.map(\.id) == [storedOnlyA.id]
+                && AccountCredentialStore.shared.credentials.map(\.id) == ["B"],
+              "[AGY #1A] Real AccountStore deleted stored-only A using the fixture credential store")
+        check(coordinator.providers.map(\.id) == ["codex:cred:B"] && coordinator.errorMessage == nil,
+              "[AGY #1A] Stored-only delete clears the owning banner without waiting for async purge")
     }
 
     @MainActor static func testRetryRefreshOrdering() async throws {

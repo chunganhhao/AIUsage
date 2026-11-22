@@ -20,8 +20,24 @@ struct MenuBarRestartPrompt {
 }
 // No real process is queried, terminated or launched by these types.
 final class FakeApplication {
-    var isTerminated: Bool { !Boundary.running }
-    func terminate() -> Bool { Boundary.quitRequested = true; if Boundary.quitAccepted && !Boundary.stuck { Boundary.running = false }; return Boundary.quitAccepted }
+    var isTerminated: Bool {
+        if !Boundary.running { return true }
+        if Boundary.quitRequested && Boundary.quitPollsRemaining > 0 {
+            Boundary.quitPollsRemaining -= 1
+            if Boundary.quitPollsRemaining == 0 {
+                Boundary.running = false
+                return true
+            }
+        }
+        return false
+    }
+    func terminate() -> Bool {
+        Boundary.quitRequested = true
+        if Boundary.quitAccepted && !Boundary.stuck && Boundary.quitPollsRemaining == 0 {
+            Boundary.running = false
+        }
+        return Boundary.quitAccepted
+    }
 }
 enum NSRunningApplication {
     static func runningApplications(withBundleIdentifier: String) -> [FakeApplication] { Boundary.running ? [FakeApplication()] : [] }
@@ -36,9 +52,11 @@ final class NSWorkspace {
 }
 enum Boundary {
     static var installed = true, running = true, quitAccepted = true, stuck = false, helpers = false
+    static var helpersExitOnTerminate = false, helperTerminateCalls = 0, quitPollsRemaining = 0
     static var reapplyFails = false, launchFails = false, quitRequested = false, reapplied = false, opened = false
     static func reset() {
         installed = true; running = true; quitAccepted = true; stuck = false; helpers = false
+        helpersExitOnTerminate = false; helperTerminateCalls = 0; quitPollsRemaining = 0
         reapplyFails = false; launchFails = false; quitRequested = false; reapplied = false; opened = false
     }
 }
@@ -51,7 +69,12 @@ final class ProviderActivationManager: ObservableObject {
     static let codexBundleIdentifier = "fixture-only"
     static func resolveInstalledCodexAppURL() -> URL? { Boundary.installed ? URL(fileURLWithPath: "/tmp/fixture-only.app") : nil }
     static func isCodexChildHelperRunning(appBundlePath: String) -> Bool { Boundary.helpers }
-    static func terminateOrphanedCodexChildHelpers(appBundlePath: String) {}
+    static func terminateOrphanedCodexChildHelpers(appBundlePath: String) {
+        Boundary.helperTerminateCalls += 1
+        if Boundary.helpersExitOnTerminate {
+            Boundary.helpers = false
+        }
+    }
     func activateCodexAccount(entry: ProviderAccountEntry) throws { Boundary.reapplied = true }
     func reapplyCodexAccountForRestart(fallbackEntry: ProviderAccountEntry?) async throws {
         Boundary.reapplied = true
@@ -129,6 +152,14 @@ struct DiagnosticBanner: View {
             check(Boundary.opened && Boundary.reapplied && !manager.isCodexRestarting, "success path changed")
             check(Boundary.quitRequested == running, "quit requested for absent app")
         }
+        // Multi-tick graceful quit with default 20s timeout and helper SIGTERM drain recovery must both succeed.
+        Boundary.reset(); Boundary.quitPollsRemaining = 3
+        do { try await manager.restartCodexApp(pollIntervalMilliseconds: 10) } catch { fatalError("delayed quit recovery failed: \(error)") }
+        check(Boundary.opened && Boundary.reapplied && Boundary.quitPollsRemaining == 0 && !manager.isCodexRestarting, "delayed quit failed")
+
+        Boundary.reset(); Boundary.helpers = true; Boundary.helpersExitOnTerminate = true
+        do { try await manager.restartCodexApp(timeoutSeconds: 0.3, pollIntervalMilliseconds: 10) } catch { fatalError("helper SIGTERM recovery failed: \(error)") }
+        check(Boundary.opened && Boundary.reapplied && Boundary.helperTerminateCalls == 1 && !Boundary.helpers && !manager.isCodexRestarting, "helper drain recovery failed")
         // Execute both exact production UI callbacks, not a rewritten error mapper.
         for fails in [true, false] {
             Boundary.reset(); Boundary.installed = !fails

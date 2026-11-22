@@ -11,13 +11,13 @@ extension ProviderRefreshCoordinator {
         expectedCodexIdentity: String? = nil
     ) async -> ProviderRefreshResult {
         guard settings.backendMode == "local" else {
-            return .failure()
+            return .ignored()
         }
         await syncExcludedAccountsToEngine()
         let resetGeneration = codexResetRefreshFence.token
         guard let result = await engine.fetchForCredential(providerId: providerId, credentialId: credentialId),
               result.summary != nil else {
-            return .failure()
+            return .ignored()
         }
         // convert + localize 在后台执行器完成（Task.detached），主线程只拿回结果。
         let language = self.language
@@ -25,18 +25,37 @@ extension ProviderRefreshCoordinator {
             localizedProviderResults(from: [result], language: language)
         }.value
         guard let converted = convertedBatch.first?.provider else {
-            return .failure()
+            return .ignored()
         }
         guard isCredentialStillRegistered(providerId: providerId, credentialId: credentialId) else {
-            return .failure()
+            return .ignored()
         }
         let identity = codexResetIdentity(converted)
-        guard expectedCodexIdentity == nil || expectedCodexIdentity == identity else { return .failure() }
-        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
+        guard expectedCodexIdentity == nil || expectedCodexIdentity == identity else { return .ignored() }
+        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .ignored() }
         await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
-        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .failure() }
+        guard settings.backendMode == "local", identity.map({ codexResetRefreshFence.accepts(resetGeneration, identity: $0) }) != false else { return .ignored() }
         guard isCredentialStillRegistered(providerId: providerId, credentialId: credentialId) else {
-            return .failure()
+            return .ignored()
+        }
+
+        let currentVisibleIds = Set(selectedProviderIDList())
+        guard currentVisibleIds.contains(converted.baseProviderId),
+              !visibleProviders(from: [converted]).isEmpty else {
+            let pruned = visibleProviders(from: providers)
+                .filter { currentVisibleIds.contains($0.baseProviderId) }
+            if pruned.count != providers.count {
+                providers = pruned
+            }
+            if let existingOverview = overview {
+                overview = recomputedOverview(
+                    for: providers,
+                    baseOverview: existingOverview,
+                    generatedAt: existingOverview.generatedAt,
+                    language: language
+                )
+            }
+            return .ignored()
         }
 
         let existingIndex = providers.firstIndex(where: { $0.id == converted.id })
@@ -46,9 +65,17 @@ extension ProviderRefreshCoordinator {
             clearAccountCheckError(for: converted, credentialId: credentialId)
             if let existingIndex {
                 providers[existingIndex] = converted
-            } else if !isProviderHidden(converted) {
+            } else {
                 providers.append(converted)
                 providers = providers.sorted(by: providerSort)
+            }
+            if let existingOverview = overview {
+                overview = recomputedOverview(
+                    for: providers,
+                    baseOverview: existingOverview,
+                    generatedAt: existingOverview.generatedAt,
+                    language: language
+                )
             }
             guard let refreshedProvider = currentProviderMatchingRefresh(converted) else {
                 return .failure()
@@ -73,9 +100,17 @@ extension ProviderRefreshCoordinator {
         clearAccountCheckError(for: converted, credentialId: credentialId)
         if let existingIndex {
             providers[existingIndex] = converted
-        } else if !isProviderHidden(converted) {
+        } else {
             providers.append(converted)
             providers = providers.sorted(by: providerSort)
+        }
+        if let existingOverview = overview {
+            overview = recomputedOverview(
+                for: providers,
+                baseOverview: existingOverview,
+                generatedAt: existingOverview.generatedAt,
+                language: language
+            )
         }
         return .failure()
     }
@@ -88,6 +123,7 @@ extension ProviderRefreshCoordinator {
         guard !uniqueProviderIDs.isEmpty else { return }
 
         for providerId in uniqueProviderIDs {
+            await Task.yield()
             let candidates = ProviderAuthManager.unmanagedCandidates(for: providerId)
             guard !candidates.isEmpty else { continue }
 
@@ -259,13 +295,24 @@ extension ProviderRefreshCoordinator {
             let convertedResults = await Task.detached { [self] in
                 localizedProviderResults(from: results, language: language)
             }.value
+            guard selectedProviderIDList().contains(providerId) else {
+                replaceProviderEntries(for: providerId, with: [])
+                return .ignored()
+            }
             let stabilizedResults = stabilizedBulkRefreshProviders(
                 convertedResults.map(\.provider),
                 preservingExistingFor: providerId
             )
             await reconcileResetProtectedAccountRegistry(stabilizedResults, since: resetGeneration)
+            guard selectedProviderIDList().contains(providerId) else {
+                replaceProviderEntries(for: providerId, with: [])
+                return .ignored()
+            }
             let visible = visibleProviders(from: preserveCodexResetUpdates(stabilizedResults, since: resetGeneration, providerId: providerId))
             replaceProviderEntries(for: providerId, with: visible)
+            guard !visible.isEmpty else {
+                return .ignored()
+            }
             let timestampable = timestampableProviders(
                 for: convertedResults.filter(\.ok).map(\.provider)
             )
@@ -281,7 +328,15 @@ extension ProviderRefreshCoordinator {
             let convertedResults = await Task.detached { [self] in
                 localizedProviderResults(from: [result], language: language)
             }.value
-            guard let converted = convertedResults.first?.provider else { return .failure() }
+            guard let converted = convertedResults.first?.provider else { return .ignored() }
+            guard selectedProviderIDList().contains(providerId),
+                  !visibleProviders(from: [converted]).isEmpty else {
+                let remainingVisible = selectedProviderIDList().contains(providerId)
+                    ? visibleProviders(from: providers.filter { $0.baseProviderId == providerId })
+                    : []
+                replaceProviderEntries(for: providerId, with: remainingVisible)
+                return .ignored()
+            }
             if !result.ok,
                let existing = providers.first(where: { $0.baseProviderId == providerId && isLastKnownErrorPreservable($0) }),
                !isTerminalStopFailure(converted) {
@@ -297,6 +352,14 @@ extension ProviderRefreshCoordinator {
                 clearAccountCheckError(for: converted, credentialId: credentialID(for: converted))
             }
             await reconcileResetProtectedAccountRegistry([converted], since: resetGeneration)
+            guard selectedProviderIDList().contains(providerId),
+                  !visibleProviders(from: [converted]).isEmpty else {
+                let remainingVisible = selectedProviderIDList().contains(providerId)
+                    ? visibleProviders(from: providers.filter { $0.baseProviderId == providerId })
+                    : []
+                replaceProviderEntries(for: providerId, with: remainingVisible)
+                return .ignored()
+            }
             replaceProviderEntries(for: providerId, with: visibleProviders(from: preserveCodexResetUpdates([converted], since: resetGeneration, providerId: providerId)))
             let timestampable = result.ok ? timestampableProviders(for: [converted]) : []
             let latestAcquiredAt = timestampable.compactMap(resolvedFetchedDate(for:)).max()
@@ -307,7 +370,7 @@ extension ProviderRefreshCoordinator {
                 at: latestAcquiredAt
             )
         }
-        return .failure()
+        return .ignored()
     }
 
     @MainActor
@@ -323,11 +386,20 @@ extension ProviderRefreshCoordinator {
             let localizedProviders = await Task.detached { [self] in
                 localizedProviderList(remoteItems, language: language)
             }.value
+            guard selectedProviderIDList().contains(providerId) else {
+                replaceProviderEntries(for: providerId, with: [])
+                return .ignored()
+            }
             await reconcileResetProtectedAccountRegistry(localizedProviders.map(\.provider), since: resetGeneration)
-            replaceProviderEntries(
-                for: providerId,
-                with: visibleProviders(from: preserveCodexResetUpdates(localizedProviders.map(\.provider), since: resetGeneration, providerId: providerId))
-            )
+            guard selectedProviderIDList().contains(providerId) else {
+                replaceProviderEntries(for: providerId, with: [])
+                return .ignored()
+            }
+            let visible = visibleProviders(from: preserveCodexResetUpdates(localizedProviders.map(\.provider), since: resetGeneration, providerId: providerId))
+            replaceProviderEntries(for: providerId, with: visible)
+            guard !visible.isEmpty else {
+                return .ignored()
+            }
             return .classified(
                 totalResults: results.count,
                 refreshedProviders: timestampableProviders(
@@ -338,6 +410,9 @@ extension ProviderRefreshCoordinator {
         } catch {
             let redactedError = SensitiveDataRedactor.redactedMessage(for: error)
             sendErrorNotification("Remote refresh failed for \(providerId): \(redactedError)")
+            guard selectedProviderIDList().contains(providerId) else {
+                return .ignored()
+            }
             return .failure(
                 userMessage: !providers.contains(where: { $0.baseProviderId == providerId })
                     ? redactedError
@@ -348,14 +423,24 @@ extension ProviderRefreshCoordinator {
 
     @MainActor
     func fetchDashboardLocal(useRecentResults: Bool = false, automatic: Bool = false) async -> ProviderRefreshResult {
+        let requestedIds = selectedProviderIDList()
+        guard !requestedIds.isEmpty else {
+            providers = []
+            overview = localizeOverview(convertOverview(UsageNormalizer.createDashboardOverview(
+                summaries: [],
+                generatedAt: SharedFormatters.iso8601String(from: Date())
+            )), language: language)
+            return .emptySuccess()
+        }
+        let requestedIdSet = Set(requestedIds)
         let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         await syncExcludedAccountsToEngine()
-        await syncUnifiedManagedAccounts(for: selectedProviderIDList())
+        await syncUnifiedManagedAccounts(for: requestedIds)
         await syncExcludedAccountsToEngine()
 
         let snapshot = await engine.fetchAll(
-            ids: selectedProviderIDList(),
+            ids: requestedIds,
             useRecentResults: useRecentResults,
             backgroundAutomatic: automatic
         )
@@ -371,56 +456,112 @@ extension ProviderRefreshCoordinator {
             includingExistingFor: ["antigravity"]
         )
         await reconcileResetProtectedAccountRegistry(stabilizedProviders, since: resetGeneration)
-        let finalProviders = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
+        let currentVisibleIds = Set(selectedProviderIDList())
+        guard !currentVisibleIds.isEmpty else {
+            providers = []
+            overview = recomputedOverview(
+                for: [],
+                baseOverview: nil,
+                generatedAt: SharedFormatters.iso8601String(from: Date()),
+                language: language
+            )
+            return .emptySuccess()
+        }
+        let coveredVisibleIds = currentVisibleIds.intersection(requestedIdSet)
+        guard !coveredVisibleIds.isEmpty else {
+            let pruned = visibleProviders(from: providers)
+                .filter { currentVisibleIds.contains($0.baseProviderId) }
+            if pruned.count != providers.count {
+                providers = pruned
+                if let existingOverview = overview {
+                    overview = recomputedOverview(
+                        for: pruned,
+                        baseOverview: existingOverview,
+                        generatedAt: existingOverview.generatedAt,
+                        language: language
+                    )
+                }
+            }
+            return .ignored(status: .success)
+        }
+        let uncoveredVisibleExisting = visibleProviders(from: providers)
+            .filter { currentVisibleIds.contains($0.baseProviderId) && !coveredVisibleIds.contains($0.baseProviderId) }
+        let coveredUpdates = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
+            .filter { coveredVisibleIds.contains($0.baseProviderId) }
+        let finalProviders = (uncoveredVisibleExisting + coveredUpdates).sorted(by: providerSort)
         providers = finalProviders
-        let incomingIDs = Set(localizedProviders.map(\.provider.id))
-        let preserved = finalProviders.filter { $0.baseProviderId == "antigravity" && !incomingIDs.contains($0.id) }
-        if preserved.isEmpty {
-            overview = batch.overview
-        } else {
-            let extraActive = preserved.filter { $0.status != .error }.count
-            let extraAttention = preserved.filter { $0.status == .watch || $0.status == .critical }.count
-            let extraCritical = preserved.filter { $0.status == .critical }.count
-            let extraResetSoon = preserved.filter {
-                guard let raw = $0.nextResetAt, let date = SharedFormatters.parseISO8601(raw) else { return false }
-                let diff = date.timeIntervalSinceNow
-                return diff >= 0 && diff <= 86400
-            }.count
-            overview = DashboardOverview(
+        let coveredRowIDs = Set(coveredUpdates.map(\.id))
+        let uncoveredRowIDs = Set(uncoveredVisibleExisting.map(\.id))
+        let preservedUncoveredAlerts = (overview?.alerts ?? []).filter { uncoveredRowIDs.contains($0.providerId) }
+        let mergedBaseOverview = preservedUncoveredAlerts.isEmpty
+            ? batch.overview
+            : DashboardOverview(
                 generatedAt: batch.overview.generatedAt,
-                activeProviders: batch.overview.activeProviders + extraActive,
-                attentionProviders: batch.overview.attentionProviders + extraAttention,
-                criticalProviders: batch.overview.criticalProviders + extraCritical,
-                resetSoonProviders: batch.overview.resetSoonProviders + extraResetSoon,
+                activeProviders: batch.overview.activeProviders,
+                attentionProviders: batch.overview.attentionProviders,
+                criticalProviders: batch.overview.criticalProviders,
+                resetSoonProviders: batch.overview.resetSoonProviders,
                 localCostMonthUsd: batch.overview.localCostMonthUsd,
                 localWeekTokens: batch.overview.localWeekTokens,
                 stats: batch.overview.stats,
-                alerts: batch.overview.alerts
+                alerts: batch.overview.alerts + preservedUncoveredAlerts
             )
-        }
-        let refreshedBatch = localizedProviders.filter(\.ok).map(\.provider)
+        overview = recomputedOverview(
+            for: finalProviders,
+            baseOverview: mergedBaseOverview,
+            generatedAt: batch.overview.generatedAt,
+            language: language
+        )
+        let refreshedBatch = localizedProviders
+            .filter {
+                $0.ok && coveredVisibleIds.contains($0.provider.baseProviderId)
+                    && coveredRowIDs.contains($0.provider.id)
+                    && acceptsCodexResetRefresh($0.provider, since: resetGeneration)
+            }
+            .map(\.provider)
         let latestAcquiredAt = refreshedBatch.compactMap(resolvedFetchedDate(for:)).max()
             ?? (refreshedBatch.allSatisfy { $0.baseProviderId == "antigravity" || $0.baseProviderId == "codex" } ? nil : refreshedAt)
         return .classified(
             totalResults: snapshot.providers.count,
             refreshedProviders: refreshedBatch,
-            at: latestAcquiredAt
+            at: latestAcquiredAt,
+            shouldUpdateErrorBanner: currentVisibleIds.isSubset(of: requestedIdSet)
         )
     }
 
     @MainActor
     func fetchDashboardRemote(showMessageOnFailure: Bool) async -> ProviderRefreshResult {
+        let requestedIds = selectedProviderIDList()
+        guard !requestedIds.isEmpty else {
+            providers = []
+            overview = localizeOverview(convertOverview(UsageNormalizer.createDashboardOverview(
+                summaries: [],
+                generatedAt: SharedFormatters.iso8601String(from: Date())
+            )), language: language)
+            return .emptySuccess()
+        }
+        var lastAttemptedIds = Set(requestedIds)
         let resetGeneration = codexResetRefreshFence.token
         let refreshedAt = Date()
         APIService.shared.updateBaseURL(settings.remoteBaseURL)
         do {
-            var dashboard = try await APIService.shared.fetchDashboard(providerIds: selectedProviderIDList())
+            var dashboard = try await APIService.shared.fetchDashboard(providerIds: requestedIds)
             // Cold HTTP reads are immediate; follow pending data even when the
             // user's auto-refresh timer is Off. This polls the cache, not Google.
             for _ in 0..<180 {
                 guard dashboard.providers.contains(where: { $0.summary.errorCode == "refresh_pending" }) else { break }
                 try await Task.sleep(for: .seconds(2))
-                dashboard = try await APIService.shared.fetchDashboard(providerIds: selectedProviderIDList())
+                let followUpIds = selectedProviderIDList()
+                guard !followUpIds.isEmpty else {
+                    providers = []
+                    overview = localizeOverview(convertOverview(UsageNormalizer.createDashboardOverview(
+                        summaries: [],
+                        generatedAt: SharedFormatters.iso8601String(from: Date())
+                    )), language: language)
+                    return .emptySuccess()
+                }
+                lastAttemptedIds = Set(followUpIds)
+                dashboard = try await APIService.shared.fetchDashboard(providerIds: followUpIds)
             }
             // 主线程仅重组为 Sendable 元组（无正则）；providers + overview 本地化在后台执行器完成。
             let language = self.language
@@ -432,18 +573,87 @@ extension ProviderRefreshCoordinator {
             let localizedProviders = batch.providers
             let stabilizedProviders = stabilizedBulkRefreshProviders(localizedProviders.map(\.provider))
             await reconcileResetProtectedAccountRegistry(stabilizedProviders, since: resetGeneration)
-            providers = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
-            overview = batch.overview
+            let currentVisibleIds = Set(selectedProviderIDList())
+            guard !currentVisibleIds.isEmpty else {
+                providers = []
+                overview = recomputedOverview(
+                    for: [],
+                    baseOverview: nil,
+                    generatedAt: SharedFormatters.iso8601String(from: Date()),
+                    language: language
+                )
+                return .emptySuccess()
+            }
+            let coveredVisibleIds = currentVisibleIds.intersection(lastAttemptedIds)
+            guard !coveredVisibleIds.isEmpty else {
+                let pruned = visibleProviders(from: providers)
+                    .filter { currentVisibleIds.contains($0.baseProviderId) }
+                if pruned.count != providers.count {
+                    providers = pruned
+                    if let existingOverview = overview {
+                        overview = recomputedOverview(
+                            for: pruned,
+                            baseOverview: existingOverview,
+                            generatedAt: existingOverview.generatedAt,
+                            language: language
+                        )
+                    }
+                }
+                return .ignored(status: .success)
+            }
+            let uncoveredVisibleExisting = visibleProviders(from: providers)
+                .filter { currentVisibleIds.contains($0.baseProviderId) && !coveredVisibleIds.contains($0.baseProviderId) }
+            let coveredUpdates = visibleProviders(from: preserveCodexResetUpdates(stabilizedProviders, since: resetGeneration))
+                .filter { coveredVisibleIds.contains($0.baseProviderId) }
+            let finalProviders = (uncoveredVisibleExisting + coveredUpdates).sorted(by: providerSort)
+            providers = finalProviders
+            let coveredRowIDs = Set(coveredUpdates.map(\.id))
+            let uncoveredRowIDs = Set(uncoveredVisibleExisting.map(\.id))
+            let preservedUncoveredAlerts = (overview?.alerts ?? []).filter { uncoveredRowIDs.contains($0.providerId) }
+            let mergedBaseOverview = preservedUncoveredAlerts.isEmpty
+                ? batch.overview
+                : DashboardOverview(
+                    generatedAt: batch.overview.generatedAt,
+                    activeProviders: batch.overview.activeProviders,
+                    attentionProviders: batch.overview.attentionProviders,
+                    criticalProviders: batch.overview.criticalProviders,
+                    resetSoonProviders: batch.overview.resetSoonProviders,
+                    localCostMonthUsd: batch.overview.localCostMonthUsd,
+                    localWeekTokens: batch.overview.localWeekTokens,
+                    stats: batch.overview.stats,
+                    alerts: batch.overview.alerts + preservedUncoveredAlerts
+                )
+            overview = recomputedOverview(
+                for: finalProviders,
+                baseOverview: mergedBaseOverview,
+                generatedAt: batch.overview.generatedAt,
+                language: language
+            )
             return .classified(
                 totalResults: dashboard.providers.count,
-                refreshedProviders: localizedProviders.filter(\.ok).map(\.provider),
-                at: refreshedAt
+                refreshedProviders: localizedProviders
+                    .filter {
+                        $0.ok && coveredVisibleIds.contains($0.provider.baseProviderId)
+                            && coveredRowIDs.contains($0.provider.id)
+                            && acceptsCodexResetRefresh($0.provider, since: resetGeneration)
+                    }
+                    .map(\.provider),
+                at: refreshedAt,
+                shouldUpdateErrorBanner: currentVisibleIds.isSubset(of: lastAttemptedIds)
             )
         } catch {
+            let currentVisibleIds = Set(selectedProviderIDList())
+            let coveredVisibleIds = currentVisibleIds.intersection(lastAttemptedIds)
+            guard !coveredVisibleIds.isEmpty else {
+                return .ignored()
+            }
+            let shouldPublishFailure = showMessageOnFailure
+                && !providers.contains(where: { coveredVisibleIds.contains($0.baseProviderId) })
             return .failure(
-                userMessage: showMessageOnFailure
+                userMessage: shouldPublishFailure
                     ? SensitiveDataRedactor.redactedMessage(for: error)
-                    : nil
+                    : nil,
+                shouldUpdateErrorBanner: shouldPublishFailure || currentVisibleIds.isSubset(of: lastAttemptedIds)
             )
         }
     }
@@ -453,10 +663,14 @@ extension ProviderRefreshCoordinator {
         return CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId).nativeKey
     }
 
+    func acceptsCodexResetRefresh(_ provider: ProviderData, since token: Int) -> Bool {
+        codexResetIdentity(provider).map { codexResetRefreshFence.accepts(token, identity: $0) } ?? true
+    }
+
     @MainActor
     func reconcileResetProtectedAccountRegistry(_ incoming: [ProviderData], since token: Int) async {
         let isValid: @MainActor (ProviderData) -> Bool = { provider in
-            self.codexResetIdentity(provider).map { self.codexResetRefreshFence.accepts(token, identity: $0) } ?? true
+            self.acceptsCodexResetRefresh(provider, since: token)
         }
         let accepted = incoming.filter(isValid)
         guard !accepted.isEmpty else { return }
@@ -474,13 +688,30 @@ extension ProviderRefreshCoordinator {
     }
 
     func selectedProviderIDList() -> [String] {
-        providerCatalogIds().filter { selectedProviderIds().contains($0) }
+        let selected = selectedProviderIds()
+        let hidden = settings.hiddenSidebarSections
+        return providerCatalogIds().filter {
+            selected.contains($0) && !AgentVisibility.isProviderHidden($0, hidden: hidden)
+        }
     }
 
     func replaceProviderEntries(for providerId: String, with replacements: [ProviderData]) {
-        providers.removeAll { $0.baseProviderId == providerId }
-        providers.append(contentsOf: replacements)
-        providers = providers.sorted(by: providerSort)
+        let currentVisibleIds = Set(selectedProviderIDList())
+        let acceptedReplacements = currentVisibleIds.contains(providerId)
+            ? visibleProviders(from: replacements)
+            : []
+        providers = visibleProviders(
+            from: providers.filter { $0.baseProviderId != providerId && currentVisibleIds.contains($0.baseProviderId) }
+                + acceptedReplacements
+        ).sorted(by: providerSort)
+        if let existingOverview = overview {
+            overview = recomputedOverview(
+                for: providers,
+                baseOverview: existingOverview,
+                generatedAt: existingOverview.generatedAt,
+                language: language
+            )
+        }
     }
 
     func completeGlobalRefresh(_ result: ProviderRefreshResult) {
@@ -823,7 +1054,10 @@ extension ProviderRefreshCoordinator {
     }
 
     func visibleProviders(from providers: [ProviderData]) -> [ProviderData] {
-        providers.filter { !isProviderHidden($0) }
+        let hiddenSections = settings.hiddenSidebarSections
+        return providers.filter {
+            !isProviderHidden($0) && !AgentVisibility.isProviderHidden($0.baseProviderId, hidden: hiddenSections)
+        }
     }
 
     func isProviderHidden(_ provider: ProviderData) -> Bool {

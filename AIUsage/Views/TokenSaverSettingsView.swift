@@ -650,27 +650,12 @@ struct TokenSaverUpdatesSection: View {
                     Label(L("Open Token Saver to enable tools", "打开 Token 节省页以启用工具"), systemImage: "bolt.fill")
                 }.accessibilityIdentifier("token-saver-open-runtime")
             }
-            TimelineView(.periodic(from: .now, by: 1)) { context in
-                let coolingDown = manager.retryAfter.map { $0 > context.date } ?? false
-                VStack(alignment: .leading, spacing: 12) {
-                    if let retry = manager.retryAfter, coolingDown {
-                        Label {
-                            VStack(alignment: .leading, spacing: 4) {
-                                Text(L("GitHub checks paused", "GitHub 检查已暂停")).fontWeight(.semibold)
-                                Text(L("Try again after \(retry.formatted(date: .abbreviated, time: .standard)) (local time). Checks resume then; nothing retries automatically. This shared GitHub API limit is not your AI quota.",
-                                       "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查，不会自动重试。此共享 GitHub API 限制不是 AI 配额。",
-                                       "Hãy thử lại sau \(retry.formatted(date: .abbreviated, time: .standard)) (giờ địa phương). Hệ thống chỉ kiểm tra lại sau mốc này và không tự thử lại. Giới hạn GitHub API dùng chung này không phải hạn mức AI của bạn."))
-                            }
-                        } icon: { Image(systemName: "clock.badge.exclamationmark") }
-                        .font(.caption).padding(12)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
-                        .accessibilityIdentifier("token-saver-cooldown")
-                    }
-                    ForEach(TokenSaverReleaseTool.allCases) { tool in
-                        toolRow(tool, coolingDown: coolingDown)
-                    }
+            if let retry = manager.retryAfter {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    releaseToolsSection(coolingDown: retry > context.date, retry: retry)
                 }
+            } else {
+                releaseToolsSection(coolingDown: false, retry: nil)
             }
         }
         .sheet(isPresented: $showRTKSetup) { rtkSetup }
@@ -684,6 +669,29 @@ struct TokenSaverUpdatesSection: View {
             Button(L("Cancel", "取消"), role: .cancel) { pendingInstall = nil }
         } message: {
             Text(L("Runs only brew upgrade rtk using trusted Homebrew. RTK must already be installed. Homebrew may update RTK and required dependencies outside AIUsage storage. No brew install or downloaded shell installer is run.", "仅通过可信 Homebrew 运行 brew upgrade rtk。RTK 必须已安装。Homebrew 可能在 AIUsage 存储之外更新 RTK 及必要依赖；不会运行 brew install 或下载的 Shell 安装器。"))
+        }
+    }
+
+    @ViewBuilder
+    private func releaseToolsSection(coolingDown: Bool, retry: Date?) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if let retry, coolingDown {
+                Label {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(L("GitHub checks paused", "GitHub 检查已暂停")).fontWeight(.semibold)
+                        Text(L("Try again after \(retry.formatted(date: .abbreviated, time: .standard)) (local time). Checks resume then; nothing retries automatically. This shared GitHub API limit is not your AI quota.",
+                               "请在本地时间 \(retry.formatted(date: .abbreviated, time: .standard)) 后重试。届时可再次检查，不会自动重试。此共享 GitHub API 限制不是 AI 配额。",
+                               "Hãy thử lại sau \(retry.formatted(date: .abbreviated, time: .standard)) (giờ địa phương). Hệ thống chỉ kiểm tra lại sau mốc này và không tự thử lại. Giới hạn GitHub API dùng chung này không phải hạn mức AI của bạn."))
+                    }
+                } icon: { Image(systemName: "clock.badge.exclamationmark") }
+                .font(.caption).padding(12)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(Color.orange.opacity(0.12), in: RoundedRectangle(cornerRadius: 8))
+                .accessibilityIdentifier("token-saver-cooldown")
+            }
+            ForEach(TokenSaverReleaseTool.allCases) { tool in
+                toolRow(tool, coolingDown: coolingDown)
+            }
         }
     }
 

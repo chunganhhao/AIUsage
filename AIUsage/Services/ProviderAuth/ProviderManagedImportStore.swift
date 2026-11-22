@@ -151,6 +151,12 @@ enum ProviderManagedImportStore {
         try boundary(create: true).activeRootURL
     }
 
+    static func stagingRootDirectory() throws -> URL {
+        let importsRoot = try managedImportsRootDirectory()
+        let stagingName = importsRoot.lastPathComponent.replacingOccurrences(of: "AuthImports", with: "Staging")
+        return importsRoot.deletingLastPathComponent().appendingPathComponent(stagingName, isDirectory: true)
+    }
+
     /// 读取补回时同时扫正式目录与当前隔离目录（Debug 仍能看到已恢复的历史文件）。
     static func readableImportRoots() -> [URL] {
         (try? boundary(create: false).readableRootURLs) ?? []

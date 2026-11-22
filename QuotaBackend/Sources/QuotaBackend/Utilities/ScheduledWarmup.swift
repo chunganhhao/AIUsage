@@ -55,7 +55,7 @@ public struct WarmupSettings: Codable, Sendable, Equatable {
     public var hour = 7
     public var minute = 0
     public var targets: [Target] = []
-    public var autoChainReset = true
+    public var autoChainReset = false
     public init() {}
     enum CodingKeys: String, CodingKey { case enabled, hour, minute, targets, autoChainReset }
     public init(from decoder: Decoder) throws {
@@ -64,7 +64,7 @@ public struct WarmupSettings: Codable, Sendable, Equatable {
         hour = try container.decodeIfPresent(Int.self, forKey: .hour) ?? 7
         minute = try container.decodeIfPresent(Int.self, forKey: .minute) ?? 0
         targets = try container.decodeIfPresent([Target].self, forKey: .targets) ?? []
-        autoChainReset = try container.decodeIfPresent(Bool.self, forKey: .autoChainReset) ?? true
+        autoChainReset = try container.decodeIfPresent(Bool.self, forKey: .autoChainReset) ?? false
     }
     static func file(_ home: URL) -> URL { home.appendingPathComponent("Library/Application Support/AIUsage/warmup.json") }
     public static func load(home: URL = FileManager.default.homeDirectoryForCurrentUser) throws -> Self {

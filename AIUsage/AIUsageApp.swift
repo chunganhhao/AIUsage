@@ -216,7 +216,7 @@ struct AIUsageApp: App {
     }
 }
 
-class AppDelegate: NSObject, NSApplicationDelegate {
+class AppDelegate: NSObject, NSApplicationDelegate, NSPopoverDelegate {
     var statusItem: NSStatusItem?
     private var popover: NSPopover?
     private var eventMonitor: Any?
@@ -238,8 +238,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         requestNotificationPermission()
 
         // 触发 OpenCode 节点 store 初始化：激活中的代理模式节点需要在启动时
-        // 恢复本地透传进程（opencode.json 指向本地端口，进程不在则 OpenCode 请求失败）。
-        _ = OpenCodeNodeStore.shared
+        // 恢复本地透传进程（opencode.json 指向本地端口，进程不在则 OpenCode 请求失败），
+        // 或在禁用自动恢复时清理残留受管路由。
+        if AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+            || OpenCodeNodeStore.hasPersistedManagedProxyRoute() {
+            _ = OpenCodeNodeStore.shared
+        }
 
         // CPA 是独立 sidecar：仅在用户开启自动启动且已安装时恢复。运行时会记录受管 PID，
         // 下次启动只清理路径与参数都严格匹配的孤儿，不会终止未知进程。
@@ -270,7 +274,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             }
             // Claude Code 每次回传额度都会写快照；监听后卡片即时更新，不等全局刷新周期。
-            ClaudeSubscriptionManager.shared.startWatching()
+            if AgentVisibility.isVisible(.claude, hidden: AppSettings.shared.hiddenSidebarSections) {
+                ClaudeSubscriptionManager.shared.startWatching()
+            }
         }
     }
 
@@ -392,6 +398,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         popover.contentSize = NSSize(width: 420, height: 700)
         popover.behavior = .transient
         popover.animates = true
+        popover.delegate = self
 
         popover.contentViewController = NSHostingController(
             rootView: MenuBarView()
@@ -403,6 +410,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
 
         if let button = statusItem?.button {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            ProviderRefreshCoordinator.shared.setPopoverVisible(true)
         }
 
         DispatchQueue.main.async {
@@ -410,6 +418,11 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             ProviderActivationManager.shared.detectActiveGeminiAccount()
             ProviderActivationManager.shared.detectActiveAntigravityAccount()
         }
+    }
+
+    func popoverDidClose(_ notification: Notification) {
+        ProviderRefreshCoordinator.shared.setPopoverVisible(false)
+        MenuBarActivationFeedback.unbindAll()
     }
 
     private func showContextMenu(from sender: NSStatusBarButton) {

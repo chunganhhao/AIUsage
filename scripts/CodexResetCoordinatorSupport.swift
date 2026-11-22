@@ -48,6 +48,12 @@ final class AppSettings: ObservableObject {
 @MainActor final class ProviderRefreshCoordinator: ObservableObject {
     func credentialID(for provider: ProviderData) -> String? { nil }
     var providers: [ProviderData] = []
+    var refreshError: (message: String, providerId: String?, credentialId: String?)?
+    var errorMessage: String? {
+        get { refreshError?.message }
+        set { refreshError = newValue.map { ($0, nil, nil) } }
+    }
+    var deletedCredentialKeysThisSession: Set<String> = []
     var codexResetRefreshFence = CodexResetRefreshFence()
     let settings = AppSettings.shared
     let accountStore = AccountStore.shared
@@ -57,7 +63,6 @@ final class AppSettings: ObservableObject {
     var refreshingAccountIDs: Set<String> = []
     nonisolated func localizedDynamicText(_ text: String, _ language: String) -> String { text }
     func providerSort(_ a: ProviderData, _ b: ProviderData) -> Bool { a.id < b.id }
-    func isProviderHidden(_ provider: ProviderData) -> Bool { false }
     func currentProviderMatchingRefresh(_ provider: ProviderData) -> ProviderData? { providers.first { $0.id == provider.id } }
     func accountRefreshKey(providerId: String, credentialId: String) -> String { "\(providerId):\(credentialId)" }
     func completeAccountRefresh(refreshKey: String, result: ProviderRefreshResult) {}
@@ -65,7 +70,7 @@ final class AppSettings: ObservableObject {
     func syncUnifiedManagedAccounts(for providerIds: [String]) async {}
     func syncExcludedAccountsToEngine() async {}
     func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil, includingExistingFor: Set<String> = []) -> [ProviderData] { incoming }
-    func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers }
+    func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers.filter { !isProviderHidden($0) } }
     func timestampableProviders(for providers: [ProviderData]) -> [ProviderData] { providers }
     func selectedProviderIDList() -> [String] { ["codex"] }
     func sendErrorNotification(_ message: String) {}

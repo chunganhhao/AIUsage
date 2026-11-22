@@ -1,10 +1,8 @@
 import Foundation
 
 // MARK: - Antigravity Provider
-// Uses Keychain-imported credentials (OAuth or IDE session),
-// refreshes OAuth token when needed, and calls Google Cloud Code
-// Assist API for grouped (5-hour + weekly) quotas, falling back to
-// the legacy per-model quotas.
+// Reads quota exclusively via the local Antigravity IDE language_server loopback RPC
+// or previously persisted local snapshots, without third-party Google consumer HTTPS calls.
 
 public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAcceptingProvider {
     public let id = "antigravity"
@@ -16,29 +14,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
     private let localQuotaReaderOverride: AntigravityLocalQuotaReader?
     private let hasExplicitLocalQuotaReaderOverride: Bool
 
-    // Antigravity 2.x 按模型组计量（每组一个 5 小时窗口 + 一个每周窗口，Pro 账号另有独立的 Gemini 4 Argon 周窗口）。
-    // daily 部署是 IDE 实际计量的那份，prod 兜底；两者都拿不到时再退回旧的按模型接口。
-    static let quotaSummaryURLs = [
-        "https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
-        "https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary"
-    ]
-    static let quotaURL = "https://cloudcode-pa.googleapis.com/v1internal:fetchAvailableModels"
-    static let loadCodeAssistURL = "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-    static let loadCodeAssistURLs = [
-        loadCodeAssistURL,
-        "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-    ]
-    static let oauthRefreshURL = "https://oauth2.googleapis.com/token"
     static var userAgent: String { AntigravityClientIdentity.userAgent }
-
-    // Antigravity 的 Google「桌面应用」OAuth 客户端凭据（非用户私密：随安装包公开分发，
-    // 桌面应用 client_secret 在 OAuth 规范里本就非机密）。新版已打进 Go 二进制
-    // bin/language_server，且 client_id 与 secret 无法就近配对，故以实证常量兜底；
-    // 官方轮换时可用环境变量 AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID / _SECRET 覆盖。
-    // 注：常量按片段运行时拼接，避免被密钥扫描器误判为泄露（值本身仍是公开分发的安装包凭据）。
-    static let knownClientId =
-        "1071006060591-tmhssin2h21lcre235vtolojh4g403ep" + "." + "apps" + ".googleusercontent.com"
-    static let knownClientSecret = "GOCS" + "PX-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
 
     public var supportedAuthMethods: [AuthMethod] { [.authFile, .oauth] }
 
@@ -66,6 +42,10 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         return normalizedHome == normalizedReal ? .live : nil
     }
 
+    public static func normalizedProjectId(_ raw: String?) -> String? {
+        AntigravityLocalQuotaReader.normalizedProjectId(raw)
+    }
+
     public func fetchUsage() async throws -> ProviderUsage {
         throw ProviderError(
             "not_logged_in",
@@ -81,7 +61,7 @@ public struct AntigravityProvider: MultiAccountProviderFetcher, CredentialAccept
         try await fetchUsage(with: credential, localOnly: localOnly, requireProjectMatch: false)
     }
 
-    func fetchUsage(
+    public func fetchUsage(
         with credential: AccountCredential,
         localOnly: Bool,
         requireProjectMatch: Bool

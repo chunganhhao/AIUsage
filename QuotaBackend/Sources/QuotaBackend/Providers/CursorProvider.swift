@@ -48,12 +48,12 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
         }
 
         var lastAutomaticError: Error?
-        if let cookieHeader = try? importCookieFromBrowser() {
-            let source = SourceInfo(mode: "auto", type: "browser-cookie")
+        if let desktopSession = Self.discoverDesktopAppSession(homeDirectory: homeDirectory) {
+            let source = SourceInfo(mode: "auto", type: "desktop-app")
             do {
-                return try await fetchWithCookie(cookieHeader, source: source)
+                return try await fetchWithCookie(desktopSession.cookieHeader, source: source)
             } catch {
-                // The local browser session may belong to a different or expired account.
+                // The local desktop session may belong to a different or expired account.
                 // Fall back to the saved per-account session before surfacing an error.
                 lastAutomaticError = error
             }
@@ -70,7 +70,7 @@ public struct CursorProvider: ProviderFetcher, CredentialAcceptingProvider {
         if let lastAutomaticError {
             throw lastAutomaticError
         }
-        throw ProviderError("not_logged_in", "No Cursor session cookie found. Log in to cursor.com in Chrome/Edge/Brave, or save a valid cookie.")
+        throw ProviderError("not_logged_in", "No Cursor session found. Sign in to the Cursor app, sign in inside AIUsage, or save a valid cookie.")
     }
 
     /// Fetch with externally provided credential (e.g. pasted cookie, WebView session)

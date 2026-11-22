@@ -193,7 +193,7 @@ public enum TokenSaverSettingsStore {
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         return try Data(contentsOf: url)
     }
-    static func rejectSymlinks(_ url: URL) throws {
+    public static func rejectSymlinks(_ url: URL) throws {
         var path = url.standardizedFileURL
         while path.path != "/" {
             // macOS system aliases are root-owned; URL canonicalization maps /private/var back to /var.

@@ -13,6 +13,7 @@ BIN="$(swift build --build-system native --package-path "$ROOT/QuotaBackend" --s
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend" or .moduleName == "QuotaServerCore") | .objects[]' "$BIN/description.json" \
   | awk '!seen[$0]++' > "$REGRESSION_DIR/objects.txt"
 
+if [[ "${AIUSAGE_ONLY_LEAN_CUT_3B:-0}" != "1" ]]; then
 # 1. Backend / HTTP / Snapshot Store / Policy Regression
 swiftc -parse-as-library -swift-version 5 \
   -I "$BIN/Modules" \
@@ -232,6 +233,7 @@ def function(src, marker):
     return src[s:j]
 
 auth = (root / 'AIUsage/Services/ProviderAuthManager.swift').read_text()
+discovery = (root / 'AIUsage/Services/ProviderAuth/ProviderAuthCandidateDiscovery.swift').read_text()
 parsing = (root / 'AIUsage/Services/ProviderAuth/ProviderAuthParsing.swift').read_text()
 pipe = (root / 'AIUsage/ViewModels/ProviderRefreshCoordinator+FetchPipeline.swift').read_text()
 store = (root / 'AIUsage/Services/ProviderAuth/ProviderManagedImportStore.swift').read_text()
@@ -270,6 +272,8 @@ struct ProviderAuthCandidate {{
     var sourceIdentifier = "codex-cli:a"
     var sessionFingerprint: String? = "a"
     var identityScope = IdentityScope.sharedSource
+    var workspaceId: String? = nil
+    var capturesWorkspaceIdentity: Bool = false
 }}
 
 enum ProviderRegistry {{
@@ -293,6 +297,10 @@ enum ProviderAuthManager {{
     }}
     nonisolated(unsafe) static var onCopyAuthFile: (() -> Void)?
 {function(auth, '    static func authenticateCandidate(')}
+{function(discovery, '    static func normalizedAntigravityWorkspaceId(')}
+    private static func stageDeferredAuthFileIfNeeded(
+        for candidate: ProviderAuthCandidate
+    ) throws -> (directoryURL: URL, fileURL: URL)? {{ nil }}
 {function(auth, '    private static func validate(')}
 {function(auth, '    private static func validateLocalAuthFileMetadata(')}
     private static func copyImportedAuthFile(
@@ -487,7 +495,2100 @@ swiftc -parse-as-library -swift-version 5 \
   "$REGRESSION_DIR/DiscoverySwitchRegression.swift" \
   -o "$REGRESSION_DIR/post-r6-discovery-switch"
 "$REGRESSION_DIR/post-r6-discovery-switch"
+fi
 
+# 3b. [§6.3 + §6.4 + §6.6 + §6.7 + §6.8 + §9.1 + §9.2 + §9.3 + §9.5] Lean Cut & Anti-Ban Offline App-Layer Regressions (no sockets)
+python3 - "$ROOT" "$REGRESSION_DIR" <<'PY'
+from pathlib import Path
+import sys
+root, temp = map(Path, sys.argv[1:])
+
+def function(src, marker):
+    s = src.index(marker); i = src.index('{', s); d = 1; j = i + 1
+    while d:
+        if src[j] == '{': d += 1
+        elif src[j] == '}': d -= 1
+        j += 1
+    return src[s:j]
+
+def block(src, marker):
+    return function(src, marker)
+
+settings_src = (root / 'AIUsage/Models/AppSettings.swift').read_text()
+agent_vis_src = (root / 'AIUsage/Models/AgentVisibility.swift').read_text()
+opencode_node_src = (root / 'AIUsage/ViewModels/OpenCodeNodeStore.swift').read_text()
+app_src = (root / 'AIUsage/AIUsageApp.swift').read_text()
+api_src = (root / 'AIUsage/Services/APIService.swift').read_text()
+coord_src = (root / 'AIUsage/ViewModels/ProviderRefreshCoordinator.swift').read_text()
+pipe_src = (root / 'AIUsage/ViewModels/ProviderRefreshCoordinator+FetchPipeline.swift').read_text()
+conv_src = (root / 'AIUsage/ViewModels/ProviderRefreshCoordinator+Conversion.swift').read_text()
+parsing_src = (root / 'AIUsage/Services/ProviderAuth/ProviderAuthParsing.swift').read_text()
+discovery_src = (root / 'AIUsage/Services/ProviderAuth/ProviderAuthCandidateDiscovery.swift').read_text()
+auth_src = (root / 'AIUsage/Services/ProviderAuthManager.swift').read_text()
+store_src = (root / 'AIUsage/Services/ProviderAuth/ProviderManagedImportStore.swift').read_text()
+row_src = (root / 'AIUsage/Views/MenuBarAccountRow.swift').read_text()
+menu_view_src = (root / 'AIUsage/Views/MenuBarView.swift').read_text()
+
+# Verify AIUsageApp/MenuBarView contain §6.3 launch gate & §9.5 feedback presenter hooks.
+assert 'OpenCodeNodeStore.hasPersistedManagedProxyRoute()' in app_src, 'Missing §6.3 launch gate in AIUsageApp.swift'
+assert 'MenuBarActivationFeedback.bindPresenter' in menu_view_src, 'Missing §9.5 presenter bindPresenter in MenuBarView.swift'
+assert 'MenuBarActivationFeedback.unbindPresenter' in menu_view_src, 'Missing §9.5 presenter unbindPresenter in MenuBarView.swift'
+assert 'MenuBarActivationFeedback.unbindAll()' in app_src, 'Missing §9.5 unbindAll in AIUsageApp.swift popoverDidClose'
+
+store_clean = store_src.replace('import Foundation\nimport QuotaBackend\n', '')
+boundary_fn = function(store_clean, '    private static func boundary(')
+store_clean = store_clean.replace(boundary_fn, """    static var managedBase: URL!
+    private static func boundary(create: Bool) throws -> ManagedAuthImportBoundary {
+        ManagedAuthImportBoundary(
+            bundleIdentifier: ManagedAuthImportBoundary.productionBundleIdentifier,
+            applicationSupportDirectory: managedBase
+        )
+    }""")
+
+# Extract OpenCodeNodeStore §6.3 pieces
+oc_store_file = function(opencode_node_src, '    private struct StoreFile: Codable')
+oc_has_route = function(opencode_node_src, '    static func hasPersistedManagedProxyRoute(')
+oc_restore = function(opencode_node_src, '    private func restoreProxyIfNeeded()')
+
+# Extract Coordinator §6.4 / §6.8 pieces
+coord_banner_start = coord_src.index('    @Published private var refreshError:')
+coord_banner_end = coord_src.index('    @Published var lastRefreshTime:', coord_banner_start)
+coord_banner_state = coord_src[coord_banner_start:coord_banner_end].rstrip()
+coord_fetch_dashboard = function(coord_src, '    @MainActor\n    @discardableResult\n    func fetchDashboard(')
+coord_fetch_single = function(coord_src, '    @MainActor\n    func fetchSingleProvider(')
+coord_refresh_provider_now = function(coord_src, '    @MainActor\n    func refreshProviderNow(')
+coord_refresh_acct_now = function(coord_src, '    @MainActor\n    func refreshAccountNow(')
+coord_hydrate = function(coord_src, '    @MainActor\n    func hydrateFromDiskCacheIfNeeded()')
+coord_visibility = function(coord_src, '    func handleSurfaceVisibilityOrWake(')
+coord_clear_stale_banner = function(coord_src, '    func clearStaleOwnedRefreshErrorIfNeeded(')
+coord_sync_overview = function(coord_src, '    func syncOverviewIfPresent()')
+coord_remove_ids = function(coord_src, '    func removeProviders(matchingBaseProviderIds ')
+coord_remove_id = function(coord_src, '    func removeProviders(matchingBaseProviderId ')
+coord_reapply_visible = function(coord_src, '    func reapplyVisibleSortedProviders()')
+pipe_fetch_cred = function(pipe_src, '    @MainActor\n    func fetchAccountByCredential(')
+pipe_fetch_local = function(pipe_src, '    @MainActor\n    func fetchSingleProviderLocal(')
+pipe_fetch_remote = function(pipe_src, '    @MainActor\n    func fetchSingleProviderRemote(')
+pipe_local = function(pipe_src, '    @MainActor\n    func fetchDashboardLocal(')
+pipe_remote = function(pipe_src, '    @MainActor\n    func fetchDashboardRemote(')
+pipe_codex_id = function(pipe_src, '    func codexResetIdentity(')
+pipe_accept_reset = function(pipe_src, '    func acceptsCodexResetRefresh(')
+pipe_preserve_reset = function(pipe_src, '    func preserveCodexResetUpdates(')
+pipe_sort = function(pipe_src, '    func providerSort(')
+pipe_selected = function(pipe_src, '    func selectedProviderIDList(')
+pipe_extract_credential = function(pipe_src, '    func extractCredentialId(')
+pipe_replace_entries = function(pipe_src, '    func replaceProviderEntries(')
+pipe_visible = function(pipe_src, '    func visibleProviders(')
+pipe_hidden = function(pipe_src, '    func isProviderHidden(')
+pipe_complete_global = function(pipe_src, '    func completeGlobalRefresh(')
+pipe_complete_provider = function(pipe_src, '    func completeProviderRefresh(')
+pipe_complete_acct = function(pipe_src, '    func completeAccountRefresh(')
+conv_summary = function(conv_src, '    nonisolated func convertSummary(')
+conv_convert_overview = function(conv_src, '    nonisolated func convertOverview(')
+conv_loc_provider = function(conv_src, '    nonisolated func localizeProviderData(')
+conv_loc_cost = function(conv_src, '    nonisolated func localizedCostPeriod(')
+conv_loc_tl = function(conv_src, '    nonisolated func localizedTimelinePoint(')
+conv_localize_overview = function(conv_src, '    nonisolated func localizeOverview(')
+conv_loc_results = function(conv_src, '    nonisolated func localizedProviderResults(')
+conv_loc_dash = function(conv_src, '    nonisolated func localizedDashboard(')
+conv_loc_list = function(conv_src, '    nonisolated func localizedProviderList(')
+conv_recomputed_overview = function(conv_src, '    nonisolated func recomputedOverview(')
+api_fetch_dashboard = function(api_src, '    func fetchDashboard(')
+
+# Extract Parsing §6.6 pieces
+git_session_struct = function(parsing_src, 'struct GitHubCLISession')
+gh_hosts_fn = function(parsing_src, '    static func githubCLIHostsPath(')
+gh_session_fn = function(parsing_src, '    static func currentGitHubCLISession(')
+token_fp_fn = function(parsing_src, '    static func tokenFingerprint(')
+norm_handle_fn = function(parsing_src, '    static func normalizedHandle(')
+expand_fn = function(parsing_src, '    static func expand(')
+display_path_fn = function(parsing_src, '    static func displayPath(')
+
+# Extract Staging §6.7 / §9.1 pieces
+norm_agy_ws_fn = function(discovery_src, '    static func normalizedAntigravityWorkspaceId(')
+agy_candidates_fn = function(discovery_src, '    internal static func antigravityCandidates(')
+agy_stage_fn = function(discovery_src, '    static func stageAntigravityIDECandidate(')
+auth_cand_fn = function(auth_src, '    static func authenticateCandidate(')
+auth_stage_helper = function(auth_src, '    private static func stageDeferredAuthFileIfNeeded(')
+auth_copy_fn = function(auth_src, '    private static func copyImportedAuthFile(')
+auth_dir_fn = function(auth_src, '    private static func managedImportDirectory(')
+auth_validate_fn = function(auth_src, '    private static func validate(')
+auth_validate_meta_fn = function(auth_src, '    private static func validateLocalAuthFileMetadata(')
+sanitized_stem_fn = function(parsing_src, '    static func sanitizedFilenameStem(')
+
+# Extract MenuBar §9.5 pieces
+row_perform_activation = function(row_src, '    private func performActivation()').replace('private func performActivation()', 'func performActivation()', 1)
+feedback_enum = function(row_src, '@MainActor\nenum MenuBarActivationFeedback')
+
+harness = f"""import AppKit
+import Combine
+import CryptoKit
+import Darwin
+import Foundation
+import SwiftUI
+@testable import QuotaBackend
+
+enum APIError: Error {{ case invalidURL }}
+
+extension JSONDecoder {{
+    static let profileDecoder = JSONDecoder()
+}}
+
+func L(_ english: String, _ _: String, _ _: String? = nil) -> String {{ english }}
+
+enum SensitiveDataRedactor {{
+    static func redactedMessage(for error: Error) -> String {{ error.localizedDescription }}
+}}
+
+{function(settings_src, 'enum AppSection: String, Hashable')}
+
+{agent_vis_src.replace('import Foundation\nimport QuotaBackend\n', '')}
+
+@MainActor final class AppSettings {{
+    static let shared = AppSettings()
+    var hiddenSidebarSections: Set<String> = []
+    var backendMode = "remote"
+    var remoteBaseURL = "http://127.0.0.1:4318"
+    var proxyAutoRestoreOnLaunch = true
+    var autoRefreshInterval = 60
+    var claudeCodeRefreshInterval = 0
+}}
+
+// --- §6.3 OpenCodeNodeStore production launch gate + restoreProxyIfNeeded fixture ---
+struct StubOpenCodeNode: Codable {{
+    var id: String
+    var proxyEnabled: Bool
+}}
+typealias OpenCodeNode = StubOpenCodeNode
+enum StubManagementState {{ case managed, unmanaged }}
+@MainActor final class StubOpenCodeConfigManager {{
+    static var defaultManagementState: StubManagementState = .managed
+    static var defaultIsManaged = true
+    var managementState: StubManagementState = StubOpenCodeConfigManager.defaultManagementState
+    var isManaged: Bool = StubOpenCodeConfigManager.defaultIsManaged
+}}
+@MainActor final class StubOpenCodeProxyRuntime {{
+    var beginRestoringIDs: [[String]] = []
+    var startedIDs: [String] = []
+    var endRestoringIDs: [[String]] = []
+    func beginRestoring(nodeIds: [String]) {{ beginRestoringIDs.append(nodeIds) }}
+    func endRestoring(nodeIds: [String]) {{ endRestoringIDs.append(nodeIds) }}
+    func start(node: OpenCodeNode) async throws {{ startedIDs.append(node.id) }}
+}}
+enum ProxyProcessInspector {{
+    static let shared = Inspector()
+    actor Inspector {{
+        var reapCount = 0
+        func reapOrphanedHelpers() async {{ reapCount += 1 }}
+    }}
+}}
+@MainActor final class OpenCodeNodeStore {{
+    static var sharedStorage: OpenCodeNodeStore?
+    static var initCount = 0
+    static var nextFixturePath = ""
+    static var shared: OpenCodeNodeStore {{
+        if let existing = sharedStorage {{ return existing }}
+        let created = OpenCodeNodeStore(storePath: nextFixturePath)
+        sharedStorage = created
+        return created
+    }}
+    static var storePath: String {{ nextFixturePath }}
+    static var shouldTriggerLaunchRestore: Bool {{
+        AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+            || hasPersistedManagedProxyRoute()
+    }}
+
+    var nodes: [OpenCodeNode] = []
+    var activeNodeIds: [String] = []
+    var proxyOnlyNodeIds: Set<String> = []
+    var deactivatedCalls: [[String]] = []
+    let configManager = StubOpenCodeConfigManager()
+    let proxyRuntime = StubOpenCodeProxyRuntime()
+    var activeNodes: [OpenCodeNode] {{ activeNodeIds.compactMap {{ id in nodes.first {{ $0.id == id }} }} }}
+
+{oc_store_file}
+{oc_has_route}
+{oc_restore.replace('openCodeStoreLog.error', '// log error').replace('Task { [proxyRuntime] in', 'Task { @MainActor [proxyRuntime] in')}
+
+    init(storePath: String) {{
+        Self.initCount += 1
+        if let data = FileManager.default.contents(atPath: storePath),
+           let file = try? JSONDecoder().decode(StoreFile.self, from: data) {{
+            self.nodes = file.nodes
+            self.activeNodeIds = file.activeNodeIds ?? (file.activeNodeId.map {{ [$0] }} ?? [])
+            self.proxyOnlyNodeIds = Set(file.proxyOnlyNodeIds ?? [])
+        }}
+        restoreProxyIfNeeded()
+    }}
+
+    func deactivate(_ ids: [String]) throws {{
+        deactivatedCalls.append(ids)
+        activeNodeIds.removeAll {{ ids.contains($0) }}
+    }}
+}}
+
+// --- §6.4 APIService URL builder + Coordinator remote/visibility fixture ---
+struct StubDashboardResponse {{
+    struct StubProviderWrapper {{
+        let summary: ProviderData
+        let ok: Bool
+    }}
+    let providers: [StubProviderWrapper]
+    let overview: DashboardOverview
+}}
+
+@MainActor final class APIService {{
+    static let shared = APIService()
+    var baseURL = "http://127.0.0.1:4318"
+    var recordedURLs: [URL] = []
+    var recordedProviderResultCalls: [String] = []
+    var onDashboardRequest: ((URL) async throws -> StubDashboardResponse)!
+    var onProviderResultsRequest: ((String) async throws -> [StubDashboardResponse.StubProviderWrapper])?
+    func updateBaseURL(_ url: String) {{ baseURL = url }}
+    private func decode<T>(_ type: T.Type, from url: URL) async throws -> T {{
+        recordedURLs.append(url)
+        let response = try await onDashboardRequest(url)
+        return response as! T
+    }}
+{api_fetch_dashboard.replace('DashboardResponse', 'StubDashboardResponse')}
+    func fetchProviderResults(_ providerId: String) async throws -> [StubDashboardResponse.StubProviderWrapper] {{
+        recordedProviderResultCalls.append(providerId)
+        if let onProviderResultsRequest {{
+            return try await onProviderResultsRequest(providerId)
+        }}
+        return try await fetchDashboard(providerIds: [providerId]).providers
+    }}
+}}
+
+@MainActor final class CoordinatorUnderTest: ObservableObject {{
+    let settings = AppSettings.shared
+    var providers: [ProviderData] = []
+    var overview: DashboardOverview?
+    var didHydrateDiskSnapshots = false
+    var isLoading = false
+    var hasCompletedInitialLoad = false
+{coord_banner_state}
+    var language = "en"
+    var lastRefreshTime: Date?
+    var providerRefreshTimes: [String: Date] = [:]
+    var accountRefreshTimes: [String: Date] = [:]
+    var refreshingProviderIDs: Set<String> = []
+    var refreshingAccountIDs: Set<String> = []
+    var markedRefreshed: [(String, Date)] = []
+    var recordedAccountErrors: [String] = []
+    var errorNotifications: [String] = []
+    var codexResetRefreshFence = CodexResetRefreshFence()
+    var isPopoverVisible = false
+    var lastSurfaceVisible = true
+    var lastLocalStatsRefreshAt: Date?
+    var lastVisibilityCatchUpAttemptAt: Date?
+    static let wakeVisibilityDebounceSeconds: TimeInterval = 10
+    var selected: Set<String> = []
+    var catalog: [String] = ["claude", "claude-subscription", "codex", "antigravity"]
+    var hiddenAccounts: Set<String> = []
+    var deletedCredentialKeysThisSession: Set<String> = []
+    final class AccountStoreStub {{
+        var excludedCredentials: Set<String> = []
+        func excludedEngineAccountFilters() -> (credentialIDs: Set<String>, codexNativeKeys: Set<String>) {{
+            (excludedCredentials, [])
+        }}
+    }}
+    let accountStore = AccountStoreStub()
+    var setupAutoRefreshCalls = 0
+    var setupClaudeCalls = 0
+    var refreshAllCalls: [Bool] = []
+    var localStatsCalls = 0
+    var isAnyAppSurfaceVisible: Bool {{ isPopoverVisible }}
+
+    func selectedProviderIds() -> Set<String> {{ selected }}
+    func providerCatalogIds() -> [String] {{ catalog }}
+    func setupAutoRefresh() {{ setupAutoRefreshCalls += 1 }}
+    func setupClaudeCodeAutoRefresh() {{ setupClaudeCalls += 1 }}
+    func refreshAllProviders(automatic: Bool) {{ refreshAllCalls.append(automatic) }}
+    func refreshLocalTokenStatsOnly() {{ localStatsCalls += 1 }}
+    func syncExcludedAccountsToEngine() async {{}}
+    func syncUnifiedManagedAccounts(for _: [String]) async {{}}
+    func reconcileResetProtectedAccountRegistry(_ _: [ProviderData], since _: Int) async {{}}
+    func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor _: String? = nil, includingExistingFor _: Set<String> = []) -> [ProviderData] {{ incoming }}
+    func isProviderHidden(_ p: ProviderData) -> Bool {{ hiddenAccounts.contains(p.id) }}
+{pipe_extract_credential}
+    func credentialID(for row: ProviderData) -> String? {{ extractCredentialId(from: row.id) }}
+    func sendErrorNotification(_ message: String) {{ errorNotifications.append(message) }}
+    func timestampableProviders(for incoming: [ProviderData]) -> [ProviderData] {{
+        providers.filter {{ cur in incoming.contains {{ $0.id == cur.id }} }}
+    }}
+    func resolvedFetchedDate(for provider: ProviderData) -> Date? {{ provider.fetchedAt.flatMap {{ SharedFormatters.parseISO8601($0) }} }}
+    func resolvedTimestamp(for provider: ProviderData, fallback: Date?) -> Date? {{ resolvedFetchedDate(for: provider) ?? fallback }}
+    func markAccountRefreshed(_ p: ProviderData, at date: Date) {{ markedRefreshed.append((p.id, date)) }}
+    func accountRefreshKey(providerId: String, credentialId: String) -> String {{ "\\(providerId):cred:\\(credentialId.lowercased())" }}
+    func isCredentialStillRegistered(providerId _: String, credentialId _: String) -> Bool {{ true }}
+    func clearAccountCheckError(for _: ProviderData, credentialId _: String? = nil) {{}}
+    func recordAccountCheckError(for _: ProviderData, credentialId _: String? = nil, message: String, errorCode _: String?) {{
+        recordedAccountErrors.append(message)
+    }}
+    func isLastKnownErrorPreservable(_ p: ProviderData) -> Bool {{ p.status != .error && !p.windows.isEmpty }}
+    func isTerminalStopFailure(_ p: ProviderData) -> Bool {{
+        p.status == .error && ["tos_violation", "account_disabled", "unsupported_client", "not_logged_in"].contains(p.errorCode ?? "")
+    }}
+    func currentProviderMatchingRefresh(_ p: ProviderData) -> ProviderData? {{ providers.first {{ $0.id == p.id }} }}
+    nonisolated func localizedDynamicText(_ text: String, _: String) -> String {{ text }}
+{conv_summary}
+{conv_convert_overview}
+{conv_loc_provider}
+{conv_loc_cost}
+{conv_loc_tl}
+{conv_localize_overview}
+{conv_loc_results}
+{conv_loc_dash}
+{conv_loc_list}
+{conv_recomputed_overview}
+    nonisolated func localizedRemoteDashboard(_ items: [(provider: ProviderData, ok: Bool)], overview: DashboardOverview, language _: String) -> (providers: [(provider: ProviderData, ok: Bool)], overview: DashboardOverview) {{
+        (items, overview)
+    }}
+
+    @MainActor final class EngineStub {{
+        var credentialFetchCount = 0
+        var onFetchForCredential: ((String, String) async -> ProviderResult?)?
+        var onFetchMulti: ((String) async -> [ProviderResult]?)?
+        var onFetchSingle: ((String) async -> ProviderResult?)?
+        var onFetchAll: (([String]) async -> DashboardSnapshot)?
+        var onCachedDashboard: (([String]) async -> DashboardSnapshot)?
+        func fetchForCredential(providerId: String, credentialId: String) async -> ProviderResult? {{
+            credentialFetchCount += 1
+            return await onFetchForCredential?(providerId, credentialId)
+        }}
+        func fetchMultiAccountProvider(id: String) async -> [ProviderResult]? {{
+            await onFetchMulti?(id)
+        }}
+        func fetchSingle(id: String) async -> ProviderResult? {{
+            await onFetchSingle?(id)
+        }}
+        func fetchAll(ids: [String], useRecentResults _: Bool, backgroundAutomatic _: Bool) async -> DashboardSnapshot {{
+            if let onFetchAll {{ return await onFetchAll(ids) }}
+            return DashboardSnapshot(generatedAt: "", overview: UsageNormalizer.createDashboardOverview(summaries: [], generatedAt: ""), providers: [])
+        }}
+        func cachedDashboard(ids: [String], spawnBackgroundRefresh _: Bool) async -> DashboardSnapshot {{
+            if let onCachedDashboard {{ return await onCachedDashboard(ids) }}
+            return DashboardSnapshot(generatedAt: "", overview: UsageNormalizer.createDashboardOverview(summaries: [], generatedAt: ""), providers: [])
+        }}
+    }}
+    let engine = EngineStub()
+
+{coord_fetch_single}
+{coord_fetch_dashboard}
+{coord_refresh_provider_now}
+{coord_refresh_acct_now}
+{coord_hydrate}
+{coord_visibility}
+{coord_clear_stale_banner}
+{coord_sync_overview}
+{coord_remove_ids}
+{coord_remove_id}
+{coord_reapply_visible}
+{pipe_fetch_cred}
+{pipe_fetch_local}
+{pipe_fetch_remote}
+{pipe_local}
+{pipe_remote}
+{pipe_codex_id}
+{pipe_accept_reset}
+{pipe_preserve_reset}
+{pipe_sort}
+{pipe_selected}
+{pipe_replace_entries}
+{pipe_visible}
+{pipe_complete_global}
+{pipe_complete_provider}
+{pipe_complete_acct}
+}}
+
+// --- §6.6 + §6.7 ProviderAuthManager extraction fixture ---
+{git_session_struct}
+private nonisolated let githubCLISessionCacheLock = NSLock()
+private nonisolated(unsafe) var githubCLISessionCache: (key: String, fetchedAt: Date, session: GitHubCLISession?)?
+
+struct ProviderAuthCandidate {{
+    enum IdentityScope: String {{ case accountScoped, sharedSource }}
+    let id: String
+    let providerId: String
+    let sourceIdentifier: String
+    let sessionFingerprint: String?
+    let title: String
+    let subtitle: String?
+    let detail: String
+    let modifiedAt: Date?
+    let authMethod: AuthMethod
+    let credentialValue: String
+    let sourcePath: String?
+    let shouldCopyFile: Bool
+    let identityScope: IdentityScope
+    var workspaceId: String? = nil
+    var capturesWorkspaceIdentity: Bool = false
+}}
+
+struct AntigravityIDECandidatePayload {{
+    let email: String?
+    let name: String?
+    let accessToken: String
+    let refreshToken: String?
+    let databasePath: String
+    let expiryDate: Date?
+    let idToken: String?
+    let projectId: String?
+}}
+enum AntigravityAccountSwitcher {{
+    static var injectedPayload: AntigravityIDECandidatePayload?
+    static func discoverIDECandidatePayload(homeDirectory _: String) -> AntigravityIDECandidatePayload? {{
+        injectedPayload
+    }}
+}}
+enum GeminiCredentialBridge {{
+    static func makeNativePayload(from data: Data) throws -> Data {{ data }}
+}}
+enum DroidProvider {{
+    static func managedSessionData(from _: String) -> Data? {{ nil }}
+}}
+enum ProviderRegistry {{
+    static var agyProvider: AntigravityProvider!
+    static func provider(for id: String) -> Any? {{ id == "antigravity" ? agyProvider : nil }}
+}}
+{store_clean}
+
+enum ProviderAuthManager {{
+    static var homeOverride: String = FileManager.default.homeDirectoryForCurrentUser.path
+    static var onBeforeValidate: (@Sendable () async throws -> Void)?
+
+{expand_fn}
+{display_path_fn}
+{norm_handle_fn}
+{norm_agy_ws_fn}
+{token_fp_fn}
+{sanitized_stem_fn}
+    static func modificationDate(for url: URL) -> Date? {{ try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate }}
+    static func formattedDate(_ _: Date?) -> String? {{ nil }}
+    static func compactDetail(parts: [String?]) -> String {{ parts.compactMap {{ $0 }}.joined(separator: " · ") }}
+    static func runCommand(path _: String, arguments _: [String], environment _: [String: String]? = nil) -> String? {{ nil }}
+{gh_hosts_fn}
+{gh_session_fn}
+{agy_candidates_fn}
+{agy_stage_fn}
+{auth_cand_fn}
+{auth_stage_helper.replace('expectedWorkspaceId: expectedWorkspace\n        )', 'expectedWorkspaceId: expectedWorkspace,\n            homeDirectory: homeOverride\n        )')}
+{auth_copy_fn}
+{auth_dir_fn}
+{auth_validate_fn.replace('private static func validate(', 'private static func originalValidate(')}
+    private static func validate(
+        credential: AccountCredential,
+        localOnly: Bool = false,
+        allowLocalMetadataFallback: Bool = false
+    ) async throws -> ProviderUsage {{
+        if let onBeforeValidate {{ try await onBeforeValidate() }}
+        return try await originalValidate(
+            credential: credential,
+            localOnly: localOnly,
+            allowLocalMetadataFallback: allowLocalMetadataFallback
+        )
+    }}
+{auth_validate_meta_fn}
+}}
+
+// --- §9.5 MenuBarAccountRow performActivation + MenuBarActivationFeedback fixture ---
+{feedback_enum}
+
+@MainActor final class StubRowActivationManager {{
+    var activateHandler: (() async throws -> Bool)?
+    func activateAccount(entry _: String) async throws -> Bool {{
+        try await (activateHandler?() ?? true)
+    }}
+}}
+
+@MainActor final class MenuBarRowBox {{
+    var activationSuccess = true
+    var activationMessage: String?
+}}
+
+@MainActor struct MenuBarRowHarness {{
+    let activationManager: StubRowActivationManager
+    let state = MenuBarRowBox()
+    let entry = "codex"
+    let primaryLabel = "nhntrong592@gmail.com"
+    var activationSuccess: Bool {{
+        get {{ state.activationSuccess }}
+        nonmutating set {{ state.activationSuccess = newValue }}
+    }}
+    var activationMessage: String? {{
+        get {{ state.activationMessage }}
+        nonmutating set {{ state.activationMessage = newValue }}
+    }}
+{row_perform_activation}
+}}
+
+@main struct LeanCutAndAntibanP1P2Regression {{
+    @MainActor static func main() async throws {{
+        let fm = FileManager.default
+        let root = fm.temporaryDirectory.appendingPathComponent("lean-cut-app-" + UUID().uuidString)
+        try fm.createDirectory(at: root, withIntermediateDirectories: true)
+        defer {{ try? fm.removeItem(at: root) }}
+
+        // 1. [§6.3 + §9.2] Persisted OpenCode managed proxy route recovery & cleanup even when hidden
+        let ocPath = root.appendingPathComponent("opencode-nodes.json")
+        func resetOC(path: String, autoRestore: Bool, managementState: StubManagementState = .managed, isManaged: Bool = true) {{
+            OpenCodeNodeStore.sharedStorage = nil
+            OpenCodeNodeStore.initCount = 0
+            OpenCodeNodeStore.nextFixturePath = path
+            StubOpenCodeConfigManager.defaultManagementState = managementState
+            StubOpenCodeConfigManager.defaultIsManaged = isManaged
+            AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+            AppSettings.shared.proxyAutoRestoreOnLaunch = autoRestore
+        }}
+        let proxyStorePayload = #"{{"version":1,"nodes":[{{"id":"n-proxy","proxyEnabled":true}},{{"id":"n-direct","proxyEnabled":false}}],"activeNodeIds":["n-proxy"],"proxyOnlyNodeIds":["n-proxy"]}}"#
+        try Data(proxyStorePayload.utf8).write(to: ocPath)
+        resetOC(path: ocPath.path, autoRestore: true)
+        precondition(OpenCodeNodeStore.shouldTriggerLaunchRestore, "[§6.3] hidden active proxy route still triggers launch store init")
+        let ocStoreRestore = OpenCodeNodeStore.shared
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(OpenCodeNodeStore.initCount == 1 && ocStoreRestore.proxyRuntime.startedIDs == ["n-proxy"],
+                     "[§6.3] hidden active proxy route restores proxy listener at boot")
+
+        // [§9.2] Truly unmanaged config (managementState = .unmanaged && isManaged = false) still restores proxy-only listeners while blocking active managed routes.
+        let proxyOnlyPayload = #"{{"version":1,"nodes":[{{"id":"n-only","proxyEnabled":true}}],"activeNodeIds":[],"proxyOnlyNodeIds":["n-only"]}}"#
+        try Data(proxyOnlyPayload.utf8).write(to: ocPath)
+        resetOC(path: ocPath.path, autoRestore: true, managementState: .unmanaged, isManaged: false)
+        precondition(OpenCodeNodeStore.shouldTriggerLaunchRestore, "[§9.2] hidden proxy-only route triggers launch init on unmanaged config")
+        let ocOnlyStore = OpenCodeNodeStore.shared
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(ocOnlyStore.proxyRuntime.startedIDs == ["n-only"],
+                     "[§9.2] proxy-only OpenCode node restores at boot even when config is truly unmanaged (isManaged=false)")
+
+        let activeOnlyPayload = #"{{"version":1,"nodes":[{{"id":"n-active","proxyEnabled":true}}],"activeNodeIds":["n-active"],"proxyOnlyNodeIds":[]}}"#
+        try Data(activeOnlyPayload.utf8).write(to: ocPath)
+        resetOC(path: ocPath.path, autoRestore: true, managementState: .unmanaged, isManaged: false)
+        let ocBlockedActiveStore = OpenCodeNodeStore.shared
+        try await Task.sleep(for: .milliseconds(50))
+        precondition(ocBlockedActiveStore.proxyRuntime.startedIDs.isEmpty,
+                     "[§9.2] unmanaged config (isManaged=false) still refuses to restore active managed route")
+
+        try Data(proxyStorePayload.utf8).write(to: ocPath)
+        resetOC(path: ocPath.path, autoRestore: false)
+        let ocDisabledStore = OpenCodeNodeStore.shared
+        try await Task.sleep(for: .milliseconds(20))
+        precondition(ocDisabledStore.deactivatedCalls == [["n-proxy"]] && ocDisabledStore.proxyRuntime.startedIDs.isEmpty,
+                     "[§6.3] auto-restore disabled cleanly deactivates lingering managed proxy route")
+
+        let directOnlyPayload = #"{{"version":1,"nodes":[{{"id":"n-direct","proxyEnabled":false}}],"activeNodeIds":["n-direct"],"proxyOnlyNodeIds":[]}}"#
+        try Data(directOnlyPayload.utf8).write(to: ocPath)
+        resetOC(path: ocPath.path, autoRestore: true)
+        precondition(!OpenCodeNodeStore.shouldTriggerLaunchRestore && OpenCodeNodeStore.initCount == 0,
+                     "[§6.3] hidden direct-only OpenCode setup skips launch singleton init")
+        print("PASS: [§6.3] OpenCode persisted proxy boot restore & disabled cleanup verified")
+
+        // 2. [§6.4] Remote refresh never turns "no visible providers" into unfiltered "all providers"
+        AppSettings.shared.backendMode = "remote"
+        let emptyAppOverview = DashboardOverview(
+            generatedAt: "",
+            activeProviders: 0,
+            attentionProviders: 0,
+            criticalProviders: 0,
+            resetSoonProviders: 0,
+            localCostMonthUsd: 0,
+            localWeekTokens: 0,
+            stats: [],
+            alerts: []
+        )
+        APIService.shared.recordedURLs.removeAll()
+        APIService.shared.onDashboardRequest = {{ _ in
+            StubDashboardResponse(providers: [], overview: emptyAppOverview)
+        }}
+        _ = try await APIService.shared.fetchDashboard()
+        precondition(APIService.shared.recordedURLs.last?.query == nil, "[§6.4] Settings Remote deliberate fetchDashboard() stays unfiltered")
+
+        APIService.shared.recordedURLs.removeAll()
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let remoteCoord = CoordinatorUnderTest()
+        remoteCoord.selected = ["claude"]
+        let emptyHiddenRes = await remoteCoord.fetchDashboard()
+        let directSingleHidden = await remoteCoord.fetchSingleProvider("claude")
+        precondition(emptyHiddenRes.status == .success
+                        && remoteCoord.providers.isEmpty
+                        && APIService.shared.recordedURLs.isEmpty
+                        && directSingleHidden.status == .failure
+                        && APIService.shared.recordedProviderResultCalls.isEmpty,
+                     "[§6.4] selecting only hidden provider sends 0 HTTP requests and returns empty dashboard")
+
+        // Mid-flight hide during refresh_pending must stop polling instead of sending unfiltered ids=nil
+        AppSettings.shared.hiddenSidebarSections = []
+        remoteCoord.selected = ["codex"]
+        var pendingPollCalls = 0
+        APIService.shared.onDashboardRequest = {{ _ in
+            pendingPollCalls += 1
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            let pending = ProviderData(
+                id: "codex:1",
+                providerId: "codex",
+                accountId: nil,
+                name: "Codex",
+                label: "Codex",
+                description: "",
+                category: "quota",
+                channel: nil,
+                status: .healthy,
+                statusLabel: "OK",
+                theme: ProviderTheme(accent: "#000", glow: "#000"),
+                sourceLabel: "",
+                sourceType: "oauth",
+                fetchedAt: nil,
+                accountLabel: nil,
+                membershipLabel: nil,
+                headline: Headline(eyebrow: "", primary: "", secondary: "", supporting: nil),
+                metrics: [],
+                windows: [],
+                remainingPercent: 80,
+                nextResetAt: nil,
+                nextResetLabel: nil,
+                spotlight: nil,
+                models: nil,
+                costSummary: nil,
+                errorCode: "refresh_pending"
+            )
+            return StubDashboardResponse(providers: [.init(summary: pending, ok: true)], overview: emptyAppOverview)
+        }}
+        let abortedMidFlight = await remoteCoord.fetchDashboardRemote(showMessageOnFailure: false)
+        precondition(abortedMidFlight.status == .success
+                        && pendingPollCalls == 1
+                        && APIService.shared.recordedURLs.count == 1
+                        && APIService.shared.recordedURLs[0].query == "ids=codex"
+                        && remoteCoord.providers.isEmpty,
+                     "[§6.4] hiding last visible provider during refresh_pending aborts follow-up without unfiltered HTTP call")
+
+        // [§9.3] Late settled remote response arriving after hide must also clear/recompute overview and Inbox alerts
+        func makeRemoteProvider(id: String, providerId: String, label: String, status: ProviderStatus, errorCode: String? = nil, windows: [QuotaWindow] = []) -> ProviderData {{
+            ProviderData(
+                id: id,
+                providerId: providerId,
+                accountId: nil,
+                name: label,
+                label: label,
+                description: "",
+                category: "quota",
+                channel: nil,
+                status: status,
+                statusLabel: status == .critical ? "Critical" : "OK",
+                theme: ProviderTheme(accent: "#000", glow: "#000"),
+                sourceLabel: "",
+                sourceType: "oauth",
+                fetchedAt: nil,
+                accountLabel: nil,
+                membershipLabel: nil,
+                headline: Headline(eyebrow: "", primary: "", secondary: status == .critical ? "0% left" : "90% left", supporting: nil),
+                metrics: [],
+                windows: windows,
+                remainingPercent: status == .critical ? 0 : 90,
+                nextResetAt: nil,
+                nextResetLabel: nil,
+                spotlight: nil,
+                models: nil,
+                costSummary: nil,
+                errorCode: errorCode
+            )
+        }}
+        let settledCodex = makeRemoteProvider(id: "codex:1", providerId: "codex", label: "Codex", status: .critical)
+        let settledAGY = makeRemoteProvider(id: "antigravity:1", providerId: "antigravity", label: "Antigravity", status: .healthy)
+        let staleCodexAlertOverview = DashboardOverview(
+            generatedAt: "2026-11-22T00:00:00Z",
+            activeProviders: 1,
+            attentionProviders: 1,
+            criticalProviders: 1,
+            resetSoonProviders: 0,
+            localCostMonthUsd: 0,
+            localWeekTokens: 0,
+            stats: [OverviewStat(label: "Connected Sources", value: "1", note: "1 providers in the mesh")],
+            alerts: [Alert(id: "codex:1:status-critical", tone: "critical", providerId: "codex:1", title: "Codex needs attention", body: "0% left")]
+        )
+        AppSettings.shared.hiddenSidebarSections = []
+        remoteCoord.selected = ["codex"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return StubDashboardResponse(providers: [.init(summary: settledCodex, ok: true)], overview: staleCodexAlertOverview)
+        }}
+        _ = await remoteCoord.fetchDashboardRemote(showMessageOnFailure: false)
+        precondition(remoteCoord.providers.isEmpty
+                        && remoteCoord.overview?.activeProviders == 0
+                        && remoteCoord.overview?.criticalProviders == 0
+                        && remoteCoord.overview?.alerts.isEmpty == true,
+                     "[§9.3] hiding sole visible provider during settled remote response clears overview and Inbox alerts")
+
+        AppSettings.shared.hiddenSidebarSections = []
+        remoteCoord.selected = ["codex", "antigravity"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return StubDashboardResponse(
+                providers: [.init(summary: settledCodex, ok: true), .init(summary: settledAGY, ok: true)],
+                overview: staleCodexAlertOverview
+            )
+        }}
+        _ = await remoteCoord.fetchDashboardRemote(showMessageOnFailure: false)
+        precondition(remoteCoord.providers.map(\\.baseProviderId) == ["antigravity"]
+                        && remoteCoord.overview?.activeProviders == 1
+                        && remoteCoord.overview?.criticalProviders == 0
+                        && remoteCoord.overview?.alerts.isEmpty == true,
+                     "[§9.3] hiding one of multiple visible providers during settled remote response recomputes overview and strips hidden alert")
+        AppSettings.shared.hiddenSidebarSections = []
+        print("PASS: [§6.4 + §9.3] Remote dashboard empty selection, mid-flight hide & late settled overview filtering verified")
+
+        // 3. [§6.6] Copilot GitHub CLI supports GH_CONFIG_DIR and XDG_CONFIG_HOME
+        let ghHome = root.appendingPathComponent("gh-home")
+        try fm.createDirectory(at: ghHome, withIntermediateDirectories: true)
+        let customGHDir = root.appendingPathComponent("custom-gh-dir")
+        try fm.createDirectory(at: customGHDir, withIntermediateDirectories: true)
+        try Data("github.com:\\n  user: octo-gh-dir\\n".utf8).write(to: customGHDir.appendingPathComponent("hosts.yml"))
+        var ghStubCalls = 0
+        let ghDirSession1 = ProviderAuthManager.currentGitHubCLISession(
+            environment: ["GH_CONFIG_DIR": customGHDir.path],
+            homeDirectory: ghHome.path,
+            commandRunner: {{ _, _ in ghStubCalls += 1; return "gho_custom_dir" }}
+        )
+        let ghDirSession2 = ProviderAuthManager.currentGitHubCLISession(
+            environment: ["GH_CONFIG_DIR": customGHDir.path],
+            homeDirectory: ghHome.path,
+            commandRunner: {{ _, _ in ghStubCalls += 1; return "gho_custom_dir" }}
+        )
+        let xdgDir = root.appendingPathComponent("xdg-cfg")
+        try fm.createDirectory(at: xdgDir.appendingPathComponent("gh"), withIntermediateDirectories: true)
+        try Data("github.com:\\n  user: octo-xdg\\n".utf8).write(to: xdgDir.appendingPathComponent("gh/hosts.yml"))
+        let xdgSession = ProviderAuthManager.currentGitHubCLISession(
+            environment: ["XDG_CONFIG_HOME": xdgDir.path],
+            homeDirectory: ghHome.path,
+            commandRunner: {{ _, _ in ghStubCalls += 1; return "gho_xdg" }}
+        )
+        let missingSession = ProviderAuthManager.currentGitHubCLISession(
+            environment: [:],
+            homeDirectory: ghHome.path,
+            commandRunner: {{ _, _ in ghStubCalls += 1; return "should-not-run" }}
+        )
+        precondition(ghDirSession1?.label == "octo-gh-dir"
+                        && ghDirSession1?.token == "gho_custom_dir"
+                        && ghDirSession2?.label == "octo-gh-dir"
+                        && xdgSession?.label == "octo-xdg"
+                        && missingSession == nil
+                        && ghStubCalls == 2,
+                     "[§6.6] GH_CONFIG_DIR and XDG_CONFIG_HOME resolve custom hosts.yml & cache separately")
+        print("PASS: [§6.6] GitHub CLI GH_CONFIG_DIR & XDG_CONFIG_HOME resolution verified")
+
+        // 4. [§6.7] On-demand scoped 0700/0600 Antigravity staging & immediate/delete cleanup
+        let oldUmask = umask(0o022)
+        defer {{ _ = umask(oldUmask) }}
+        let agyHome = root.appendingPathComponent("agy-home")
+        let agyManagedBase = agyHome.appendingPathComponent("Library/Application Support", isDirectory: true)
+        try fm.createDirectory(at: agyManagedBase, withIntermediateDirectories: true)
+        ProviderManagedImportStore.managedBase = agyManagedBase
+        ProviderAuthManager.homeOverride = agyHome.path
+        let ideDB = agyHome.appendingPathComponent("state.vscdb")
+        try Data("sqlite-ide-db".utf8).write(to: ideDB)
+        AntigravityAccountSwitcher.injectedPayload = AntigravityIDECandidatePayload(
+            email: "agy-stage@example.invalid",
+            name: "Agy Stage",
+            accessToken: "ya29.secret",
+            refreshToken: "1//refresh-secret",
+            databasePath: ideDB.path,
+            expiryDate: Date().addingTimeInterval(3600),
+            idToken: "id-secret",
+            projectId: "proj-secret"
+        )
+        let stagingRoot = try ProviderManagedImportStore.stagingRootDirectory()
+        let importsRoot = try ProviderManagedImportStore.managedImportsRootDirectory()
+        func allFiles(under dir: URL) -> [URL] {{
+            guard fm.fileExists(atPath: dir.path),
+                  let e = fm.enumerator(at: dir, includingPropertiesForKeys: [.isRegularFileKey]) else {{ return [] }}
+            return (e.allObjects as? [URL] ?? []).filter {{
+                (try? $0.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            }}
+        }}
+
+        // (a) Candidate listing + cancel writes 0 credential files
+        let candidates = ProviderAuthManager.antigravityCandidates(homeDirectory: agyHome.path)
+        precondition(candidates.count == 1
+                        && candidates[0].sourcePath == nil
+                        && candidates[0].credentialValue.isEmpty
+                        && allFiles(under: stagingRoot).isEmpty
+                        && allFiles(under: importsRoot).isEmpty,
+                     "[§6.7] Antigravity candidate discovery writes 0 token files when cancelled")
+
+        // (b) Permission failure cleans stage directory
+        var permFailed = false
+        do {{
+            _ = try ProviderAuthManager.stageAntigravityIDECandidate(
+                expectedSourceIdentifier: candidates[0].sourceIdentifier,
+                expectedWorkspaceId: candidates[0].workspaceId,
+                homeDirectory: agyHome.path,
+                stagingRootOverride: stagingRoot,
+                permissionSetter: {{ path, mode in
+                    if mode == 0o600 {{ throw CocoaError(.fileWriteNoPermission) }}
+                }}
+            )
+        }} catch {{ permFailed = true }}
+        precondition(permFailed && allFiles(under: stagingRoot).isEmpty, "[§6.7] permission error leaves 0 staging files")
+
+        // (c) Direct stage verifies 0700 dir & 0600 file modes under umask 022
+        let stagedProbe = try ProviderAuthManager.stageAntigravityIDECandidate(
+            expectedSourceIdentifier: candidates[0].sourceIdentifier,
+            expectedWorkspaceId: candidates[0].workspaceId,
+            homeDirectory: agyHome.path,
+            stagingRootOverride: stagingRoot
+        )
+        let sRootMode = ((try fm.attributesOfItem(atPath: stagingRoot.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+        let sDirMode = ((try fm.attributesOfItem(atPath: stagedProbe.directoryURL.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+        let sFileMode = ((try fm.attributesOfItem(atPath: stagedProbe.fileURL.path)[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+        precondition(sRootMode == 0o700 && sDirMode == 0o700 && sFileMode == 0o600, "[§6.7] staging root/dir=0700 and file=0600")
+        try fm.removeItem(at: stagedProbe.directoryURL)
+
+        // (d) Validation failure cleans both staging and AuthImports
+        let absentReader = AntigravityLocalQuotaReader(listProcesses: {{ [] }}, listPorts: {{ _ in [] }}, callRPC: {{ _, _, _, _ in nil }})
+        ProviderRegistry.agyProvider = AntigravityProvider(homeDirectory: agyHome.path, localQuotaReader: absentReader)
+        var failCaught = false
+        do {{ _ = try await ProviderAuthManager.authenticateCandidate(candidates[0], localOnly: true) }}
+        catch {{ failCaught = true }}
+        precondition(failCaught && allFiles(under: stagingRoot).isEmpty && allFiles(under: importsRoot).isEmpty,
+                     "[§6.7] failed import leaves 0 staging and 0 AuthImports files")
+
+        // (e) Cancelled import task leaves 0 staging and 0 AuthImports files
+        let validReader = AntigravityLocalQuotaReader(
+            listProcesses: {{ [.init(pid: 88, csrfToken: "tok", preferredPorts: [19088])] }},
+            listPorts: {{ _ in [] }},
+            callRPC: {{ _, method, _, _ in
+                if method.hasSuffix("GetUserStatus") {{
+                    return ["userStatus": ["email": "agy-stage@example.invalid", "cloudaicompanionProject": "proj-secret"]]
+                }}
+                return ["groups": [["displayName": "Gemini", "buckets": [["bucketId": "g-5h", "remainingFraction": 0.9, "resetTime": "2027-01-01T00:00:00Z"]]]]]
+            }}
+        )
+        ProviderRegistry.agyProvider = AntigravityProvider(homeDirectory: agyHome.path, localQuotaReader: validReader)
+        let cancelTask = Task {{
+            ProviderAuthManager.onBeforeValidate = {{
+                await Task.yield()
+                throw CancellationError()
+            }}
+            return try await ProviderAuthManager.authenticateCandidate(candidates[0], localOnly: true)
+        }}
+        var cancelled = false
+        do {{ _ = try await cancelTask.value }} catch {{ cancelled = true }}
+        ProviderAuthManager.onBeforeValidate = nil
+        precondition(cancelled && allFiles(under: stagingRoot).isEmpty && allFiles(under: importsRoot).isEmpty,
+                     "[§6.7] cancelled import leaves 0 staging and 0 AuthImports files")
+
+        // (f) Successful import removes stage immediately, clears sourcePath, and account deletion leaves 0 files without touching IDE DB
+        let (cred, _) = try await ProviderAuthManager.authenticateCandidate(candidates[0], localOnly: true)
+        let authFilesAfterImport = allFiles(under: importsRoot)
+        let importedMode = ((try fm.attributesOfItem(atPath: cred.credential)[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+        precondition(allFiles(under: stagingRoot).isEmpty
+                        && authFilesAfterImport.count == 1
+                        && importedMode == 0o600
+                        && (cred.metadata["sourcePath"] ?? "") == ""
+                        && fm.fileExists(atPath: ideDB.path),
+                     "[§6.7] successful import removes staging immediately & stores 0600 managed copy")
+        ProviderManagedImportStore.cleanupManagedImports(forDeletedCredentials: [cred], referencedBy: [])
+        precondition(allFiles(under: stagingRoot).isEmpty
+                        && allFiles(under: importsRoot).isEmpty
+                        && fm.fileExists(atPath: ideDB.path),
+                     "[§6.7] deleting account cleans all managed copies and leaves 0 files & intact IDE DB")
+
+        // [§9.1] Same-email / different-workspace deferred Antigravity import rejection + same-workspace token rotation allowance
+        ProviderRegistry.agyProvider = AntigravityProvider(homeDirectory: agyHome.path, localQuotaReader: absentReader)
+        AntigravityAccountSwitcher.injectedPayload = AntigravityIDECandidatePayload(
+            email: "agy-stage@example.invalid",
+            name: "Agy Stage",
+            accessToken: "ya29.secret",
+            refreshToken: "1//refresh-secret",
+            databasePath: ideDB.path,
+            expiryDate: Date().addingTimeInterval(3600),
+            idToken: "id-secret",
+            projectId: "proj-secret"
+        )
+        let candidatesA = ProviderAuthManager.antigravityCandidates(homeDirectory: agyHome.path)
+        precondition(candidatesA.count == 1 && candidatesA[0].workspaceId == "proj-secret",
+                     "[§9.1] listed candidate captures non-secret workspace identity")
+        // IDE switches to project-b under the exact same email before user clicks Connect
+        AntigravityAccountSwitcher.injectedPayload = AntigravityIDECandidatePayload(
+            email: "agy-stage@example.invalid",
+            name: "Agy Stage",
+            accessToken: "ya29.secret-b",
+            refreshToken: "1//refresh-b",
+            databasePath: ideDB.path,
+            expiryDate: Date().addingTimeInterval(3600),
+            idToken: "id-b",
+            projectId: "project-b"
+        )
+        var driftErrorCode: String?
+        do {{
+            _ = try await ProviderAuthManager.authenticateCandidate(
+                candidatesA[0],
+                localOnly: true,
+                allowLocalMetadataFallback: true
+            )
+        }} catch let error as ProviderError {{
+            driftErrorCode = error.code
+        }}
+        let refreshedCandidatesB = ProviderAuthManager.antigravityCandidates(homeDirectory: agyHome.path)
+        precondition(driftErrorCode == "candidate_changed"
+                        && allFiles(under: stagingRoot).isEmpty
+                        && allFiles(under: importsRoot).isEmpty
+                        && refreshedCandidatesB.count == 1
+                        && refreshedCandidatesB[0].workspaceId == "project-b"
+                        && refreshedCandidatesB[0].id != candidatesA[0].id,
+                     "[§9.1] same-email workspace change A->B rejects with 0 staged/managed files and refreshes to distinct candidate id")
+
+        // Unverifiable project (nil) must also reject
+        AntigravityAccountSwitcher.injectedPayload = AntigravityIDECandidatePayload(
+            email: "agy-stage@example.invalid",
+            name: "Agy Stage",
+            accessToken: "ya29.secret-nil",
+            refreshToken: "1//refresh-nil",
+            databasePath: ideDB.path,
+            expiryDate: Date().addingTimeInterval(3600),
+            idToken: "id-nil",
+            projectId: nil
+        )
+        var unverifiedCode: String?
+        do {{
+            _ = try await ProviderAuthManager.authenticateCandidate(
+                candidatesA[0],
+                localOnly: true,
+                allowLocalMetadataFallback: true
+            )
+        }} catch let error as ProviderError {{
+            unverifiedCode = error.code
+        }}
+        precondition(unverifiedCode == "candidate_changed"
+                        && allFiles(under: stagingRoot).isEmpty
+                        && allFiles(under: importsRoot).isEmpty,
+                     "[§9.1] missing workspace identity on re-read fails closed with 0 files")
+
+        // Same verified workspace with rotated tokens is accepted cleanly
+        AntigravityAccountSwitcher.injectedPayload = AntigravityIDECandidatePayload(
+            email: "agy-stage@example.invalid",
+            name: "Agy Stage",
+            accessToken: "ya29.rotated-a",
+            refreshToken: "1//rotated-a",
+            databasePath: ideDB.path,
+            expiryDate: Date().addingTimeInterval(7200),
+            idToken: "id-rotated-a",
+            projectId: "proj-secret"
+        )
+        let (rotatedCred, rotatedUsage) = try await ProviderAuthManager.authenticateCandidate(
+            candidatesA[0],
+            localOnly: true,
+            allowLocalMetadataFallback: true
+        )
+        precondition(rotatedCred.metadata["projectId"] == "proj-secret"
+                        && (rotatedUsage.extra["projectId"]?.value as? String) == "proj-secret"
+                        && allFiles(under: stagingRoot).isEmpty,
+                     "[§9.1] token rotation within verified workspace succeeds cleanly")
+        ProviderManagedImportStore.cleanupManagedImports(forDeletedCredentials: [rotatedCred], referencedBy: [])
+        print("PASS: [§6.7 + §9.1] Antigravity staging, same-email/different-workspace rejection & rotation verified")
+
+        // 5. [§6.8] Visibility catch-up debounced by attempt time even when lastRefreshTime stays stale
+        let debCoord = CoordinatorUnderTest()
+        debCoord.settings.autoRefreshInterval = 60
+        debCoord.settings.claudeCodeRefreshInterval = 0
+        debCoord.lastRefreshTime = Date(timeIntervalSince1970: 100) // stale! cache-only refreshes do not advance it
+        debCoord.isPopoverVisible = true
+        debCoord.lastSurfaceVisible = false
+        debCoord.handleSurfaceVisibilityOrWake(isWake: false, now: Date(timeIntervalSince1970: 1000))
+        debCoord.lastSurfaceVisible = false
+        debCoord.handleSurfaceVisibilityOrWake(isWake: false, now: Date(timeIntervalSince1970: 1002))
+        debCoord.lastSurfaceVisible = false
+        debCoord.handleSurfaceVisibilityOrWake(isWake: true, now: Date(timeIntervalSince1970: 1005))
+        precondition(debCoord.refreshAllCalls.count == 1 && debCoord.lastRefreshTime == Date(timeIntervalSince1970: 100),
+                     "[§6.8] 3 rapid reopen/wake events within 10s trigger only 1 refresh even with stale lastRefreshTime")
+        debCoord.lastSurfaceVisible = false
+        debCoord.handleSurfaceVisibilityOrWake(isWake: false, now: Date(timeIntervalSince1970: 1011))
+        precondition(debCoord.refreshAllCalls.count == 2,
+                     "[§6.8] transition after >=10s dispatches next visibility catch-up")
+        print("PASS: [§6.8] Visibility catch-up 10s attempt debounce verified")
+
+        // 6. [§9.5] Reopened menu bar popover still receives async switch failure & stay-closed shows modal
+        var fakePopoverVisible = true
+        var shownModals: [String] = []
+        MenuBarActivationFeedback.popoverVisibilityProvider = {{ fakePopoverVisible }}
+        MenuBarActivationFeedback.modalWarningPresenter = {{ shownModals.append($0) }}
+
+        // (a) Reopen before async failure: host 1 closes, host 2 opens and binds presenter -> failure lands on host 2, 0 modals
+        var host1Toast: (String, Bool)?
+        var host2Toast: (String, Bool)?
+        var pendingFailure: CheckedContinuation<Bool, Error>?
+        let rowMgr1 = StubRowActivationManager()
+        rowMgr1.activateHandler = {{
+            try await withCheckedThrowingContinuation {{ pendingFailure = $0 }}
+        }}
+        let row1 = MenuBarRowHarness(activationManager: rowMgr1)
+        _ = MenuBarActivationFeedback.bindPresenter {{ msg, ok in host1Toast = (msg, ok) }}
+        row1.performActivation()
+        try await Task.sleep(for: .milliseconds(20))
+        precondition(pendingFailure != nil, "[§9.5] activation task started")
+        MenuBarActivationFeedback.unbindAll()
+        _ = MenuBarActivationFeedback.bindPresenter {{ msg, ok in host2Toast = (msg, ok) }}
+        fakePopoverVisible = true
+        pendingFailure?.resume(throwing: NSError(domain: "test", code: 1, userInfo: [NSLocalizedDescriptionKey: "Quit timed out"]))
+        try await Task.sleep(for: .milliseconds(30))
+        precondition(host1Toast == nil
+                        && row1.activationMessage == nil
+                        && host2Toast?.0 == "Quit timed out"
+                        && host2Toast?.1 == false
+                        && shownModals.isEmpty,
+                     "[§9.5] reopened popover host receives async failure cleanly without modal")
+
+        // (b) Stay closed until failure: presenter unbound & popover invisible -> 0 toasts, 1 modal
+        host2Toast = nil
+        shownModals.removeAll()
+        var stayedClosedCont: CheckedContinuation<Bool, Error>?
+        let rowMgr2 = StubRowActivationManager()
+        rowMgr2.activateHandler = {{
+            try await withCheckedThrowingContinuation {{ stayedClosedCont = $0 }}
+        }}
+        let row2 = MenuBarRowHarness(activationManager: rowMgr2)
+        _ = MenuBarActivationFeedback.bindPresenter {{ msg, ok in host2Toast = (msg, ok) }}
+        row2.performActivation()
+        try await Task.sleep(for: .milliseconds(20))
+        fakePopoverVisible = false
+        MenuBarActivationFeedback.unbindAll()
+        stayedClosedCont?.resume(throwing: NSError(domain: "test", code: 2, userInfo: [NSLocalizedDescriptionKey: "Helper exited slow"]))
+        try await Task.sleep(for: .milliseconds(30))
+        precondition(host2Toast == nil && row2.activationMessage == nil && shownModals == ["Helper exited slow"],
+                     "[§9.5] closed popover presents fallback modal warning")
+        print("PASS: [§9.5] Reopened menu bar failure routing & closed modal fallback verified")
+
+        // 7. [§11.1] Hide-during-hydration must drop hidden cached rows, clear alerts, and skip timestamp updates
+        func makeBackendCodexResult(id: String = "codex:cred:A", status: String = "critical", fetchedAt: String = "2026-11-22T01:00:00Z") -> ProviderResult {{
+            var usage = ProviderUsage(provider: "codex", label: "Codex")
+            usage.usageAccountId = "acct-a"
+            usage.extra["userId"] = AnyCodable("user-a")
+            var summary = UsageNormalizer.normalize(provider: CodexProvider(), usage: usage)
+            summary.id = id
+            summary.fetchedAt = fetchedAt
+            summary.status = status
+            summary.statusLabel = status == "critical" ? "Critical" : "OK"
+            summary.headline = HeadlineInfo(
+                eyebrow: summary.headline.eyebrow,
+                primary: summary.headline.primary,
+                secondary: status == "critical" ? "0% left" : "95% left",
+                supporting: summary.headline.supporting
+            )
+            return ProviderResult(id: id, providerId: "codex", ok: true, usage: usage, summary: summary)
+        }}
+
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = []
+        let criticalCodexResult = makeBackendCodexResult(id: "codex:cred:A", status: "critical")
+        let criticalCodexOverview = UsageNormalizer.createDashboardOverview(
+            summaries: [criticalCodexResult.summary!],
+            generatedAt: "2026-11-22T01:00:00Z"
+        )
+        let criticalCodexSnapshot = DashboardSnapshot(
+            generatedAt: "2026-11-22T01:00:00Z",
+            overview: criticalCodexOverview,
+            providers: [criticalCodexResult]
+        )
+
+        // (a) Visible control
+        let visibleHydrateCoord = CoordinatorUnderTest()
+        visibleHydrateCoord.selected = ["codex"]
+        visibleHydrateCoord.engine.onCachedDashboard = {{ _ in criticalCodexSnapshot }}
+        await visibleHydrateCoord.hydrateFromDiskCacheIfNeeded()
+        precondition(visibleHydrateCoord.providers.map(\\.baseProviderId) == ["codex"]
+                        && visibleHydrateCoord.overview?.activeProviders == 1
+                        && visibleHydrateCoord.overview?.criticalProviders == 1
+                        && visibleHydrateCoord.overview?.alerts.map(\\.id) == ["codex:cred:A:status-critical"]
+                        && visibleHydrateCoord.markedRefreshed.count == 1
+                        && visibleHydrateCoord.providerRefreshTimes["codex"] != nil,
+                     "[§11.1] visible control hydrates Codex row, critical alert, and timestamps")
+
+        // (b) Hide sole provider while disk cache hydration is suspended
+        let fullHideHydrateCoord = CoordinatorUnderTest()
+        fullHideHydrateCoord.selected = ["codex"]
+        fullHideHydrateCoord.engine.onCachedDashboard = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return criticalCodexSnapshot
+        }}
+        await fullHideHydrateCoord.hydrateFromDiskCacheIfNeeded()
+        precondition(fullHideHydrateCoord.providers.isEmpty
+                        && fullHideHydrateCoord.overview?.activeProviders == 0
+                        && fullHideHydrateCoord.overview?.criticalProviders == 0
+                        && fullHideHydrateCoord.overview?.alerts.isEmpty == true
+                        && fullHideHydrateCoord.markedRefreshed.isEmpty
+                        && fullHideHydrateCoord.providerRefreshTimes.isEmpty,
+                     "[§11.1] hiding Codex during suspended hydration publishes 0 rows, 0 alerts, and 0 timestamp updates")
+
+        // (c) Partial hide while disk cache hydration is suspended: keep existing visible Antigravity, drop hidden Codex
+        AppSettings.shared.hiddenSidebarSections = []
+        let partialHideHydrateCoord = CoordinatorUnderTest()
+        partialHideHydrateCoord.selected = ["codex", "antigravity"]
+        let healthyAGYRow = makeRemoteProvider(id: "antigravity:1", providerId: "antigravity", label: "Antigravity", status: .healthy)
+        partialHideHydrateCoord.providers = [healthyAGYRow]
+        partialHideHydrateCoord.engine.onCachedDashboard = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return criticalCodexSnapshot
+        }}
+        await partialHideHydrateCoord.hydrateFromDiskCacheIfNeeded()
+        precondition(partialHideHydrateCoord.providers.map(\\.baseProviderId) == ["antigravity"]
+                        && partialHideHydrateCoord.overview?.activeProviders == 1
+                        && partialHideHydrateCoord.overview?.criticalProviders == 0
+                        && partialHideHydrateCoord.overview?.alerts.isEmpty == true
+                        && partialHideHydrateCoord.markedRefreshed.isEmpty
+                        && partialHideHydrateCoord.providerRefreshTimes["codex"] == nil,
+                     "[§11.1] partial hide during suspended hydration keeps visible Antigravity overview clean of hidden Codex alert")
+        AppSettings.shared.hiddenSidebarSections = []
+        print("PASS: [§11.1] In-flight hydration visibility filter, overview recomputation & timestamp guard verified")
+
+        // 8. [§11.2] Unchanged row ID (codex:cred:A) with reset-protected healthy content clears stale critical overview
+        let healthyCodexBackend = makeBackendCodexResult(id: "codex:cred:A", status: "healthy", fetchedAt: "2026-11-22T02:00:00Z")
+        func makeHealthyCodexRow(windows: [QuotaWindow]? = nil) -> ProviderData {{
+            var usage = ProviderUsage(provider: "codex", label: "Codex")
+            usage.usageAccountId = "acct-a"
+            usage.extra["userId"] = AnyCodable("user-a")
+            var data = CoordinatorUnderTest().convertSummary(healthyCodexBackend.summary!)
+            data = ProviderData(
+                id: data.id, providerId: data.providerId, accountId: "acct-a", name: data.name, label: data.label,
+                description: data.description, category: data.category, channel: data.channel, status: .healthy,
+                statusLabel: "OK", theme: data.theme, sourceLabel: data.sourceLabel, sourceType: data.sourceType,
+                fetchedAt: data.fetchedAt, accountLabel: data.accountLabel, membershipLabel: data.membershipLabel,
+                workspaceLabel: data.workspaceLabel, workspaceUserId: "user-a",
+                headline: Headline(eyebrow: data.headline.eyebrow, primary: data.headline.primary, secondary: "95% left", supporting: data.headline.supporting),
+                metrics: data.metrics, windows: windows ?? data.windows, remainingPercent: 95, nextResetAt: data.nextResetAt,
+                nextResetLabel: data.nextResetLabel, spotlight: data.spotlight, models: data.models, costSummary: data.costSummary,
+                sourceFilePath: data.sourceFilePath, errorCode: nil, codexResetCreditsAvailableCount: 3
+            )
+            return data
+        }}
+
+        // (a) Local fetchDashboardLocal
+        let localSameIDCoord = CoordinatorUnderTest()
+        localSameIDCoord.selected = ["codex"]
+        let healthyLocalRow = makeHealthyCodexRow()
+        localSameIDCoord.providers = [healthyLocalRow]
+        let codexFenceKey = localSameIDCoord.codexResetIdentity(healthyLocalRow)!
+        localSameIDCoord.engine.onFetchAll = {{ _ in
+            localSameIDCoord.codexResetRefreshFence.invalidate(codexFenceKey)
+            return criticalCodexSnapshot
+        }}
+        _ = await localSameIDCoord.fetchDashboardLocal()
+        precondition(localSameIDCoord.providers.map(\\.id) == ["codex:cred:A"]
+                        && localSameIDCoord.providers.first?.status == .healthy
+                        && localSameIDCoord.overview?.activeProviders == 1
+                        && localSameIDCoord.overview?.criticalProviders == 0
+                        && localSameIDCoord.overview?.alerts.isEmpty == true,
+                     "[§11.2] Local fetchDashboardLocal rebuilds overview from reset-protected healthy row when ID is unchanged")
+
+        // (b) Remote fetchDashboardRemote
+        AppSettings.shared.backendMode = "remote"
+        let remoteSameIDCoord = CoordinatorUnderTest()
+        remoteSameIDCoord.selected = ["codex"]
+        remoteSameIDCoord.providers = [healthyLocalRow]
+        let staleCriticalRemoteRow = remoteSameIDCoord.convertSummary(criticalCodexResult.summary!)
+        let staleRemoteOverview = remoteSameIDCoord.convertOverview(criticalCodexOverview)
+        APIService.shared.onDashboardRequest = {{ _ in
+            remoteSameIDCoord.codexResetRefreshFence.invalidate(codexFenceKey)
+            return StubDashboardResponse(
+                providers: [.init(summary: staleCriticalRemoteRow, ok: true)],
+                overview: staleRemoteOverview
+            )
+        }}
+        _ = await remoteSameIDCoord.fetchDashboardRemote(showMessageOnFailure: false)
+        precondition(remoteSameIDCoord.providers.map(\\.id) == ["codex:cred:A"]
+                        && remoteSameIDCoord.providers.first?.status == .healthy
+                        && remoteSameIDCoord.overview?.activeProviders == 1
+                        && remoteSameIDCoord.overview?.criticalProviders == 0
+                        && remoteSameIDCoord.overview?.alerts.isEmpty == true,
+                     "[§11.2] Remote fetchDashboardRemote rebuilds overview from reset-protected healthy row when ID is unchanged")
+        print("PASS: [§11.2] Same-ID changed-status overview consistency (Local + Remote) verified")
+
+        // 9. [§13.1] Targeted refresh & replaceProviderEntries arriving after agent hide must drop hidden row/alert
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = []
+
+        // (a) Visible targeted refresh control
+        let targetVisibleCoord = CoordinatorUnderTest()
+        targetVisibleCoord.selected = ["codex"]
+        targetVisibleCoord.engine.onFetchForCredential = {{ _, _ in criticalCodexResult }}
+        await targetVisibleCoord.refreshAccountNow(credentialId: "A", providerId: "codex")
+        precondition(targetVisibleCoord.providers.map(\\.id) == ["codex:cred:A"]
+                        && targetVisibleCoord.markedRefreshed.count == 1
+                        && !targetVisibleCoord.accountRefreshTimes.isEmpty,
+                     "[§13.1] visible targeted refresh publishes Codex row and timestamps")
+
+        // (b) Hide both Codex sidebar sections while targeted critical refresh is in flight
+        AppSettings.shared.hiddenSidebarSections = []
+        let targetHideCoord = CoordinatorUnderTest()
+        targetHideCoord.selected = ["codex"]
+        targetHideCoord.providers = [healthyLocalRow]
+        targetHideCoord.overview = targetHideCoord.recomputedOverview(
+            for: [healthyLocalRow], baseOverview: nil, generatedAt: "2026-11-22T03:00:00Z", language: "en"
+        )
+        targetHideCoord.engine.onFetchForCredential = {{ _, _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            targetHideCoord.providers = []
+            targetHideCoord.overview = targetHideCoord.recomputedOverview(
+                for: [], baseOverview: nil, generatedAt: "2026-11-22T03:01:00Z", language: "en"
+            )
+            return criticalCodexResult
+        }}
+        await targetHideCoord.refreshAccountNow(credentialId: "A", providerId: "codex")
+        precondition(targetHideCoord.providers.isEmpty
+                        && targetHideCoord.overview?.activeProviders == 0
+                        && targetHideCoord.overview?.criticalProviders == 0
+                        && targetHideCoord.overview?.alerts.isEmpty == true
+                        && targetHideCoord.markedRefreshed.isEmpty
+                        && targetHideCoord.accountRefreshTimes.isEmpty,
+                     "[§13.1] hiding Codex during targeted critical refresh prevents row/alert/timestamp resurrection")
+
+        // (c) Subsequent refreshAccountNow while hidden makes 0 new requests
+        let countAfterHide = targetHideCoord.engine.credentialFetchCount
+        await targetHideCoord.refreshAccountNow(credentialId: "A", providerId: "codex")
+        precondition(targetHideCoord.engine.credentialFetchCount == countAfterHide,
+                     "[§13.1] second targeted refresh while hidden makes 0 backend requests")
+
+        // (d) Hide both Codex sidebar sections while targeted terminal-error refresh is in flight
+        AppSettings.shared.hiddenSidebarSections = []
+        var terminalUsage = ProviderUsage(provider: "codex", label: "Codex")
+        terminalUsage.usageAccountId = "acct-a"
+        terminalUsage.extra["userId"] = AnyCodable("user-a")
+        var terminalSummary = UsageNormalizer.normalize(provider: CodexProvider(), usage: terminalUsage)
+        terminalSummary.id = "codex:cred:A"
+        terminalSummary.status = "error"
+        terminalSummary.errorCode = "tos_violation"
+        let terminalErrorResult = ProviderResult(id: "codex:cred:A", providerId: "codex", ok: false, usage: terminalUsage, summary: terminalSummary, error: "TOS violation")
+
+        let terminalHideCoord = CoordinatorUnderTest()
+        terminalHideCoord.selected = ["codex"]
+        terminalHideCoord.providers = [healthyLocalRow]
+        terminalHideCoord.overview = terminalHideCoord.recomputedOverview(
+            for: [healthyLocalRow], baseOverview: nil, generatedAt: "2026-11-22T03:02:00Z", language: "en"
+        )
+        terminalHideCoord.engine.onFetchForCredential = {{ _, _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            terminalHideCoord.providers = []
+            terminalHideCoord.overview = terminalHideCoord.recomputedOverview(
+                for: [], baseOverview: nil, generatedAt: "2026-11-22T03:03:00Z", language: "en"
+            )
+            return terminalErrorResult
+        }}
+        await terminalHideCoord.refreshAccountNow(credentialId: "A", providerId: "codex")
+        precondition(terminalHideCoord.providers.isEmpty
+                        && terminalHideCoord.overview?.activeProviders == 0
+                        && terminalHideCoord.overview?.alerts.isEmpty == true
+                        && terminalHideCoord.recordedAccountErrors.isEmpty
+                        && terminalHideCoord.errorMessage == nil
+                        && terminalHideCoord.accountRefreshTimes.isEmpty,
+                     "[§13.1] terminal error arriving after hide drops hidden row/error/alert cleanly")
+
+        // (e) replaceProviderEntries also filters hidden replacements and recomputes overview
+        terminalHideCoord.replaceProviderEntries(for: "codex", with: [healthyLocalRow])
+        precondition(terminalHideCoord.providers.isEmpty
+                        && terminalHideCoord.overview?.activeProviders == 0
+                        && terminalHideCoord.overview?.alerts.isEmpty == true,
+                     "[§13.1] replaceProviderEntries ignores hidden Codex replacement and preserves empty overview")
+        AppSettings.shared.hiddenSidebarSections = []
+        print("PASS: [§13.1] Targeted & single-provider publication guards after agent hide verified")
+
+        // 10. [§15.1] Account/provider removal and late targeted rejection synchronize overview even when row was already pruned
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = []
+        let criticalCodexRow = makeRemoteProvider(id: "codex:cred:A", providerId: "codex", label: "Codex", status: .critical)
+
+        // (a) Hide account via hiddenAccounts + reapplyVisibleSortedProviders clears stale alert
+        let accountHideCoord = CoordinatorUnderTest()
+        accountHideCoord.selected = ["codex"]
+        accountHideCoord.providers = [criticalCodexRow]
+        accountHideCoord.overview = accountHideCoord.recomputedOverview(
+            for: [criticalCodexRow], baseOverview: nil, generatedAt: "2026-11-22T04:00:00Z", language: "en"
+        )
+        precondition(accountHideCoord.overview?.alerts.map(\\.id) == ["codex:cred:A:status-critical"],
+                     "[§15.1] precondition sets critical alert")
+        accountHideCoord.hiddenAccounts.insert("codex:cred:A")
+        accountHideCoord.reapplyVisibleSortedProviders()
+        precondition(accountHideCoord.providers.isEmpty
+                        && accountHideCoord.overview?.activeProviders == 0
+                        && accountHideCoord.overview?.criticalProviders == 0
+                        && accountHideCoord.overview?.alerts.isEmpty == true,
+                     "[§15.1] reapplyVisibleSortedProviders rebuilds overview after account hide")
+
+        // (b) Late targeted rejection reconciles stale overview even when row was already removed before await returns
+        let lateEmptyCoord = CoordinatorUnderTest()
+        lateEmptyCoord.selected = ["codex"]
+        lateEmptyCoord.providers = [criticalCodexRow]
+        lateEmptyCoord.overview = lateEmptyCoord.recomputedOverview(
+            for: [criticalCodexRow], baseOverview: nil, generatedAt: "2026-11-22T04:01:00Z", language: "en"
+        )
+        lateEmptyCoord.engine.onFetchForCredential = {{ _, _ in
+            // Simulate removeLiveProviders clearing row while stale critical alert lingered in overview
+            lateEmptyCoord.hiddenAccounts.insert("codex:cred:A")
+            lateEmptyCoord.providers = []
+            return criticalCodexResult
+        }}
+        await lateEmptyCoord.refreshAccountNow(credentialId: "A", providerId: "codex")
+        precondition(lateEmptyCoord.providers.isEmpty
+                        && lateEmptyCoord.overview?.activeProviders == 0
+                        && lateEmptyCoord.overview?.criticalProviders == 0
+                        && lateEmptyCoord.overview?.alerts.isEmpty == true
+                        && lateEmptyCoord.markedRefreshed.isEmpty
+                        && lateEmptyCoord.accountRefreshTimes.isEmpty,
+                     "[§15.1] late targeted rejection clears stale overview alert even when pruned.count == providers.count")
+
+        // (c) removeProviders(matchingBaseProviderId:) also syncs overview
+        let scanDisableCoord = CoordinatorUnderTest()
+        scanDisableCoord.selected = ["codex"]
+        scanDisableCoord.providers = [criticalCodexRow]
+        scanDisableCoord.overview = scanDisableCoord.recomputedOverview(
+            for: [criticalCodexRow], baseOverview: nil, generatedAt: "2026-11-22T04:02:00Z", language: "en"
+        )
+        scanDisableCoord.removeProviders(matchingBaseProviderId: "codex")
+        precondition(scanDisableCoord.providers.isEmpty
+                        && scanDisableCoord.overview?.activeProviders == 0
+                        && scanDisableCoord.overview?.alerts.isEmpty == true,
+                     "[§15.1] removeProviders(matchingBaseProviderId:) clears overview alerts immediately")
+        print("PASS: [§15.1] Account/provider removal and late targeted rejection overview sync verified")
+
+        // 11. [§15.2] Single-provider & dashboard error banners re-check visibility after await
+        struct MockRemoteTimeoutError: LocalizedError {{
+            var errorDescription: String? {{ "Remote quota request timed out" }}
+        }}
+
+        // (a) Visible control: Remote refreshProviderNow timeout sets user-visible banner & diagnostic notification
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteTimeoutVisibleCoord = CoordinatorUnderTest()
+        remoteTimeoutVisibleCoord.selected = ["codex"]
+        APIService.shared.onProviderResultsRequest = {{ _ in
+            throw MockRemoteTimeoutError()
+        }}
+        await remoteTimeoutVisibleCoord.refreshProviderNow("codex")
+        precondition(remoteTimeoutVisibleCoord.errorMessage == "Remote quota request timed out"
+                        && remoteTimeoutVisibleCoord.errorNotifications.count == 1,
+                     "[§15.2] visible Remote timeout shows banner and records diagnostic notification")
+
+        // (b) Exact Codex §15.2 repro: hide Codex during Remote refreshProviderNow timeout leaves errorMessage nil
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteTimeoutHiddenCoord = CoordinatorUnderTest()
+        remoteTimeoutHiddenCoord.selected = ["codex"]
+        APIService.shared.onProviderResultsRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            throw MockRemoteTimeoutError()
+        }}
+        await remoteTimeoutHiddenCoord.refreshProviderNow("codex")
+        precondition(remoteTimeoutHiddenCoord.selectedProviderIDList().isEmpty
+                        && remoteTimeoutHiddenCoord.providers.isEmpty
+                        && remoteTimeoutHiddenCoord.errorMessage == nil
+                        && remoteTimeoutHiddenCoord.errorNotifications.count == 1,
+                     "[§15.2] hiding provider during Remote timeout keeps diagnostic log but suppresses global error banner")
+
+        // (c) Hide during Remote refreshProviderNow critical success drops row, alert, timestamp & banner
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteSuccessHiddenCoord = CoordinatorUnderTest()
+        remoteSuccessHiddenCoord.selected = ["codex"]
+        remoteSuccessHiddenCoord.overview = remoteSuccessHiddenCoord.recomputedOverview(
+            for: [], baseOverview: nil, generatedAt: "2026-11-22T04:03:00Z", language: "en"
+        )
+        APIService.shared.onProviderResultsRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return [StubDashboardResponse.StubProviderWrapper(summary: criticalCodexRow, ok: true)]
+        }}
+        await remoteSuccessHiddenCoord.refreshProviderNow("codex")
+        precondition(remoteSuccessHiddenCoord.providers.isEmpty
+                        && remoteSuccessHiddenCoord.overview?.activeProviders == 0
+                        && remoteSuccessHiddenCoord.overview?.alerts.isEmpty == true
+                        && remoteSuccessHiddenCoord.providerRefreshTimes["codex"] == nil
+                        && remoteSuccessHiddenCoord.errorMessage == nil,
+                     "[§15.2] hiding provider during Remote success drops row, alert, timestamp, and banner")
+
+        // (d) Remote fetchDashboard timeout: visible control shows banner, hide mid-flight suppresses banner
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteDashVisible = CoordinatorUnderTest()
+        remoteDashVisible.selected = ["codex"]
+        APIService.shared.onDashboardRequest = {{ _ in throw MockRemoteTimeoutError() }}
+        _ = await remoteDashVisible.fetchDashboard()
+        precondition(remoteDashVisible.errorMessage == "Remote quota request timed out",
+                     "[§15.2] visible Remote fetchDashboard timeout shows banner")
+
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteDashHidden = CoordinatorUnderTest()
+        remoteDashHidden.selected = ["codex"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            throw MockRemoteTimeoutError()
+        }}
+        _ = await remoteDashHidden.fetchDashboard()
+        precondition(remoteDashHidden.errorMessage == nil,
+                     "[§15.2] hiding last provider during Remote fetchDashboard timeout suppresses global error banner")
+
+        // (e) Local fetchSingleProviderLocal non-terminal error after hide suppresses account error, row & banner
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = []
+        var nonTerminalUsage = ProviderUsage(provider: "codex", label: "Codex")
+        nonTerminalUsage.usageAccountId = "acct-a"
+        nonTerminalUsage.extra["userId"] = AnyCodable("user-a")
+        var nonTerminalSummary = UsageNormalizer.normalize(provider: CodexProvider(), usage: nonTerminalUsage)
+        nonTerminalSummary.id = "codex:cred:A"
+        nonTerminalSummary.status = "error"
+        nonTerminalSummary.errorCode = "temporary_503"
+        let nonTerminalErrorResult = ProviderResult(id: "codex:cred:A", providerId: "codex", ok: false, usage: nonTerminalUsage, summary: nonTerminalSummary, error: "Temporary 503")
+
+        let localSingleHiddenCoord = CoordinatorUnderTest()
+        localSingleHiddenCoord.selected = ["codex"]
+        localSingleHiddenCoord.providers = [healthyLocalRow]
+        localSingleHiddenCoord.overview = localSingleHiddenCoord.recomputedOverview(
+            for: [healthyLocalRow], baseOverview: nil, generatedAt: "2026-11-22T04:04:00Z", language: "en"
+        )
+        localSingleHiddenCoord.engine.onFetchMulti = {{ _ in nil }}
+        localSingleHiddenCoord.engine.onFetchSingle = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            return nonTerminalErrorResult
+        }}
+        await localSingleHiddenCoord.refreshProviderNow("codex")
+        precondition(localSingleHiddenCoord.providers.isEmpty
+                        && localSingleHiddenCoord.overview?.activeProviders == 0
+                        && localSingleHiddenCoord.overview?.alerts.isEmpty == true
+                        && localSingleHiddenCoord.recordedAccountErrors.isEmpty
+                        && localSingleHiddenCoord.errorMessage == nil,
+                     "[§15.2] hiding provider during Local single-provider non-terminal error clears row and suppresses error banner")
+
+        APIService.shared.onProviderResultsRequest = nil
+        AppSettings.shared.hiddenSidebarSections = []
+        print("PASS: [§15.2] Single-provider & dashboard post-await error banner visibility guards verified")
+
+        // 12. [§17.1] Remote/Local dashboard disjoint-scope & follow-up poll scope guards
+        let claudeRemoteRow = makeRemoteProvider(id: "claude-subscription:1", providerId: "claude-subscription", label: "Claude", status: .healthy)
+
+        // (a) Exact §17.1 disjoint-scope Remote timeout: Codex requested, switched to Claude before timeout
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        let disjointErrCoord = CoordinatorUnderTest()
+        disjointErrCoord.selected = ["codex", "claude-subscription"]
+        disjointErrCoord.errorMessage = nil
+        precondition(disjointErrCoord.selectedProviderIDList() == ["codex"], "[§17.1] precondition starts Codex-only visible")
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            throw MockRemoteTimeoutError()
+        }}
+        _ = await disjointErrCoord.fetchDashboard()
+        precondition(disjointErrCoord.selectedProviderIDList() == ["claude-subscription"]
+                        && APIService.shared.recordedURLs.last?.query == "ids=codex"
+                        && disjointErrCoord.errorMessage == nil,
+                     "[§17.1] disjoint Codex-only timeout must not show error banner when only Claude is visible")
+
+        // Repeat with an active Claude error set in flight: obsolete Codex failure must not overwrite Claude's banner
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        let disjointPreserveCoord = CoordinatorUnderTest()
+        disjointPreserveCoord.selected = ["codex", "claude-subscription"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            disjointPreserveCoord.errorMessage = "Visible Claude refresh timed out"
+            throw MockRemoteTimeoutError()
+        }}
+        _ = await disjointPreserveCoord.fetchDashboard()
+        precondition(disjointPreserveCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.1] disjoint Codex-only timeout preserves existing visible Claude banner without overwriting")
+
+        // (b1) Follow-up refresh_pending poll remains Codex-only, hides Codex before poll 2 fails -> no banner
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        let pendingCodexRow = makeRemoteProvider(id: "codex:1", providerId: "codex", label: "Codex", status: .healthy, errorCode: "refresh_pending")
+        var pollCallB1 = 0
+        let pollDisjointCoord = CoordinatorUnderTest()
+        pollDisjointCoord.selected = ["codex", "claude-subscription"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            pollCallB1 += 1
+            if pollCallB1 == 1 {{
+                return StubDashboardResponse(providers: [.init(summary: pendingCodexRow, ok: true)], overview: emptyAppOverview)
+            }}
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            throw MockRemoteTimeoutError()
+        }}
+        _ = await pollDisjointCoord.fetchDashboard()
+        precondition(APIService.shared.recordedURLs.map(\\.query) == ["ids=codex", "ids=codex"]
+                        && pollDisjointCoord.selectedProviderIDList() == ["claude-subscription"]
+                        && pollDisjointCoord.errorMessage == nil,
+                     "[§17.1] follow-up Codex-only poll failing after switch to Claude suppresses banner")
+
+        // (b2) Updated follow-up poll actually requested Claude before failing while Claude stays visible -> shows banner
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        var pollCallB2 = 0
+        let pollClaudeVisibleCoord = CoordinatorUnderTest()
+        pollClaudeVisibleCoord.selected = ["codex", "claude-subscription"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            pollCallB2 += 1
+            if pollCallB2 == 1 {{
+                AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+                return StubDashboardResponse(providers: [.init(summary: pendingCodexRow, ok: true)], overview: emptyAppOverview)
+            }}
+            throw MockRemoteTimeoutError()
+        }}
+        _ = await pollClaudeVisibleCoord.fetchDashboard()
+        precondition(APIService.shared.recordedURLs.map(\\.query) == ["ids=codex", "ids=claude-subscription"]
+                        && pollClaudeVisibleCoord.errorMessage == "Remote quota request timed out",
+                     "[§17.1] follow-up poll requesting newly visible Claude shows banner when that follow-up fails")
+
+        // (c) Disjoint settled Remote & Local dashboard preserves newly visible Claude rows & error banner
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let remoteSettledDisjoint = CoordinatorUnderTest()
+        remoteSettledDisjoint.selected = ["codex", "claude-subscription"]
+        APIService.shared.onDashboardRequest = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            remoteSettledDisjoint.providers = [claudeRemoteRow]
+            remoteSettledDisjoint.errorMessage = "Visible Claude refresh timed out"
+            return StubDashboardResponse(providers: [.init(summary: settledCodex, ok: true)], overview: staleCodexAlertOverview)
+        }}
+        _ = await remoteSettledDisjoint.fetchDashboard()
+        precondition(remoteSettledDisjoint.providers.map(\\.id) == ["claude-subscription:1"]
+                        && remoteSettledDisjoint.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.1] disjoint settled Remote dashboard preserves newly visible Claude row and banner")
+
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let localSettledDisjoint = CoordinatorUnderTest()
+        localSettledDisjoint.selected = ["codex", "claude-subscription"]
+        localSettledDisjoint.engine.onFetchAll = {{ _ in
+            AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+            localSettledDisjoint.providers = [claudeRemoteRow]
+            localSettledDisjoint.errorMessage = "Visible Claude refresh timed out"
+            return criticalCodexSnapshot
+        }}
+        _ = await localSettledDisjoint.fetchDashboard()
+        precondition(localSettledDisjoint.providers.map(\\.id) == ["claude-subscription:1"]
+                        && localSettledDisjoint.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.1] disjoint settled Local dashboard preserves newly visible Claude row and banner")
+        print("PASS: [§17.1] Disjoint dashboard scope and follow-up poll guards verified")
+
+        // 13. [§17.2] Hidden late per-provider completion performs no write to shared errorMessage
+        struct MockClaudeTimeoutError: LocalizedError {{
+            var errorDescription: String? {{ "Visible Claude refresh timed out" }}
+        }}
+
+        // (a) Exact §17.2 ordered Remote two-request repro (hidden Codex error completes after visible Claude error)
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = []
+        let orderedErrCoord = CoordinatorUnderTest()
+        orderedErrCoord.selected = ["codex", "claude-subscription"]
+        var codexErrGate: CheckedContinuation<[StubDashboardResponse.StubProviderWrapper], Error>?
+        APIService.shared.onProviderResultsRequest = {{ providerId in
+            if providerId == "codex" {{
+                return try await withCheckedThrowingContinuation {{ codexErrGate = $0 }}
+            }}
+            throw MockClaudeTimeoutError()
+        }}
+        let codexErrTask = Task {{ await orderedErrCoord.refreshProviderNow("codex") }}
+        while codexErrGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+        precondition(orderedErrCoord.selectedProviderIDList() == ["claude-subscription"], "[§17.2] Claude remains visible after Codex hide")
+        await orderedErrCoord.refreshProviderNow("claude-subscription")
+        let bannerBeforeHiddenFinish = orderedErrCoord.errorMessage
+        precondition(bannerBeforeHiddenFinish == "Visible Claude refresh timed out",
+                     "[§17.2] visible Claude failure populates shared error banner")
+        codexErrGate?.resume(throwing: MockRemoteTimeoutError())
+        _ = await codexErrTask.value
+        precondition(orderedErrCoord.errorMessage == "Visible Claude refresh timed out"
+                        && orderedErrCoord.errorNotifications.count == 2,
+                     "[§17.2] late hidden Codex timeout performs zero write to Claude banner while keeping diagnostic logs")
+
+        // (b) Hidden Codex success completes after visible Claude error -> still zero write to Claude banner
+        AppSettings.shared.hiddenSidebarSections = []
+        let orderedSuccessCoord = CoordinatorUnderTest()
+        orderedSuccessCoord.selected = ["codex", "claude-subscription"]
+        var codexSuccessGate: CheckedContinuation<[StubDashboardResponse.StubProviderWrapper], Error>?
+        APIService.shared.onProviderResultsRequest = {{ providerId in
+            if providerId == "codex" {{
+                return try await withCheckedThrowingContinuation {{ codexSuccessGate = $0 }}
+            }}
+            throw MockClaudeTimeoutError()
+        }}
+        let codexSuccessTask = Task {{ await orderedSuccessCoord.refreshProviderNow("codex") }}
+        while codexSuccessGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = [AppSection.codexProxyManagement.rawValue, AppSection.codexLocalManagement.rawValue]
+        await orderedSuccessCoord.refreshProviderNow("claude-subscription")
+        precondition(orderedSuccessCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.2] (b) visible Claude failure populates shared error banner")
+        codexSuccessGate?.resume(returning: [StubDashboardResponse.StubProviderWrapper(summary: criticalCodexRow, ok: true)])
+        _ = await codexSuccessTask.value
+        precondition(orderedSuccessCoord.providers.isEmpty
+                        && orderedSuccessCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.2] late hidden Codex success performs zero write to Claude banner")
+
+        // (c) Local targeted refreshAccountNow explicitly hidden during concurrent Claude error performs zero write
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = []
+        let claudeLocalUsage = ProviderUsage(provider: "claude-subscription", label: "Claude")
+        var claudeLocalSummary = UsageNormalizer.normalize(provider: CodexProvider(), usage: claudeLocalUsage)
+        claudeLocalSummary.id = "claude-subscription:1"
+        claudeLocalSummary.providerId = "claude-subscription"
+        claudeLocalSummary.status = "error"
+        claudeLocalSummary.errorCode = "temporary_503"
+        let claudeLocalNonTerminal = ProviderResult(
+            id: "claude-subscription:1",
+            providerId: "claude-subscription",
+            ok: false,
+            usage: claudeLocalUsage,
+            summary: claudeLocalSummary,
+            error: "Visible Claude 503"
+        )
+        let claudeLocalPreservable = ProviderData(
+            id: "claude-subscription:1",
+            providerId: "claude-subscription",
+            accountId: nil,
+            name: "Claude",
+            label: "Claude",
+            description: "",
+            category: "quota",
+            channel: nil,
+            status: .healthy,
+            statusLabel: "OK",
+            theme: ProviderTheme(accent: "#000", glow: "#000"),
+            sourceLabel: "",
+            sourceType: "oauth",
+            fetchedAt: nil,
+            accountLabel: nil,
+            membershipLabel: nil,
+            headline: Headline(eyebrow: "", primary: "", secondary: "90% left", supporting: nil),
+            metrics: [],
+            windows: [QuotaWindow(label: "5h", remainingPercent: 90, usedPercent: 10, value: "90%", note: "", resetAt: nil)],
+            remainingPercent: 90,
+            nextResetAt: nil,
+            nextResetLabel: nil,
+            spotlight: nil,
+            models: nil,
+            costSummary: nil,
+            errorCode: nil
+        )
+        let orderedAcctCoord = CoordinatorUnderTest()
+        orderedAcctCoord.selected = ["codex", "claude-subscription"]
+        orderedAcctCoord.providers = [claudeLocalPreservable]
+        var acctGate: CheckedContinuation<ProviderResult?, Never>?
+        orderedAcctCoord.engine.onFetchForCredential = {{ _, _ in
+            await withCheckedContinuation {{ acctGate = $0 }}
+        }}
+        orderedAcctCoord.engine.onFetchMulti = {{ _ in nil }}
+        orderedAcctCoord.engine.onFetchSingle = {{ _ in claudeLocalNonTerminal }}
+        let acctTask = Task {{ await orderedAcctCoord.refreshAccountNow(credentialId: "A", providerId: "codex") }}
+        while acctGate == nil {{ await Task.yield() }}
+        orderedAcctCoord.hiddenAccounts.insert("codex:cred:A")
+        await orderedAcctCoord.refreshProviderNow("claude-subscription")
+        precondition(orderedAcctCoord.errorMessage == "Visible Claude 503"
+                        && orderedAcctCoord.recordedAccountErrors == ["Visible Claude 503"],
+                     "[§17.2] (c) visible Claude Local failure populates shared banner")
+        acctGate?.resume(returning: criticalCodexResult)
+        _ = await acctTask.value
+        precondition(orderedAcctCoord.providers.map(\\.id) == ["claude-subscription:1"]
+                        && orderedAcctCoord.errorMessage == "Visible Claude 503",
+                     "[§17.2] late hidden account refresh performs zero write to visible Claude banner")
+
+        // (d) Engine returning nil for excluded credential (AccountStore.hideAccounts parity) also performs zero write
+        var nilAcctGate: CheckedContinuation<ProviderResult?, Never>?
+        orderedAcctCoord.engine.onFetchForCredential = {{ _, _ in
+            await withCheckedContinuation {{ nilAcctGate = $0 }}
+        }}
+        let nilAcctTask = Task {{ await orderedAcctCoord.refreshAccountNow(credentialId: "A", providerId: "codex") }}
+        while nilAcctGate == nil {{ await Task.yield() }}
+        orderedAcctCoord.errorMessage = "Visible Claude 503"
+        nilAcctGate?.resume(returning: nil)
+        _ = await nilAcctTask.value
+        precondition(orderedAcctCoord.providers.map(\\.id) == ["claude-subscription:1"]
+                        && orderedAcctCoord.errorMessage == "Visible Claude 503",
+                     "[§17.2] (d) nil/excluded targeted account result performs zero write to visible Claude banner")
+
+        // (e) Selected provider whose returned accounts are all account-hidden (Local + Remote) performs zero write
+        var multiGate: CheckedContinuation<[ProviderResult]?, Never>?
+        orderedAcctCoord.engine.onFetchMulti = {{ id in
+            if id == "codex" {{
+                return await withCheckedContinuation {{ multiGate = $0 }}
+            }}
+            return nil
+        }}
+        let allHiddenLocalTask = Task {{ await orderedAcctCoord.refreshProviderNow("codex") }}
+        while multiGate == nil {{ await Task.yield() }}
+        orderedAcctCoord.hiddenAccounts.insert("codex:cred:A")
+        await orderedAcctCoord.refreshProviderNow("claude-subscription")
+        precondition(orderedAcctCoord.errorMessage == "Visible Claude 503",
+                     "[§17.2] (e) visible Claude failure sets shared banner before hidden-only Codex Local finishes")
+        multiGate?.resume(returning: [criticalCodexResult])
+        _ = await allHiddenLocalTask.value
+        precondition(orderedAcctCoord.providers.map(\\.id) == ["claude-subscription:1"]
+                        && orderedAcctCoord.errorMessage == "Visible Claude 503",
+                     "[§17.2] (e) all-hidden Local provider results perform zero write to visible Claude banner")
+
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = []
+        let remoteAllHiddenCoord = CoordinatorUnderTest()
+        remoteAllHiddenCoord.selected = ["codex", "claude-subscription"]
+        var remoteCodexAllHiddenGate: CheckedContinuation<[StubDashboardResponse.StubProviderWrapper], Error>?
+        APIService.shared.onProviderResultsRequest = {{ providerId in
+            if providerId == "codex" {{
+                return try await withCheckedThrowingContinuation {{ remoteCodexAllHiddenGate = $0 }}
+            }}
+            throw MockClaudeTimeoutError()
+        }}
+        let remoteAllHiddenTask = Task {{ await remoteAllHiddenCoord.refreshProviderNow("codex") }}
+        while remoteCodexAllHiddenGate == nil {{ await Task.yield() }}
+        remoteAllHiddenCoord.hiddenAccounts.insert("codex:cred:A")
+        await remoteAllHiddenCoord.refreshProviderNow("claude-subscription")
+        precondition(remoteAllHiddenCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.2] (f) visible Claude Remote failure sets shared banner before hidden-only Codex Remote finishes")
+        remoteCodexAllHiddenGate?.resume(returning: [StubDashboardResponse.StubProviderWrapper(summary: criticalCodexRow, ok: true)])
+        _ = await remoteAllHiddenTask.value
+        precondition(remoteAllHiddenCoord.providers.isEmpty
+                        && remoteAllHiddenCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§17.2] (f) all-hidden Remote provider results perform zero write to visible Claude banner")
+
+        APIService.shared.onProviderResultsRequest = nil
+        AppSettings.shared.hiddenSidebarSections = []
+        print("PASS: [§17.2] Ordered hidden per-provider/account no-write banner guards verified")
+
+        // 14. [§19.1] Partial-overlap dashboard settlement merges only covered visible IDs and preserves newly shown providers
+        let criticalClaudeRow = makeRemoteProvider(id: "claude-subscription:1", providerId: "claude-subscription", label: "Claude", status: .critical)
+        let healthyCodexBackendResult = makeBackendCodexResult(id: "codex:cred:A", status: "healthy", fetchedAt: "2026-11-22T02:00:00Z")
+        let healthyCodexOverview = UsageNormalizer.createDashboardOverview(
+            summaries: [healthyCodexBackendResult.summary!],
+            generatedAt: "2026-11-22T02:00:00Z"
+        )
+        let healthyCodexSnapshot = DashboardSnapshot(
+            generatedAt: "2026-11-22T02:00:00Z",
+            overview: healthyCodexOverview,
+            providers: [healthyCodexBackendResult]
+        )
+
+        // (a) Exact §19.1 Local partial-overlap repro: Codex-only dashboard settles after Claude is un-hidden and populated
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let localPartialCoord = CoordinatorUnderTest()
+        localPartialCoord.selected = ["codex", "claude-subscription"]
+        var localPartialIds: [String] = []
+        var localPartialGate: CheckedContinuation<DashboardSnapshot, Never>?
+        localPartialCoord.engine.onFetchAll = {{ ids in
+            localPartialIds = ids
+            return await withCheckedContinuation {{ localPartialGate = $0 }}
+        }}
+        let localPartialTask = Task {{ await localPartialCoord.fetchDashboard() }}
+        while localPartialGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = []
+        localPartialCoord.replaceProviderEntries(for: "claude-subscription", with: [criticalClaudeRow])
+        precondition(localPartialIds == ["codex"]
+                        && localPartialCoord.selectedProviderIDList() == ["claude-subscription", "codex"]
+                        && localPartialCoord.providers.map(\\.baseProviderId) == ["claude-subscription"],
+                     "[§19.1] (a) Local precondition: Codex-only request in flight while Claude card appears")
+        localPartialGate?.resume(returning: healthyCodexSnapshot)
+        _ = await localPartialTask.value
+        precondition(localPartialCoord.providers.map(\\.baseProviderId) == ["claude-subscription", "codex"]
+                        && localPartialCoord.overview?.activeProviders == 2
+                        && localPartialCoord.overview?.criticalProviders == 1
+                        && localPartialCoord.overview?.alerts.map(\\.id) == ["claude-subscription:1:status-critical"],
+                     "[§19.1] (a) Local partial-overlap dashboard merges Codex without dropping newly shown Claude row or alert")
+
+        // (b) Exact §19.1 Remote partial-overlap repro: Codex-only dashboard settles after Claude single-provider refresh completes
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        let remotePartialCoord = CoordinatorUnderTest()
+        remotePartialCoord.selected = ["codex", "claude-subscription"]
+        var remotePartialGate: CheckedContinuation<StubDashboardResponse, Error>?
+        APIService.shared.onDashboardRequest = {{ _ in
+            try await withCheckedThrowingContinuation {{ remotePartialGate = $0 }}
+        }}
+        APIService.shared.onProviderResultsRequest = {{ _ in
+            [StubDashboardResponse.StubProviderWrapper(summary: criticalClaudeRow, ok: true)]
+        }}
+        let remotePartialTask = Task {{ await remotePartialCoord.fetchDashboard() }}
+        while remotePartialGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = []
+        await remotePartialCoord.refreshProviderNow("claude-subscription")
+        precondition(APIService.shared.recordedURLs.last?.query == "ids=codex"
+                        && remotePartialCoord.selectedProviderIDList() == ["claude-subscription", "codex"]
+                        && remotePartialCoord.providers.map(\\.baseProviderId) == ["claude-subscription"],
+                     "[§19.1] (b) Remote precondition: Codex-only dashboard held while Claude single-provider card published")
+        remotePartialGate?.resume(returning: StubDashboardResponse(
+            providers: [.init(summary: healthyLocalRow, ok: true)],
+            overview: emptyAppOverview
+        ))
+        _ = await remotePartialTask.value
+        precondition(remotePartialCoord.providers.map(\\.baseProviderId) == ["claude-subscription", "codex"]
+                        && remotePartialCoord.overview?.activeProviders == 2
+                        && remotePartialCoord.overview?.criticalProviders == 1
+                        && remotePartialCoord.overview?.alerts.map(\\.id) == ["claude-subscription:1:status-critical"],
+                     "[§19.1] (b) Remote partial-overlap dashboard merges Codex without dropping newly shown Claude row or alert")
+
+        // (c) Remote refresh_pending Poll 2 expands to [claude-subscription, codex] and authoritatively replaces both
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        APIService.shared.recordedURLs.removeAll()
+        let pollExpandCoord = CoordinatorUnderTest()
+        pollExpandCoord.selected = ["codex", "claude-subscription"]
+        var pollExpandCount = 0
+        APIService.shared.onDashboardRequest = {{ _ in
+            pollExpandCount += 1
+            if pollExpandCount == 1 {{
+                AppSettings.shared.hiddenSidebarSections = []
+                pollExpandCoord.replaceProviderEntries(for: "claude-subscription", with: [criticalClaudeRow])
+                return StubDashboardResponse(providers: [.init(summary: pendingCodexRow, ok: true)], overview: emptyAppOverview)
+            }}
+            return StubDashboardResponse(providers: [.init(summary: healthyLocalRow, ok: true)], overview: emptyAppOverview)
+        }}
+        _ = await pollExpandCoord.fetchDashboard()
+        precondition(APIService.shared.recordedURLs.map(\\.query) == ["ids=codex", "ids=claude-subscription,codex"]
+                        && pollExpandCoord.providers.map(\\.baseProviderId) == ["codex"]
+                        && pollExpandCoord.overview?.activeProviders == 1
+                        && pollExpandCoord.overview?.criticalProviders == 0
+                        && pollExpandCoord.overview?.alerts.isEmpty == true,
+                     "[§19.1] (c) Remote refresh_pending Poll 2 tracks expanded attempted IDs and strips unreturned covered Claude row")
+
+        // (d) Authoritative empty response for requested Codex removes old Codex card while preserving newly shown Claude (Local & Remote)
+        AppSettings.shared.backendMode = "local"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let emptyLocalCoord = CoordinatorUnderTest()
+        emptyLocalCoord.selected = ["codex", "claude-subscription"]
+        emptyLocalCoord.providers = [criticalCodexRow]
+        emptyLocalCoord.overview = emptyLocalCoord.recomputedOverview(
+            for: [criticalCodexRow], baseOverview: nil, generatedAt: "2026-11-22T05:00:00Z", language: "en"
+        )
+        var emptyLocalGate: CheckedContinuation<DashboardSnapshot, Never>?
+        emptyLocalCoord.engine.onFetchAll = {{ _ in
+            await withCheckedContinuation {{ emptyLocalGate = $0 }}
+        }}
+        let emptyLocalTask = Task {{ await emptyLocalCoord.fetchDashboard() }}
+        while emptyLocalGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = []
+        emptyLocalCoord.replaceProviderEntries(for: "claude-subscription", with: [claudeRemoteRow])
+        emptyLocalGate?.resume(returning: DashboardSnapshot(
+            generatedAt: "2026-11-22T05:01:00Z",
+            overview: UsageNormalizer.createDashboardOverview(summaries: [], generatedAt: "2026-11-22T05:01:00Z"),
+            providers: []
+        ))
+        _ = await emptyLocalTask.value
+        precondition(emptyLocalCoord.providers.map(\\.id) == ["claude-subscription:1"]
+                        && emptyLocalCoord.overview?.activeProviders == 1
+                        && emptyLocalCoord.overview?.criticalProviders == 0
+                        && emptyLocalCoord.overview?.alerts.isEmpty == true,
+                     "[§19.1] (d) Local authoritative empty Codex response removes stale Codex card while keeping newly shown Claude")
+
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let emptyRemoteCoord = CoordinatorUnderTest()
+        emptyRemoteCoord.selected = ["codex", "claude-subscription"]
+        emptyRemoteCoord.providers = [criticalCodexRow]
+        emptyRemoteCoord.overview = emptyRemoteCoord.recomputedOverview(
+            for: [criticalCodexRow], baseOverview: nil, generatedAt: "2026-11-22T05:02:00Z", language: "en"
+        )
+        var emptyRemoteGate: CheckedContinuation<StubDashboardResponse, Error>?
+        APIService.shared.onDashboardRequest = {{ _ in
+            try await withCheckedThrowingContinuation {{ emptyRemoteGate = $0 }}
+        }}
+        APIService.shared.onProviderResultsRequest = {{ _ in
+            [StubDashboardResponse.StubProviderWrapper(summary: claudeRemoteRow, ok: true)]
+        }}
+        let emptyRemoteTask = Task {{ await emptyRemoteCoord.fetchDashboard() }}
+        while emptyRemoteGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = []
+        await emptyRemoteCoord.refreshProviderNow("claude-subscription")
+        emptyRemoteGate?.resume(returning: StubDashboardResponse(providers: [], overview: emptyAppOverview))
+        _ = await emptyRemoteTask.value
+        precondition(emptyRemoteCoord.providers.map(\\.id) == ["claude-subscription:1"]
+                        && emptyRemoteCoord.overview?.activeProviders == 1
+                        && emptyRemoteCoord.overview?.criticalProviders == 0
+                        && emptyRemoteCoord.overview?.alerts.isEmpty == true,
+                     "[§19.1] (d) Remote authoritative empty Codex response removes stale Codex card while keeping newly shown Claude")
+
+        // (e) Partial-overlap newly shown Claude timeout banner is preserved when Codex-only dashboard settles
+        AppSettings.shared.backendMode = "remote"
+        AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+        let bannerPartialCoord = CoordinatorUnderTest()
+        bannerPartialCoord.selected = ["codex", "claude-subscription"]
+        var bannerPartialGate: CheckedContinuation<StubDashboardResponse, Error>?
+        APIService.shared.onDashboardRequest = {{ _ in
+            try await withCheckedThrowingContinuation {{ bannerPartialGate = $0 }}
+        }}
+        APIService.shared.onProviderResultsRequest = {{ _ in throw MockClaudeTimeoutError() }}
+        let bannerPartialTask = Task {{ await bannerPartialCoord.fetchDashboard() }}
+        while bannerPartialGate == nil {{ await Task.yield() }}
+        AppSettings.shared.hiddenSidebarSections = []
+        await bannerPartialCoord.refreshProviderNow("claude-subscription")
+        precondition(bannerPartialCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§19.1] (e) precondition sets Claude error banner while Codex dashboard in flight")
+        bannerPartialGate?.resume(returning: StubDashboardResponse(
+            providers: [.init(summary: healthyLocalRow, ok: true)],
+            overview: emptyAppOverview
+        ))
+        _ = await bannerPartialTask.value
+        precondition(bannerPartialCoord.providers.map(\\.id) == ["codex:cred:A"]
+                        && bannerPartialCoord.errorMessage == "Visible Claude refresh timed out",
+                     "[§19.1] (e) partial-overlap Codex dashboard settlement does not erase active uncovered Claude banner")
+
+        print("PASS: [§19.1] Partial-overlap dashboard merge, follow-up poll scope & uncovered banner preservation verified")
+
+        // [§21.1] A targeted Codex timeout clears only when Codex recovers, even with uncovered Claude visible.
+        for recovers in [true, false] {{
+            AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+            let coord = CoordinatorUnderTest()
+            coord.selected = ["codex", "claude-subscription"]
+            var gate: CheckedContinuation<StubDashboardResponse, Error>?
+            APIService.shared.onDashboardRequest = {{ _ in try await withCheckedThrowingContinuation {{ gate = $0 }} }}
+            let dashboardTask = Task {{ await coord.fetchDashboard() }}
+            while gate == nil {{ await Task.yield() }}
+            precondition(APIService.shared.recordedURLs.last?.query == "ids=codex")
+            AppSettings.shared.hiddenSidebarSections = []
+            APIService.shared.onProviderResultsRequest = {{ _ in [.init(summary: claudeRemoteRow, ok: true)] }}
+            await coord.refreshProviderNow("claude-subscription")
+            APIService.shared.onProviderResultsRequest = {{ _ in throw MockRemoteTimeoutError() }}
+            await coord.refreshProviderNow("codex")
+            precondition(coord.errorMessage == "Remote quota request timed out"
+                        && coord.providers.map(\\.id) == ["claude-subscription:1"])
+            var bannerDidChange = false
+            let observation = coord.objectWillChange.sink {{ bannerDidChange = true }}
+            let failedCodex = makeRemoteProvider(id: "codex:cred:A", providerId: "codex", label: "Codex", status: .error)
+            gate?.resume(returning: StubDashboardResponse(
+                providers: [.init(summary: recovers ? healthyLocalRow : failedCodex, ok: recovers)],
+                overview: emptyAppOverview
+            ))
+            let result = await dashboardTask.value
+            precondition(result.status == (recovers ? .success : .failure)
+                        && coord.providers.map(\\.id) == ["claude-subscription:1", "codex:cred:A"]
+                        && coord.errorMessage == (recovers ? nil : "Remote quota request timed out"),
+                         "[§21.1] Clear the covered Codex timeout on successful refresh only")
+            withExtendedLifetime(observation) {{
+                precondition(bannerDidChange == recovers, "[§21.1] Clearing the banner notifies SwiftUI")
+            }}
+        }}
+        print("PASS: [§21.1] Remote dashboard clears a recovered covered provider's banner and keeps it on failure")
+        // Local targeted-account errors must survive recovery of a different credential for the same provider.
+        AppSettings.shared.backendMode = "local"
+        var failedSummary = UsageNormalizer.errorSummary(provider: CodexProvider(), error: MockRemoteTimeoutError())
+        failedSummary.id = "codex:cred:A"
+        let failedAccount = ProviderResult(id: failedSummary.id, providerId: "codex", ok: false,
+                                          summary: failedSummary, error: "Codex account A timed out")
+        for (credential, removesOwner) in [("B", false), ("A", false), ("B", true)] {{
+            AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+            let coord = CoordinatorUnderTest()
+            coord.selected = ["codex", "claude-subscription"]
+            coord.providers = [makeRemoteProvider(id: "codex:cred:A", providerId: "codex", label: "Codex", status: .healthy,
+                                                 windows: claudeLocalPreservable.windows)]
+            var gate: CheckedContinuation<DashboardSnapshot, Never>?
+            coord.engine.onFetchAll = {{ _ in await withCheckedContinuation {{ gate = $0 }} }}
+            let dashboardTask = Task {{ await coord.fetchDashboard() }}
+            while gate == nil {{ await Task.yield() }}
+            if !removesOwner {{
+                AppSettings.shared.hiddenSidebarSections = []
+                coord.replaceProviderEntries(for: "claude-subscription", with: [claudeRemoteRow])
+            }}
+            coord.engine.onFetchForCredential = {{ _, _ in failedAccount }}
+            await coord.refreshAccountNow(credentialId: "a", providerId: "codex")
+            precondition(coord.errorMessage == "Codex account A timed out")
+            if removesOwner {{
+                coord.hiddenAccounts.insert("codex:cred:A")
+                coord.accountStore.excludedCredentials.insert("a")
+                coord.reapplyVisibleSortedProviders()
+                precondition(coord.errorMessage == nil && coord.providers.isEmpty,
+                             "[AGY #1A] Hiding the owning credential clears its banner immediately")
+            }}
+            let healthy = makeBackendCodexResult(id: "codex:cred:\\(credential)", status: "healthy")
+            gate?.resume(returning: DashboardSnapshot(
+                generatedAt: "2026-11-22T05:03:00Z", overview: healthyCodexOverview, providers: [healthy]
+            ))
+            let result = await dashboardTask.value
+            let expectedIds = (removesOwner ? [] : ["claude-subscription:1"]) + ["codex:cred:\\(credential)"]
+            precondition(result.status == .success
+                        && coord.providers.map(\\.id) == expectedIds
+                        && coord.errorMessage == (credential == "A" || removesOwner ? nil : "Codex account A timed out"),
+                         "[§21.1] Clear a targeted account's banner only on that credential's successful refresh")
+        }}
+        print("PASS: [§21.1] Local dashboard preserves a sibling credential's banner")
+        print("PASS: [AGY #1A] Owner hide clears immediately and full-scope sibling refresh stays clear")
+
+        // A provider can own a timeout before any card exists. Handle all visibility boundaries without waiting for a card.
+        for action in ["sidebar", "unselect", "settlement"] {{
+            AppSettings.shared.backendMode = "remote"
+            AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+            let coord = CoordinatorUnderTest()
+            coord.selected = ["codex", "claude-subscription"]
+            var gate: CheckedContinuation<StubDashboardResponse, Error>?
+            APIService.shared.onDashboardRequest = {{ _ in try await withCheckedThrowingContinuation {{ gate = $0 }} }}
+            let task = Task {{ await coord.fetchDashboard() }}
+            while gate == nil {{ await Task.yield() }}
+            precondition(APIService.shared.recordedURLs.last?.query == "ids=codex")
+            AppSettings.shared.hiddenSidebarSections = []
+            APIService.shared.onProviderResultsRequest = {{ _ in throw MockClaudeTimeoutError() }}
+            await coord.refreshProviderNow("claude-subscription")
+            precondition(coord.errorMessage == "Visible Claude refresh timed out" && coord.providers.isEmpty)
+            coord.selected.insert("antigravity")
+            if action == "unselect" {{
+                coord.selected.remove("claude-subscription")
+                coord.removeProviders(matchingBaseProviderId: "claude-subscription")
+            }} else {{
+                AppSettings.shared.hiddenSidebarSections = [AppSection.proxyManagement.rawValue]
+                if action == "sidebar" {{ coord.clearStaleOwnedRefreshErrorIfNeeded() }}
+            }}
+            if action != "settlement" {{
+                precondition(coord.errorMessage == nil,
+                             "[AGY #1B] Sidebar hide or unselect removes its banner even with zero rows")
+            }}
+            gate?.resume(returning: StubDashboardResponse(
+                providers: [.init(summary: healthyLocalRow, ok: true)], overview: emptyAppOverview
+            ))
+            let result = await task.value
+            precondition(!result.shouldUpdateErrorBanner && coord.errorMessage == nil,
+                         "[AGY #1B] Partial settlement cannot keep a banner owned by a hidden provider")
+        }}
+        print("PASS: [AGY #1B] Sidebar hide, unselect and partial settlement clear an unavailable owner")
+
+        // A protected card and the rejected pre-reset payload may use the exact same row ID.
+        for remote in [false, true] {{
+            AppSettings.shared.backendMode = remote ? "remote" : "local"
+            AppSettings.shared.hiddenSidebarSections = []
+            let coord = CoordinatorUnderTest()
+            coord.selected = ["codex"]
+            var localGate: CheckedContinuation<DashboardSnapshot, Never>?
+            var remoteGate: CheckedContinuation<StubDashboardResponse, Error>?
+            coord.engine.onFetchAll = {{ _ in await withCheckedContinuation {{ localGate = $0 }} }}
+            APIService.shared.onDashboardRequest = {{ _ in try await withCheckedThrowingContinuation {{ remoteGate = $0 }} }}
+            let task = Task {{ await coord.fetchDashboard() }}
+            while localGate == nil && remoteGate == nil {{ await Task.yield() }}
+            let oldToken = coord.codexResetRefreshFence.token
+            let postResetRow = makeHealthyCodexRow(windows: claudeLocalPreservable.windows)
+            let key = coord.codexResetIdentity(postResetRow)!
+            coord.codexResetRefreshFence.invalidate(key)
+            coord.providers = [postResetRow]
+            coord.engine.onFetchForCredential = {{ _, _ in failedAccount }}
+            // Account refresh is local; a remote Dashboard request already in flight can still settle.
+            AppSettings.shared.backendMode = "local"
+            await coord.refreshAccountNow(credentialId: "A", providerId: "codex")
+            precondition(!coord.codexResetRefreshFence.accepts(oldToken, identity: key)
+                        && coord.errorMessage == "Codex account A timed out")
+            localGate?.resume(returning: healthyCodexSnapshot)
+            remoteGate?.resume(returning: StubDashboardResponse(
+                providers: [.init(summary: healthyLocalRow, ok: true)], overview: emptyAppOverview
+            ))
+            let result = await task.value
+            precondition(result.refreshedProviders.isEmpty
+                        && coord.markedRefreshed.isEmpty
+                        && coord.providers.map(\\.id) == ["codex:cred:A"]
+                        && coord.providers.first?.windows.count == postResetRow.windows.count
+                        && coord.errorMessage == "Codex account A timed out",
+                         "[AGY #2] Rejected same-ID pre-reset payload cannot update timestamps or clear the banner")
+        }}
+        print("PASS: [AGY #2] Local and Remote same-ID fence rejection protects card, timestamps and banner")
+
+        APIService.shared.onProviderResultsRequest = nil
+        AppSettings.shared.hiddenSidebarSections = []
+    }}
+}}
+"""
+(temp / 'LeanCutAndAntibanP1P2Regression.swift').write_text(harness)
+PY
+
+swiftc -parse-as-library -swift-version 5 \
+  -I "$BIN/Modules" \
+  -Xlinker -filelist -Xlinker "$REGRESSION_DIR/objects.txt" \
+  -lsqlite3 \
+  "$ROOT/AIUsage/Models/ProviderModels.swift" \
+  "$ROOT/AIUsage/ViewModels/ProviderRefreshResult.swift" \
+  "$ROOT/AIUsage/ViewModels/CodexResetRefreshFence.swift" \
+  "$REGRESSION_DIR/LeanCutAndAntibanP1P2Regression.swift" \
+  -o "$REGRESSION_DIR/lean-cut-p1-p2"
+"$REGRESSION_DIR/lean-cut-p1-p2"
+
+if [[ "${AIUSAGE_ONLY_LEAN_CUT_3B:-0}" != "1" ]]; then
 # 4. [§8.5 + §8.6 + §10.4 + §12.4 + §28] Partial delete snapshot scoping, live TLS QuotaShareServer handshake & macOS 14 gating
 python3 - "$ROOT" "$REGRESSION_DIR" <<'PY'
 from pathlib import Path
@@ -2372,3 +4473,4 @@ while IFS= read -r line; do
 done < <(find "$ROOT/AIUsage" -name '*.swift' | sort)
 swiftc -parse "${AIUSAGE_SWIFT_FILES[@]}"
 echo "PASS: swiftc -parse clean on all ${#AIUSAGE_SWIFT_FILES[@]} AIUsage Swift files"
+fi

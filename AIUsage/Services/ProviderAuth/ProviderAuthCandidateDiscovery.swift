@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import QuotaBackend
 import SQLite3
@@ -64,6 +65,15 @@ extension ProviderAuthManager {
         return deduplicated(candidates)
     }
 
+    static func normalizedAntigravityWorkspaceId(_ raw: String?) -> String? {
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !trimmed.isEmpty else {
+            return nil
+        }
+        let lower = trimmed.lowercased()
+        return lower == "unknown" ? nil : lower
+    }
+
     internal static func antigravityCandidates(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) -> [ProviderAuthCandidate] {
@@ -74,57 +84,141 @@ extension ProviderAuthManager {
         let email = payload.email
         let name = payload.name
         let title = email ?? name ?? "Antigravity IDE session"
-        let sourceId = "antigravity-ide:\(email?.lowercased() ?? "default")"
-
-        let fileManager = FileManager.default
-        let sessionDir = fileManager.temporaryDirectory
-            .appendingPathComponent("aiusage-antigravity-import-\(sourceId.hashValue)", isDirectory: true)
-        try? fileManager.createDirectory(at: sessionDir, withIntermediateDirectories: true)
-
-        let authFileURL = sessionDir.appendingPathComponent("antigravity_ide_creds.json")
-
-        let expiredISO = payload.expiryDate.map { ISO8601DateFormatter().string(from: $0) } ?? "2000-01-01T00:00:00Z"
-        var authJSON: [String: Any] = [
-            "access_token": payload.accessToken,
-            "token_type": "Bearer",
-            "expired": expiredISO
-        ]
-        if let email { authJSON["email"] = email }
-        if let refreshToken = payload.refreshToken, !refreshToken.isEmpty {
-            authJSON["refresh_token"] = refreshToken
-        }
-        if let idToken = payload.idToken, !idToken.isEmpty {
-            authJSON["id_token"] = idToken
-        }
-        if let projectId = payload.projectId, !projectId.isEmpty {
-            authJSON["project_id"] = projectId
-        }
-
-        guard let data = try? JSONSerialization.data(withJSONObject: authJSON, options: [.prettyPrinted, .sortedKeys]),
-              let _ = try? data.write(to: authFileURL, options: .atomic) else {
-            return []
-        }
-
+        let sourceId = "antigravity-ide:\(normalizedHandle(email) ?? "default")"
+        let rawProject = payload.projectId?.trimmingCharacters(in: .whitespacesAndNewlines).nilIfBlank
+        let workspaceId = normalizedAntigravityWorkspaceId(rawProject)
+        let candidateId = workspaceId.map { "antigravity:\(sourceId)#\($0)" } ?? "antigravity:\(sourceId)"
         let dbURL = URL(fileURLWithPath: payload.databasePath)
         let modifiedAt = modificationDate(for: dbURL)
 
         return [
             ProviderAuthCandidate(
-                id: "antigravity:\(sourceId)",
+                id: candidateId,
                 providerId: "antigravity",
                 sourceIdentifier: sourceId,
                 sessionFingerprint: normalizedHandle(email),
                 title: title,
                 subtitle: L("Signed in to the Antigravity app", "Antigravity 应用当前登录的账号"),
-                detail: compactDetail(parts: [email, formattedDate(modifiedAt)].compactMap { $0 }),
+                detail: compactDetail(parts: [email, rawProject, formattedDate(modifiedAt)].compactMap { $0 }),
                 modifiedAt: modifiedAt,
                 authMethod: .authFile,
-                credentialValue: authFileURL.path,
-                sourcePath: authFileURL.path,
+                credentialValue: "",
+                sourcePath: nil,
                 shouldCopyFile: true,
-                identityScope: .sharedSource
+                identityScope: .sharedSource,
+                workspaceId: workspaceId,
+                capturesWorkspaceIdentity: true
             )
         ]
+    }
+
+    static func stageAntigravityIDECandidate(
+        expectedSourceIdentifier: String,
+        expectedWorkspaceId: String? = nil,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        stagingRootOverride: URL? = nil,
+        permissionSetter: ((String, Int) throws -> Void)? = nil
+    ) throws -> (directoryURL: URL, fileURL: URL) {
+        guard let payload = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: homeDirectory) else {
+            throw ProviderError("local_only_unavailable", "Antigravity IDE session is not signed in.")
+        }
+        guard let activeEmail = normalizedHandle(payload.email) else {
+            throw ProviderError("candidate_changed", "The active Antigravity IDE session could not verify account identity. Refresh and select the session again.")
+        }
+        let activeSourceId = "antigravity-ide:\(activeEmail)"
+        guard activeSourceId == expectedSourceIdentifier else {
+            throw ProviderError("candidate_changed", "The active Antigravity IDE session changed before import.")
+        }
+        guard let expectedWorkspace = normalizedAntigravityWorkspaceId(expectedWorkspaceId),
+              let activeWorkspace = normalizedAntigravityWorkspaceId(payload.projectId),
+              activeWorkspace == expectedWorkspace else {
+            throw ProviderError(
+                "candidate_changed",
+                "The active Antigravity workspace changed or could not be verified before import. Refresh and select the workspace again."
+            )
+        }
+
+        let fileManager = FileManager.default
+        let stagingRoot = try stagingRootOverride ?? ProviderManagedImportStore.stagingRootDirectory()
+
+        func applyMode(_ path: String, _ mode: Int) throws {
+            if let permissionSetter {
+                try permissionSetter(path, mode)
+                return
+            }
+            try fileManager.setAttributes([.posixPermissions: mode], ofItemAtPath: path)
+            let actual = ((try fileManager.attributesOfItem(atPath: path)[.posixPermissions] as? NSNumber)?.intValue ?? 0) & 0o777
+            guard actual == mode else {
+                throw CocoaError(.fileWriteNoPermission)
+            }
+        }
+
+        try TokenSaverSettingsStore.rejectSymlinks(stagingRoot)
+        try fileManager.createDirectory(
+            at: stagingRoot,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try applyMode(stagingRoot.path, 0o700)
+
+        let stageDir = stagingRoot.appendingPathComponent("antigravity-\(UUID().uuidString)", isDirectory: true)
+        let stageFileURL = stageDir.appendingPathComponent("antigravity_ide_creds.json")
+        try TokenSaverSettingsStore.rejectSymlinks(stageFileURL)
+        try fileManager.createDirectory(
+            at: stageDir,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+
+        do {
+            try applyMode(stageDir.path, 0o700)
+
+            let expiredISO = payload.expiryDate.map { ISO8601DateFormatter().string(from: $0) } ?? "2000-01-01T00:00:00Z"
+            var authJSON: [String: Any] = [
+                "access_token": payload.accessToken,
+                "token_type": "Bearer",
+                "expired": expiredISO
+            ]
+            if let email = payload.email { authJSON["email"] = email }
+            if let refreshToken = payload.refreshToken, !refreshToken.isEmpty {
+                authJSON["refresh_token"] = refreshToken
+            }
+            if let idToken = payload.idToken, !idToken.isEmpty {
+                authJSON["id_token"] = idToken
+            }
+            if let projectId = payload.projectId, !projectId.isEmpty {
+                authJSON["project_id"] = projectId
+            }
+
+            let data = try JSONSerialization.data(withJSONObject: authJSON, options: [.prettyPrinted, .sortedKeys])
+            let fd = Darwin.open(stageFileURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW, 0o600)
+            guard fd >= 0 else {
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            defer { _ = Darwin.close(fd) }
+            try data.withUnsafeBytes { rawBuffer in
+                guard let base = rawBuffer.baseAddress else { return }
+                var remaining = rawBuffer.count
+                var offset = 0
+                while remaining > 0 {
+                    let written = Darwin.write(fd, base.advanced(by: offset), remaining)
+                    if written < 0 {
+                        if errno == EINTR { continue }
+                        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                    }
+                    if written == 0 {
+                        throw CocoaError(.fileWriteUnknown)
+                    }
+                    remaining -= written
+                    offset += written
+                }
+            }
+            try applyMode(stageFileURL.path, 0o600)
+            return (stageDir, stageFileURL)
+        } catch {
+            try? fileManager.removeItem(at: stageDir)
+            throw error
+        }
     }
 
     private static let kiroFingerprintKeys = ["email", "userId", "accountEmail", "profile_arn", "profileArn"]
@@ -337,48 +431,27 @@ extension ProviderAuthManager {
     }
 
     internal static func cursorCandidates() -> [ProviderAuthCandidate] {
-        // Cursor 应用的登录可直接使用，也不会像读取浏览器 Cookie 那样弹出钥匙串授权；
-        // 只有应用未登录时才回退扫描浏览器。
-        if let session = CursorProvider.discoverDesktopAppSession() {
-            return [
-                ProviderAuthCandidate(
-                    id: "cursor:desktop-app",
-                    providerId: "cursor",
-                    sourceIdentifier: "cursor-desktop-app",
-                    sessionFingerprint: tokenFingerprint(session.cookieHeader),
-                    title: session.email ?? "Cursor account",
-                    subtitle: L("Signed in to the Cursor app", "Cursor 应用当前登录的账号"),
-                    detail: "cursor.com",
-                    modifiedAt: nil,
-                    authMethod: .webSession,
-                    credentialValue: session.cookieHeader,
-                    sourcePath: nil,
-                    shouldCopyFile: false,
-                    identityScope: .sharedSource,
-                    plan: session.plan
-                )
-            ]
+        // Policy/privacy: only inspect the Cursor desktop app's own session; never scrape Chrome/Edge/Brave Safe Storage in background discovery.
+        guard let session = CursorProvider.discoverDesktopAppSession() else {
+            return []
         }
-        return deduplicated(
-            CursorProvider.discoverBrowserSessions().map { session in
-                let profileLabel = "\(session.browserName) \(session.profileName)"
-                let sourceIdentifier = "browser-profile:cursor:\(session.browserName.lowercased()):\(session.profileName.lowercased())"
-                return ProviderAuthCandidate(
-                    id: "cursor:\(sourceIdentifier)",
-                    providerId: "cursor",
-                    sourceIdentifier: sourceIdentifier,
-                    sessionFingerprint: tokenFingerprint(session.cookieHeader),
-                    title: session.accountHint ?? "Cursor account",
-                    subtitle: L("Signed in to cursor.com in \(session.browserName)", "\(session.browserName) 中登录的 cursor.com"),
-                    detail: compactDetail(parts: [profileLabel, "cursor.com"]),
-                    modifiedAt: nil,
-                    authMethod: .cookie,
-                    credentialValue: session.cookieHeader,
-                    sourcePath: nil,
-                    shouldCopyFile: false,
-                    identityScope: .sharedSource
-                )
-            }
-        )
+        return [
+            ProviderAuthCandidate(
+                id: "cursor:desktop-app",
+                providerId: "cursor",
+                sourceIdentifier: "cursor-desktop-app",
+                sessionFingerprint: tokenFingerprint(session.cookieHeader),
+                title: session.email ?? "Cursor account",
+                subtitle: L("Signed in to the Cursor app", "Cursor 应用当前登录的账号"),
+                detail: "cursor.com",
+                modifiedAt: nil,
+                authMethod: .webSession,
+                credentialValue: session.cookieHeader,
+                sourcePath: nil,
+                shouldCopyFile: false,
+                identityScope: .sharedSource,
+                plan: session.plan
+            )
+        ]
     }
 }

@@ -1,4 +1,5 @@
 import SwiftUI
+import AppKit
 import QuotaBackend
 
 // MARK: - Account Row (with multi-window quota bars)
@@ -306,19 +307,97 @@ struct MenuBarAccountRow: View {
     }
 
     private func performActivation() {
+        let originToken = MenuBarActivationFeedback.currentToken
         Task { @MainActor in
             do {
                 guard try await activationManager.activateAccount(entry: entry) else { return }
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    activationSuccess = true
-                    activationMessage = L("Switched to ", "已切换至 ") + primaryLabel
-                }
+                MenuBarActivationFeedback.present(
+                    message: L("Switched to ", "已切换至 ") + primaryLabel,
+                    success: true,
+                    originToken: originToken,
+                    fallbackLocalDeliver: { message, ok in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            activationSuccess = ok
+                            activationMessage = message
+                        }
+                    }
+                )
             } catch {
-                withAnimation(.easeInOut(duration: 0.3)) {
-                    activationSuccess = false
-                    activationMessage = SensitiveDataRedactor.redactedMessage(for: error)
-                }
+                let message = SensitiveDataRedactor.redactedMessage(for: error)
+                MenuBarActivationFeedback.present(
+                    message: message,
+                    success: false,
+                    originToken: originToken,
+                    fallbackLocalDeliver: { text, ok in
+                        withAnimation(.easeInOut(duration: 0.3)) {
+                            activationSuccess = ok
+                            activationMessage = text
+                        }
+                    }
+                )
             }
+        }
+    }
+}
+
+@MainActor
+enum MenuBarActivationFeedback {
+    private(set) static var currentToken: UUID?
+    private static var activeDeliver: ((String, Bool) -> Void)?
+
+    static var popoverVisibilityProvider: () -> Bool = {
+        NSApp?.windows.contains(where: { $0.className.contains("Popover") && $0.isVisible }) ?? false
+    }
+
+    static var modalWarningPresenter: (String) -> Void = { message in
+        guard let app = NSApp else { return }
+        app.activate(ignoringOtherApps: true)
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L("Switch Failed", "切换失败", "Chuyển tài khoản thất bại")
+        alert.informativeText = message
+        alert.addButton(withTitle: L("OK", "确定", "OK"))
+        alert.runModal()
+    }
+
+    @discardableResult
+    static func bindPresenter(_ deliver: @escaping (String, Bool) -> Void) -> UUID {
+        let token = UUID()
+        currentToken = token
+        activeDeliver = deliver
+        return token
+    }
+
+    static func unbindPresenter(_ token: UUID) {
+        guard currentToken == token else { return }
+        currentToken = nil
+        activeDeliver = nil
+    }
+
+    static func unbindAll() {
+        currentToken = nil
+        activeDeliver = nil
+    }
+
+    static func present(
+        message: String,
+        success: Bool,
+        originToken: UUID?,
+        isPopoverWindowVisible: Bool? = nil,
+        fallbackLocalDeliver: ((String, Bool) -> Void)? = nil
+    ) {
+        let popoverVisible = isPopoverWindowVisible ?? popoverVisibilityProvider()
+        if popoverVisible, let activeDeliver {
+            activeDeliver(message, success)
+            return
+        }
+        // Only write back to local @Binding when mounted standalone without MenuBarView presenter binding.
+        if popoverVisible, originToken == nil, let fallbackLocalDeliver {
+            fallbackLocalDeliver(message, success)
+            return
+        }
+        if !success {
+            modalWarningPresenter(message)
         }
     }
 }

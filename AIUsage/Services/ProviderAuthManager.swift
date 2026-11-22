@@ -189,6 +189,9 @@ enum ProviderAuthManager {
     }
 
     static func unmanagedCandidates(for providerId: String) -> [ProviderAuthCandidate] {
+        if AgentVisibility.isLocalCostCatalogId(providerId) {
+            return []
+        }
         let monitored = monitoredSessions(for: providerId)
         return discoverCandidates(for: providerId).filter { !isCandidateManaged($0, monitored: monitored) }
     }
@@ -199,33 +202,59 @@ enum ProviderAuthManager {
         allowLocalMetadataFallback: Bool = false
     ) async throws -> (AccountCredential, ProviderUsage) {
         var copiedPath: String?
+        var temporaryStageDir: URL?
+        defer {
+            if let dir = temporaryStageDir {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
         do {
             let credentialValue: String
-            if candidate.authMethod == .authFile, candidate.shouldCopyFile, let sourcePath = candidate.sourcePath {
+            if candidate.authMethod == .authFile, candidate.shouldCopyFile {
+                let effectiveSourcePath: String
+                if let explicitSourcePath = candidate.sourcePath?.nilIfBlank {
+                    effectiveSourcePath = explicitSourcePath
+                } else if let staged = try stageDeferredAuthFileIfNeeded(for: candidate) {
+                    temporaryStageDir = staged.directoryURL
+                    effectiveSourcePath = staged.fileURL.path
+                } else {
+                    effectiveSourcePath = candidate.credentialValue
+                }
                 copiedPath = try copyImportedAuthFile(
                     providerId: candidate.providerId,
-                    sourcePath: sourcePath,
+                    sourcePath: effectiveSourcePath,
                     suggestedName: candidate.title
                 )
-                credentialValue = copiedPath ?? sourcePath
+                if let dir = temporaryStageDir {
+                    try? FileManager.default.removeItem(at: dir)
+                    temporaryStageDir = nil
+                }
+                credentialValue = copiedPath ?? effectiveSourcePath
             } else {
                 credentialValue = candidate.credentialValue
             }
 
             let storedSourcePath = AccountCredentialStore.persistentSourcePath(from: candidate.sourcePath) ?? ""
 
+            var metadata: [String: String] = [
+                "sourceIdentifier": candidate.sourceIdentifier,
+                "sourcePath": storedSourcePath,
+                "importedAt": SharedFormatters.iso8601String(from: Date()),
+                "sessionFingerprint": candidate.sessionFingerprint ?? "",
+                "identityScope": candidate.identityScope.rawValue
+            ]
+            if candidate.providerId == "antigravity",
+               let workspaceId = normalizedAntigravityWorkspaceId(candidate.workspaceId) {
+                metadata["projectId"] = workspaceId
+                metadata["project_id"] = workspaceId
+            }
+
             let credential = AccountCredential(
                 providerId: candidate.providerId,
                 accountLabel: candidate.title.nilIfBlank,
                 authMethod: candidate.authMethod,
                 credential: credentialValue,
-                metadata: [
-                    "sourceIdentifier": candidate.sourceIdentifier,
-                    "sourcePath": storedSourcePath,
-                    "importedAt": SharedFormatters.iso8601String(from: Date()),
-                    "sessionFingerprint": candidate.sessionFingerprint ?? "",
-                    "identityScope": candidate.identityScope.rawValue
-                ]
+                metadata: metadata
             )
 
             let usage = try await validate(
@@ -233,6 +262,16 @@ enum ProviderAuthManager {
                 localOnly: localOnly,
                 allowLocalMetadataFallback: allowLocalMetadataFallback
             )
+            if candidate.providerId == "antigravity", candidate.capturesWorkspaceIdentity {
+                let expectedWorkspace = normalizedAntigravityWorkspaceId(candidate.workspaceId)
+                let usageWorkspace = normalizedAntigravityWorkspaceId(usage.extra["projectId"]?.value as? String)
+                guard let expectedWorkspace, usageWorkspace == expectedWorkspace else {
+                    throw ProviderError(
+                        "candidate_changed",
+                        "The active Antigravity workspace changed or could not be verified during import. Refresh and select the workspace again."
+                    )
+                }
+            }
             return (credential, usage)
         } catch {
             if let copiedPath {
@@ -314,8 +353,15 @@ enum ProviderAuthManager {
             throw ProviderError("unsupported_provider", "\(credential.providerId) does not accept imported credentials.")
         }
         if localOnly, let antigravity = provider as? AntigravityProvider {
+            let requiresConcreteProject = AntigravityProvider.normalizedProjectId(
+                credential.metadata["projectId"] ?? credential.metadata["project_id"]
+            ) != nil
             do {
-                return try await antigravity.fetchUsage(with: credential, localOnly: true)
+                return try await antigravity.fetchUsage(
+                    with: credential,
+                    localOnly: true,
+                    requireProjectMatch: requiresConcreteProject
+                )
             } catch let error as ProviderError where allowLocalMetadataFallback && error.code == "local_only_unavailable" {
                 return try validateLocalAuthFileMetadata(credential: credential)
             }
@@ -424,6 +470,27 @@ enum ProviderAuthManager {
 
     // MARK: - Import Persistence
 
+    private static func stageDeferredAuthFileIfNeeded(
+        for candidate: ProviderAuthCandidate
+    ) throws -> (directoryURL: URL, fileURL: URL)? {
+        guard candidate.providerId == "antigravity",
+              candidate.sourceIdentifier.hasPrefix("antigravity-ide:"),
+              candidate.sourcePath?.nilIfBlank == nil else {
+            return nil
+        }
+        guard candidate.capturesWorkspaceIdentity,
+              let expectedWorkspace = normalizedAntigravityWorkspaceId(candidate.workspaceId) else {
+            throw ProviderError(
+                "candidate_changed",
+                "The active Antigravity workspace could not be verified before import. Refresh and select the workspace again."
+            )
+        }
+        return try stageAntigravityIDECandidate(
+            expectedSourceIdentifier: candidate.sourceIdentifier,
+            expectedWorkspaceId: expectedWorkspace
+        )
+    }
+
     private static func copyImportedAuthFile(
         providerId: String,
         sourcePath: String,
@@ -448,6 +515,7 @@ enum ProviderAuthManager {
             data = try Data(contentsOf: sourceURL)
         }
         try data.write(to: destinationURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destinationURL.path)
         return destinationURL.path
     }
 

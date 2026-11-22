@@ -316,15 +316,33 @@ final class AppSettings: ObservableObject {
 
     @Published var proxyAutoRestoreOnLaunch: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.proxyAutoRestoreOnLaunch)
 
+    static let personalLeanDefaultHiddenSections: Set<String> = [
+        AppSection.sessions.rawValue,
+        AppSection.callAnalytics.rawValue,
+        AppSection.proxyManagement.rawValue,
+        AppSection.opencodeManagement.rawValue,
+    ]
+    private static let personalLeanSidebarMigrationKey = "hiddenSidebarSectionsMigration.personalLean.v1"
+
     /// 侧边栏中被用户隐藏的导航分区（存 `AppSection.rawValue`）。常驻分区即使被写入也不会真正隐藏。
     @Published var hiddenSidebarSections: Set<String> = {
         let defaults = UserDefaults.standard
         var stored = Set(defaults.stringArray(forKey: DefaultsKey.hiddenSidebarSections) ?? [])
+        var changed = false
         // 迁移：旧版「服务商」(providers) 已拆成「订阅账号」+「API 提供商」两个入口。
         // 曾隐藏旧入口的用户，两个新入口都继承隐藏；同时清除不再有效的孤儿键并落盘。
         if stored.remove(AppSection.legacyProvidersRawValue) != nil {
             stored.insert(AppSection.providerAccounts.rawValue)
             stored.insert(AppSection.apiProviders.rawValue)
+            changed = true
+        }
+        // One-shot migration for personal lean mode: hide Sessions, Call Analytics, Claude, and OpenCode once.
+        if !defaults.bool(forKey: AppSettings.personalLeanSidebarMigrationKey) {
+            stored.formUnion(AppSettings.personalLeanDefaultHiddenSections)
+            defaults.set(true, forKey: AppSettings.personalLeanSidebarMigrationKey)
+            changed = true
+        }
+        if changed {
             defaults.set(Array(stored), forKey: DefaultsKey.hiddenSidebarSections)
         }
         return stored

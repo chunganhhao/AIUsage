@@ -1,4 +1,5 @@
 import AppKit
+import Darwin
 import Foundation
 import Combine
 import QuotaBackend
@@ -202,8 +203,9 @@ final class ProviderActivationManager: ObservableObject {
                 "Codex đang dùng lưu trữ Keychain hoặc auto. Đặt cli_auth_credentials_store = \"file\" rồi đăng nhập lại trước khi chuyển bằng tệp."
             ))
         }
+        let verifiedBundles: Set<String> = entry.providerId == "codex" ? Self.verifiedCodexAppBundlePaths() : []
         let externalCLI = entry.providerId == "codex" ? await Task.detached {
-            Self.hasExternalCodexProcess()
+            Self.hasExternalCodexProcess(verifiedBundlePaths: verifiedBundles)
         }.value : false
         if isRunning || externalCLI {
             let alert = NSAlert()
@@ -223,7 +225,14 @@ final class ProviderActivationManager: ObservableObject {
         switch entry.providerId {
         case "codex":
             if isRunning {
-                try await restartCodexApp(switchingTo: entry)
+                do {
+                    try await restartCodexApp(switchingTo: entry)
+                } catch {
+                    let msg = SensitiveDataRedactor.redactedMessage(for: error)
+                    activationResult = .failure(msg)
+                    codexActivationResult = .failure(msg)
+                    throw error
+                }
             } else {
                 try activateCodexAccount(entry: entry)
             }
@@ -258,22 +267,179 @@ final class ProviderActivationManager: ObservableObject {
         ) != nil
     }
 
-    private nonisolated static func hasExternalCodexProcess() -> Bool {
+    nonisolated static func readBundleIdentifier(at bundleURL: URL) -> String? {
+        let infoPlistURL = bundleURL
+            .appendingPathComponent("Contents", isDirectory: true)
+            .appendingPathComponent("Info.plist", isDirectory: false)
+        guard let data = try? Data(contentsOf: infoPlistURL),
+              let plist = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil) as? [String: Any],
+              let bundleID = (plist["CFBundleIdentifier"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !bundleID.isEmpty else {
+            return nil
+        }
+        return bundleID
+    }
+
+    nonisolated static func isVerifiedCodexBundleURL(_ bundleURL: URL) -> Bool {
+        readBundleIdentifier(at: bundleURL) == codexBundleIdentifier
+    }
+
+    static func verifiedCodexAppBundlePaths(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        systemApplicationsDirectory: String = "/Applications",
+        runningBundleURLs: [URL]? = nil,
+        workspaceBundleURL: (() -> URL?)? = nil
+    ) -> Set<String> {
+        var paths = Set<String>()
+        func insertVerified(_ url: URL?) {
+            guard let url else { return }
+            let standardized = url.standardizedFileURL
+            let resolved = url.resolvingSymlinksInPath()
+            guard isVerifiedCodexBundleURL(resolved) || isVerifiedCodexBundleURL(standardized) else {
+                return
+            }
+            paths.insert(standardized.path)
+            paths.insert(resolved.path)
+        }
+        let activeRunningURLs = runningBundleURLs ?? NSRunningApplication
+            .runningApplications(withBundleIdentifier: codexBundleIdentifier)
+            .filter { !$0.isTerminated }
+            .compactMap(\.bundleURL)
+        for url in activeRunningURLs {
+            insertVerified(url)
+        }
+        insertVerified(resolveInstalledCodexAppURL(
+            homeDirectory: homeDirectory,
+            systemApplicationsDirectory: systemApplicationsDirectory,
+            runningBundleURLs: activeRunningURLs,
+            workspaceBundleURL: workspaceBundleURL
+        ))
+        return paths
+    }
+
+    nonisolated static func extractCodexPIDs(fromPsCommOutput output: String) -> [String] {
+        output.split(separator: "\n").compactMap { rawLine in
+            let parts = rawLine.split(whereSeparator: \.isWhitespace)
+            guard parts.count == 2, parts[1] == "codex", Int(parts[0]) != nil else { return nil }
+            return String(parts[0])
+        }
+    }
+
+    nonisolated static func isBundledCodexExecutablePath(
+        _ rawPath: String,
+        verifiedBundlePaths: Set<String> = []
+    ) -> Bool {
+        // shortcut: requires verified local com.openai.codex bundle provenance; treat unknown/relocated unverified bundles as external CLI
+        guard !verifiedBundlePaths.isEmpty else { return false }
+        let trimmed = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/") else { return false }
+        let standardized = URL(fileURLWithPath: trimmed).standardizedFileURL.path
+        guard (standardized as NSString).lastPathComponent == "codex" else { return false }
+
+        return verifiedBundlePaths.contains { rawBundle in
+            let trimmedBundle = rawBundle.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmedBundle.hasPrefix("/") else { return false }
+            let bundle = URL(fileURLWithPath: trimmedBundle).standardizedFileURL.path
+            guard bundle.hasSuffix(".app") else { return false }
+            return standardized.hasPrefix(bundle + "/Contents/Resources/codex-cli/")
+                || standardized == bundle + "/Contents/MacOS/codex"
+                || standardized.hasPrefix(bundle + "/Contents/Helpers/")
+        }
+    }
+
+    nonisolated static func isBundledCodexAppCommandLine(
+        _ rawLine: Substring,
+        verifiedBundlePaths: Set<String> = []
+    ) -> Bool {
+        guard !verifiedBundlePaths.isEmpty else { return false }
+        let trimmed = rawLine.drop(while: \.isWhitespace)
+        guard let execRange = trimmed.range(
+            of: #"^(/[^\r\n]+?\.app/Contents/(?:Resources/codex-cli/(?:CodexCLI\.app/Contents/MacOS/)?codex|Helpers/[^\r\n]+?/codex|MacOS/codex))(?=\s|$)"#,
+            options: .regularExpression
+        ) else {
+            return false
+        }
+        let candidateExec = String(trimmed[execRange])
+        let firstToken = String(trimmed.prefix(while: { !$0.isWhitespace }))
+        if firstToken != candidateExec {
+            if firstToken == "codex"
+                || firstToken.hasSuffix("/codex")
+                || candidateExec.contains("/codex ")
+                || candidateExec.contains(" /")
+                || candidateExec.contains(" -")
+                || candidateExec.contains(" ~") {
+                return false
+            }
+        }
+        return isBundledCodexExecutablePath(candidateExec, verifiedBundlePaths: verifiedBundlePaths)
+    }
+
+    nonisolated static func hasExternalCodexCommandLines(
+        _ output: String,
+        expectedCount: Int? = nil,
+        verifiedBundlePaths: Set<String> = []
+    ) -> Bool {
+        let lines = output.split(separator: "\n").compactMap { rawLine -> Substring? in
+            let trimmed = rawLine.drop(while: \.isWhitespace)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+        if let expectedCount, expectedCount > 0, lines.count < expectedCount {
+            return true
+        }
+        return lines.contains { !isBundledCodexAppCommandLine($0, verifiedBundlePaths: verifiedBundlePaths) }
+    }
+
+    private nonisolated static func resolveProcessExecutablePath(pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4 * 1024)
+        let length = Darwin.proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(cString: buffer)
+    }
+
+    private nonisolated static func runPsOutput(_ arguments: [String]) -> String? {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/bin/ps")
-        process.arguments = ["-axo", "comm=,args="]
+        process.arguments = arguments
         process.terminationHandler = { _ in }
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = FileHandle.nullDevice
-        guard (try? process.run()) != nil else { return false }
+        guard (try? process.run()) != nil else { return nil }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        return String(decoding: data, as: UTF8.self).split(separator: "\n").contains { line in
-            guard let executable = line.split(whereSeparator: \.isWhitespace).first else { return false }
-            return URL(fileURLWithPath: String(executable)).lastPathComponent == "codex"
-                && !line.contains("Codex.app/Contents/")
+        guard process.terminationStatus == 0 else { return nil }
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    private nonisolated static func hasExternalCodexProcess(
+        verifiedBundlePaths: Set<String> = []
+    ) -> Bool {
+        guard let commOutput = runPsOutput(["-acxo", "pid=,comm="]) else { return true }
+        let pids = extractCodexPIDs(fromPsCommOutput: commOutput)
+        guard !pids.isEmpty else { return false }
+        guard !verifiedBundlePaths.isEmpty else { return true }
+
+        for pidStr in pids {
+            guard let pid = Int32(pidStr) else { return true }
+            if let execPath = resolveProcessExecutablePath(pid: pid) {
+                if !isBundledCodexExecutablePath(execPath, verifiedBundlePaths: verifiedBundlePaths) {
+                    return true
+                }
+                continue
+            }
+            if Darwin.kill(pid, 0) != 0 && errno == ESRCH {
+                continue
+            }
+            guard let argsOutput = runPsOutput(["-ww", "-o", "args=", "-p", pidStr]),
+                  !hasExternalCodexCommandLines(
+                    argsOutput,
+                    expectedCount: 1,
+                    verifiedBundlePaths: verifiedBundlePaths
+                  ) else {
+                return true
+            }
         }
+        return false
     }
 
     /// 用户主动停用某账号（清除该 provider 的「当前激活」标记，不改动 auth.json 内容）。
@@ -465,25 +631,36 @@ final class ProviderActivationManager: ObservableObject {
     }
 
     static func resolveInstalledCodexAppURL(
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        systemApplicationsDirectory: String = "/Applications",
+        runningBundleURLs: [URL]? = nil,
+        workspaceBundleURL: (() -> URL?)? = nil
     ) -> URL? {
-        if let runningURL = NSRunningApplication.runningApplications(withBundleIdentifier: codexBundleIdentifier)
-            .first(where: { !$0.isTerminated })?.bundleURL {
+        let activeRunningURLs = runningBundleURLs ?? NSRunningApplication
+            .runningApplications(withBundleIdentifier: codexBundleIdentifier)
+            .filter { !$0.isTerminated }
+            .compactMap(\.bundleURL)
+        if let runningURL = activeRunningURLs.first(where: { isVerifiedCodexBundleURL($0) }) {
             return runningURL
         }
-        if let workspaceURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: codexBundleIdentifier) {
-            return workspaceURL
+        let registeredURL: URL? = if let workspaceBundleURL {
+            workspaceBundleURL()
+        } else {
+            NSWorkspace.shared.urlForApplication(withBundleIdentifier: codexBundleIdentifier)
+        }
+        if let registeredURL, isVerifiedCodexBundleURL(registeredURL) {
+            return registeredURL
         }
         let fm = FileManager.default
         let candidatePaths = [
-            "/Applications/Codex.app",
+            "\(systemApplicationsDirectory)/Codex.app",
             "\(homeDirectory)/Applications/Codex.app",
-            "/Applications/ChatGPT.app",
+            "\(systemApplicationsDirectory)/ChatGPT.app",
             "\(homeDirectory)/Applications/ChatGPT.app"
         ]
         for path in candidatePaths where fm.fileExists(atPath: path) {
             let url = URL(fileURLWithPath: path)
-            if path.hasSuffix("/Codex.app") || Bundle(url: url)?.bundleIdentifier == codexBundleIdentifier {
+            if isVerifiedCodexBundleURL(url) {
                 return url
             }
         }
@@ -697,7 +874,8 @@ final class ProviderActivationManager: ObservableObject {
     func restartCodexApp(
         fallbackEntry: ProviderAccountEntry? = nil,
         switchingTo: ProviderAccountEntry? = nil,
-        timeoutSeconds: TimeInterval = 6.0,
+        // shortcut: 20s graceful quit cap covers CUA PIP + SQLite/external-drive flush, upgrade to KVO + progress UI if needed
+        timeoutSeconds: TimeInterval = 20.0,
         pollIntervalMilliseconds: Int = 150
     ) async throws {
         let startedAt = Date()
@@ -752,14 +930,16 @@ final class ProviderActivationManager: ObservableObject {
         phase("wait_for_helpers")
         let appBundlePath = appURL.path
         let pollNs = UInt64(max(10, pollIntervalMilliseconds)) * 1_000_000
+        let helperWaitSeconds = min(2.0, max(0.05, timeoutSeconds * 0.15))
+        let helperPostTermSeconds = min(3.0, max(0.05, timeoutSeconds * 0.2))
         let helpersExited = await Task.detached(priority: .userInitiated) { () -> Bool in
-            let waitDeadline = Date().addingTimeInterval(1.0)
+            let waitDeadline = Date().addingTimeInterval(helperWaitSeconds)
             while Date() < waitDeadline && Self.isCodexChildHelperRunning(appBundlePath: appBundlePath) {
                 try? await Task.sleep(nanoseconds: pollNs)
             }
             if Self.isCodexChildHelperRunning(appBundlePath: appBundlePath) {
                 Self.terminateOrphanedCodexChildHelpers(appBundlePath: appBundlePath)
-                let postTermDeadline = Date().addingTimeInterval(0.8)
+                let postTermDeadline = Date().addingTimeInterval(helperPostTermSeconds)
                 while Date() < postTermDeadline && Self.isCodexChildHelperRunning(appBundlePath: appBundlePath) {
                     try? await Task.sleep(nanoseconds: pollNs)
                 }

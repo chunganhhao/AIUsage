@@ -47,7 +47,20 @@ for key,marker in [
     code=code.replace('AntigravityAccountSwitcher.', 'FakeAGYSwitcher.')
     code=code.replace('NSRunningApplication.', 'FixtureRunningApplication.').replace('NSWorkspace.', 'FixtureWorkspace.').replace('NSAlert()', 'FixtureAlert()')
     t=t.replace('// PRODUCTION_'+key,code)
-keyring_helpers=function('    static func codexUsesKeyring(')+'\n'+function('    static func codexConfigUsesKeyring(')
+assert 'timeoutSeconds: TimeInterval = 20.0' in s, 'restartCodexApp default quit timeout must stay at 20.0s'
+keyring_helpers='\n'.join([
+    '    nonisolated static let codexBundleIdentifier = "com.openai.codex"',
+    function('    static func codexUsesKeyring('),
+    function('    static func codexConfigUsesKeyring('),
+    function('    nonisolated static func readBundleIdentifier('),
+    function('    nonisolated static func isVerifiedCodexBundleURL('),
+    function('    static func verifiedCodexAppBundlePaths('),
+    function('    static func resolveInstalledCodexAppURL('),
+    function('    nonisolated static func extractCodexPIDs('),
+    function('    nonisolated static func isBundledCodexExecutablePath('),
+    function('    nonisolated static func isBundledCodexAppCommandLine('),
+    function('    nonisolated static func hasExternalCodexCommandLines('),
+])
 t=t.replace('// PRODUCTION_CODEX_KEYRING',keyring_helpers)
 codex_write_boundary=function('    static func validateNativeCodexWriteTargets(')+'\n'+function('    func writeAuthFileWithBackup(')
 t=t.replace('// PRODUCTION_CODEX_WRITE_BOUNDARY',codex_write_boundary)

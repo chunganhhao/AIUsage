@@ -288,6 +288,39 @@ extension ProviderRefreshCoordinator {
         return (providers, localizeOverview(overview, language: language))
     }
 
+    nonisolated func recomputedOverview(
+        for visibleProviders: [ProviderData],
+        baseOverview: DashboardOverview?,
+        generatedAt: String,
+        language: String
+    ) -> DashboardOverview {
+        let unpricedAlertBodies = Dictionary(
+            (baseOverview?.alerts ?? [])
+                .filter { $0.id.hasSuffix(":unpriced-models") }
+                .map { ($0.providerId, $0.body) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let entries = visibleProviders.map { provider in
+            UsageNormalizer.OverviewEntry(
+                id: provider.id,
+                label: provider.label,
+                category: provider.category,
+                status: provider.status.rawValue,
+                secondaryHeadline: provider.headline.secondary,
+                nextResetAt: provider.nextResetAt,
+                monthUsd: provider.costSummary?.month?.usd ?? 0,
+                weekTokens: provider.costSummary?.week?.tokens ?? 0,
+                unpricedAlertBody: unpricedAlertBodies[provider.id]
+            )
+        }
+        return localizeOverview(
+            convertOverview(
+                UsageNormalizer.createDashboardOverview(entries: entries, generatedAt: generatedAt)
+            ),
+            language: language
+        )
+    }
+
     // 规则#9：高成本对象（130+ 项字典、正则编译）只建一次复用，不在每次本地化里重建/重编译。
     // 这是数据刷新期间主线程的头号 CPU 热点（见 issue #28 Instruments profile）。
     private static let exactTranslations: [String: String] = [

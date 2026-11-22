@@ -410,11 +410,11 @@ private struct PollProvider: CredentialAcceptingProvider {
         let cachedSF = await sfEngine.fetchAllResults(for: sfProvider, useRecentResults: true, backgroundAutomatic: false)
         let rpcCountAfterCached = await rpcCounter.count
         try check(directSF?.ok == true
-                    && rpcCountAfterDirect == 1
+                    && rpcCountAfterDirect == 2
                     && cachedSF.first?.ok == true
                     && rpcCountAfterCached == rpcCountAfterDirect
                     && StubURLProtocol.requests.isEmpty,
-                  "R3-F2: SingleFlight commits 90s local cache before waking caller with 0 Google HTTPS calls")
+                  "R3-F2: SingleFlight pre/post-verifies local identity and commits 90s local cache with 0 Google HTTPS calls")
 
         // [R3 Finding 5] CredentialWriteRecorder resolves /private symlinks consistently.
         let recURL = URL(fileURLWithPath: root.path).appendingPathComponent("sym-write.json")

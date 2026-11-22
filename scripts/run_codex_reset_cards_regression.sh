@@ -19,13 +19,30 @@ def extract(source, name)
   abort "Missing terminator: #{name}" unless finish
   lines[start..finish].join
 end
+def extract_signature(source, signature)
+  lines = source.lines
+  start = lines.index { |line| line.start_with?("    #{signature}") }
+  abort "Missing signature: #{signature}" unless start
+  finish = ((start + 1)...lines.size).find { |i| lines[i].match?(/^    }\s*$/) }
+  abort "Missing terminator: #{signature}" unless finish
+  lines[start..finish].join
+end
 conversion = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator+Conversion.swift'))
 pipeline = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator+FetchPipeline.swift'))
 coordinator = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator.swift'))
-methods = %w[convertSummary convertOverview localizeProviderData localizeOverview localizedCostPeriod localizedTimelinePoint localizedProviderResults localizedDashboard localizedProviderList localizedRemoteDashboard].map { |name| extract(conversion, name) }
-methods += %w[codexResetIdentity preserveCodexResetUpdates fetchAccountByCredential fetchSingleProviderLocal fetchSingleProviderRemote fetchDashboardLocal fetchDashboardRemote replaceProviderEntries].map { |name| extract(pipeline, name) }
+methods = %w[convertSummary convertOverview localizeProviderData localizeOverview localizedCostPeriod localizedTimelinePoint localizedProviderResults localizedDashboard localizedProviderList localizedRemoteDashboard recomputedOverview].map { |name| extract(conversion, name) }
+methods += %w[codexResetIdentity acceptsCodexResetRefresh extractCredentialId preserveCodexResetUpdates fetchAccountByCredential fetchSingleProviderLocal fetchSingleProviderRemote fetchDashboardLocal fetchDashboardRemote replaceProviderEntries isProviderHidden liveProviderIdentity].map { |name| extract(pipeline, name) }
 methods += [extract(pipeline, 'reconcileResetProtectedAccountRegistry')] if pipeline.include?('func reconcileResetProtectedAccountRegistry(')
-methods += [extract(coordinator, 'refreshCodexAccountAfterReset')]
+methods += [
+  extract(coordinator, 'refreshCodexAccountAfterReset'),
+  extract(coordinator, 'syncOverviewIfPresent'),
+  extract(coordinator, 'clearStaleOwnedRefreshErrorIfNeeded'),
+  extract_signature(coordinator, 'func removeProviders(matchingBaseProviderIds '),
+  extract_signature(coordinator, 'func removeProviders(matchingBaseProviderId '),
+  extract_signature(coordinator, 'func removeLiveProviders(matching entry:'),
+  extract_signature(coordinator, 'func removeLiveProviders(matching entries:'),
+  extract(coordinator, 'reapplyVisibleSortedProviders')
+]
 File.write(output, "import Foundation\nimport QuotaBackend\nextension ProviderRefreshCoordinator {\n" + methods.join("\n") + "}\n")
 # 保留正式 worker 算法，只在返回前加确定性的挂起点，测试真实 AccountStore 的提交边界。
 persistence = File.read(File.join(root, 'AIUsage/Models/AccountStore+Persistence.swift'))

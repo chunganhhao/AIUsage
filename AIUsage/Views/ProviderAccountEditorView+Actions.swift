@@ -172,6 +172,7 @@ extension ProviderAccountEditorView {
     private func candidateSignature(_ candidate: ProviderAuthCandidate) -> String {
         [
             candidate.sourceIdentifier,
+            candidate.workspaceId ?? "",
             candidate.sessionFingerprint ?? "",
             String(Int(candidate.modifiedAt?.timeIntervalSince1970 ?? 0))
         ].joined(separator: "|")

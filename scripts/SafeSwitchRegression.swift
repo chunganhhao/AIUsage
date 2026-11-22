@@ -96,7 +96,8 @@ final class ProviderActivationManager: ObservableObject {
     static let codexBundleIdentifier = "com.openai.codex"
     static let externalCodexWarning = "Restart external terminal / daemon"
     static func codexUsesKeyring() -> Bool { Boundary.keyring }
-    static func hasExternalCodexProcess() -> Bool { Boundary.externalCLI }
+    static func verifiedCodexAppBundlePaths() -> Set<String> { [] }
+    static func hasExternalCodexProcess(verifiedBundlePaths: Set<String> = []) -> Bool { Boundary.externalCLI }
     static func resolveInstalledCodexAppURL() -> URL? { URL(fileURLWithPath: "/tmp/fake.app") }
     static func isCodexChildHelperRunning(appBundlePath: String) -> Bool { false }
     static func terminateOrphanedCodexChildHelpers(appBundlePath: String) {}
@@ -215,7 +216,19 @@ struct NativeToggleFixture: View {
             check(direct && Boundary.events == ["mutate"], "Stopped app should switch without prompt or reopen")
             Boundary.reset(provider: provider, confirm: true); Boundary.refuseQuit = true
             do { _ = try await manager.activateAccount(entry: .init(providerId: provider)); fatalError("Quit refusal must fail") }
-            catch { check(!Boundary.events.contains("mutate") && !Boundary.events.contains("open"), "Quit refusal wrote credentials") }
+            catch {
+                check(!Boundary.events.contains("mutate") && !Boundary.events.contains("open"), "Quit refusal wrote credentials")
+                if case .failure(let msg) = manager.activationResult {
+                    check(msg.contains("did not accept the quit request"), "Missing activation failure message on quit refusal: \(msg)")
+                } else {
+                    fatalError("Missing activationResult failure on quit refusal")
+                }
+                if case .failure(let codexMsg) = manager.codexActivationResult {
+                    check(codexMsg.contains("did not accept the quit request"), "Missing codexActivationResult failure message on quit refusal: \(codexMsg)")
+                } else {
+                    fatalError("Missing codexActivationResult failure message on quit refusal")
+                }
+            }
         }
         Boundary.reset(provider: "codex"); Boundary.keyring = true
         do { _ = try await manager.activateAccount(entry: .init(providerId: "codex")); fatalError("keyring must block file-only switch") }
@@ -256,6 +269,131 @@ struct NativeToggleFixture: View {
         Boundary.reset(provider: "codex", running: false); Boundary.externalCLI = true
         let declinedCLI = try await manager.activateAccount(entry: .init(providerId: "codex"))
         check(!declinedCLI && Boundary.events == ["confirm"], "External daemon warning should precede writes")
+        // Production Codex CLI ps parser ignores ChatGPT/Codex app helpers and custom .app paths, catching only external CLI binaries.
+        let psCommSample = """
+          58097 ChatGPT
+          58117 Codex (Aperitif)
+          58165 codex
+          58530 codex
+          59001 Python
+          notapid codex
+        """
+        check(ProductionCodexStorageParser.extractCodexPIDs(fromPsCommOutput: psCommSample) == ["58165", "58530"],
+              "extractCodexPIDs must select exact codex basename PIDs only")
+        let bundledOnlyArgs = """
+        /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex -c features.code_mode_host=true app-server
+        /Applications/Codex.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server
+        /Users/test/Desktop Apps/Custom.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex exec-server
+        /Users/john-doe/Desktop Apps/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server
+        """
+        let allowedBundles: Set<String> = [
+            "/Applications/ChatGPT.app",
+            "/Applications/Codex.app",
+            "/Users/test/Desktop Apps/Custom.app",
+            "/Users/john-doe/Desktop Apps/ChatGPT.app"
+        ]
+        check(!ProductionCodexStorageParser.hasExternalCodexCommandLines(bundledOnlyArgs, verifiedBundlePaths: allowedBundles),
+              "Bundled ChatGPT.app / Codex.app CLI helpers must not be flagged as external Codex CLI")
+        check(ProductionCodexStorageParser.isBundledCodexExecutablePath(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            verifiedBundlePaths: ["/Applications/ChatGPT.app"]
+        ), "[§11.3] Verified Codex bundle executable path positive control")
+        check(ProductionCodexStorageParser.hasExternalCodexCommandLines(bundledOnlyArgs, verifiedBundlePaths: []),
+              "[§11.3] Empty verified bundle set must treat all codex command lines as external CLI")
+        check(!ProductionCodexStorageParser.isBundledCodexExecutablePath(
+            "/Applications/SomeOther.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            verifiedBundlePaths: []
+        ), "[§11.3] Empty verified bundle set must not exempt unrelated .app bundle-shaped executable path")
+        check(!ProductionCodexStorageParser.isBundledCodexExecutablePath(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            verifiedBundlePaths: []
+        ), "[§11.3] Empty verified bundle set must fail safe even for default ChatGPT.app path when provenance unavailable")
+        for externalCmd in [
+            "/opt/homebrew/bin/codex",
+            "/opt/homebrew/bin/codex -C /Applications/ChatGPT.app/Contents/Resources",
+            "/opt/homebrew/bin/codex /Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+            "/Users/apple/.local/lib/node_modules/@openai/codex-darwin-arm64/vendor/aarch64-apple-darwin/codex/codex",
+            "codex --model gpt-5"
+        ] {
+            check(ProductionCodexStorageParser.hasExternalCodexCommandLines(externalCmd, verifiedBundlePaths: allowedBundles),
+                  "External Codex CLI binary (even with bundled app arguments) must be detected: \(externalCmd)")
+        }
+        // [§9.4] Verified bundle enforcement & fail-closed unreadable args output
+        let verifiedBundles: Set<String> = ["/Applications/ChatGPT.app"]
+        check(!ProductionCodexStorageParser.hasExternalCodexCommandLines(
+            "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server",
+            expectedCount: 1,
+            verifiedBundlePaths: verifiedBundles
+        ), "[§9.4] Genuine helper inside verified ChatGPT.app bundle must not trigger external warning")
+        check(ProductionCodexStorageParser.hasExternalCodexCommandLines(
+            "/tmp/Fake.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex app-server",
+            expectedCount: 1,
+            verifiedBundlePaths: verifiedBundles
+        ), "[§9.4] Helper outside verified bundles must be treated as external CLI")
+        check(ProductionCodexStorageParser.hasExternalCodexCommandLines("", expectedCount: 1, verifiedBundlePaths: verifiedBundles),
+              "[§9.4] Unreadable or missing command line for live codex PID must fail safe with external warning")
+        // [§13.2] verifiedCodexAppBundlePaths & resolveInstalledCodexAppURL must verify CFBundleIdentifier == com.openai.codex
+        let bundleRoot = home.appendingPathComponent("codex-bundle-producer-\(UUID().uuidString)")
+        let sysApps = bundleRoot.appendingPathComponent("Applications")
+        let wrongCodexApp = sysApps.appendingPathComponent("Codex.app")
+        let wrongPlistDir = wrongCodexApp.appendingPathComponent("Contents")
+        try FileManager.default.createDirectory(at: wrongPlistDir, withIntermediateDirectories: true)
+        func writeInfoPlist(bundleID: String, to dir: URL) throws {
+            let data = try PropertyListSerialization.data(
+                fromPropertyList: ["CFBundleIdentifier": bundleID, "CFBundleName": "Codex"],
+                format: .xml,
+                options: 0
+            )
+            try data.write(to: dir.appendingPathComponent("Info.plist"))
+        }
+        try writeInfoPlist(bundleID: "org.example.wrapper", to: wrongPlistDir)
+        let wrongResolved = ProductionCodexStorageParser.resolveInstalledCodexAppURL(
+            homeDirectory: bundleRoot.path,
+            systemApplicationsDirectory: sysApps.path,
+            runningBundleURLs: [],
+            workspaceBundleURL: { nil }
+        )
+        let wrongVerifiedSet = ProductionCodexStorageParser.verifiedCodexAppBundlePaths(
+            homeDirectory: bundleRoot.path,
+            systemApplicationsDirectory: sysApps.path,
+            runningBundleURLs: [],
+            workspaceBundleURL: { nil }
+        )
+        let wrongRegisteredSet = ProductionCodexStorageParser.verifiedCodexAppBundlePaths(
+            homeDirectory: bundleRoot.path,
+            systemApplicationsDirectory: sysApps.path,
+            runningBundleURLs: [],
+            workspaceBundleURL: { wrongCodexApp }
+        )
+        let wrongHelperPath = wrongCodexApp.path + "/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        check(wrongResolved == nil && wrongVerifiedSet.isEmpty && wrongRegisteredSet.isEmpty,
+              "[§13.2] Bundle named Codex.app with wrong CFBundleIdentifier must never enter verified set")
+        check(!ProductionCodexStorageParser.isBundledCodexExecutablePath(wrongHelperPath, verifiedBundlePaths: wrongVerifiedSet)
+                && ProductionCodexStorageParser.hasExternalCodexCommandLines(wrongHelperPath + " app-server", verifiedBundlePaths: wrongVerifiedSet),
+              "[§13.2] Helper under wrong-ID Codex.app must stay flagged as external CLI")
+
+        try writeInfoPlist(bundleID: "com.openai.codex", to: wrongPlistDir)
+        let knownResolved = ProductionCodexStorageParser.resolveInstalledCodexAppURL(
+            homeDirectory: bundleRoot.path,
+            systemApplicationsDirectory: sysApps.path,
+            runningBundleURLs: [],
+            workspaceBundleURL: { nil }
+        )
+        let knownVerifiedSet = ProductionCodexStorageParser.verifiedCodexAppBundlePaths(
+            homeDirectory: bundleRoot.path,
+            systemApplicationsDirectory: sysApps.path,
+            runningBundleURLs: [],
+            workspaceBundleURL: { nil }
+        )
+        check(knownResolved?.standardizedFileURL.path == wrongCodexApp.standardizedFileURL.path
+                && !knownVerifiedSet.isEmpty,
+              "[§13.2] Bundle with com.openai.codex CFBundleIdentifier enters verified set")
+        check(ProductionCodexStorageParser.isBundledCodexExecutablePath(wrongHelperPath, verifiedBundlePaths: knownVerifiedSet)
+                && !ProductionCodexStorageParser.isBundledCodexExecutablePath(
+                    "/tmp/Unrelated.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
+                    verifiedBundlePaths: knownVerifiedSet
+                ),
+              "[§13.2] Verified com.openai.codex helper is accepted while unrelated .app stays rejected")
         // Native SwiftUI Toggle uses the production Binding setter and activation callback.
         _ = NSApplication.shared
         let nativeManager = ProviderActivationManager()

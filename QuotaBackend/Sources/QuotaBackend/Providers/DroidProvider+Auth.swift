@@ -19,22 +19,6 @@ extension DroidProvider {
             )
         }
 
-        if let browserSession = Self.discoverBrowserSessions(homeDirectory: homeDirectory).first {
-            let token = Self.bearerToken(fromCookieHeader: browserSession.cookieHeader)
-            let claims = parseJWTClaims(token ?? "")
-            var source = SourceInfo(mode: "auto", type: "browser-cookie")
-            source.browserName = browserSession.browserName
-            source.profile = browserSession.profileName
-            return DroidAuth(
-                cookieHeader: browserSession.cookieHeader,
-                bearerToken: token,
-                refreshToken: nil,
-                organizationId: claims["org_id"] as? String,
-                userId: claims["sub"] as? String,
-                source: source
-            )
-        }
-
         if let session = loadSessionFile() {
             return try await resolveStoredSession(
                 session,
@@ -45,7 +29,7 @@ extension DroidProvider {
 
         throw ProviderError(
             "not_logged_in",
-            "No Droid login state found. Log in to app.factory.ai in Chrome, Arc, Edge, Brave, or Cursor and connect that session in AIUsage."
+            "No Droid login state found. Connect a FACTORY_API_KEY or sign in with Factory CLI."
         )
     }
 

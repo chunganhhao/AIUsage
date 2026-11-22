@@ -9,7 +9,6 @@ struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @ObservedObject var proxyVM = ProxyViewModel.shared
-    @ObservedObject var openCodeStore = OpenCodeNodeStore.shared
     // 三条全局代理轨道各自独立观察：菜单栏切换器、Codex 账号行托管态都需要按轨实时反映。
     @ObservedObject var globalCodex = GlobalProxyManager.codex
     @ObservedObject var globalClaude = GlobalProxyManager.claude
@@ -17,6 +16,7 @@ struct MenuBarView: View {
     @ObservedObject private var settings = AppSettings.shared
     @State private var activationMessage: String?
     @State private var activationSuccess = true
+    @State private var feedbackPresenterToken: UUID?
     // 当前展开的轨道面板（自定义内嵌覆盖层，取代原生 Menu 下拉）。nil = 全部收起。
     @State var openPanelTrack: GlobalProxyTrack?
     @State var pendingRestartPrompt: MenuBarRestartPrompt?
@@ -33,7 +33,9 @@ struct MenuBarView: View {
                 Divider()
                 quotaSection
                 costTrackingSection
-                MenuBarRecentSessionsSection { openMainWindow(section: .sessions) }
+                if !settings.hiddenSidebarSections.contains(AppSection.sessions.rawValue) {
+                    MenuBarRecentSessionsSection { openMainWindow(section: .sessions) }
+                }
                 Divider()
                 menuBarFooter
             }
@@ -44,8 +46,27 @@ struct MenuBarView: View {
                 restartConfirmationOverlay(prompt: prompt)
             }
         }
+        .overlay(alignment: .bottom) {
+            if let message = activationMessage {
+                activationToast(message: message, success: activationSuccess)
+            }
+        }
         .frame(width: 420)
         .background(VisualEffectBlur())
+        .onAppear {
+            feedbackPresenterToken = MenuBarActivationFeedback.bindPresenter { message, ok in
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    activationSuccess = ok
+                    activationMessage = message
+                }
+            }
+        }
+        .onDisappear {
+            if let token = feedbackPresenterToken {
+                MenuBarActivationFeedback.unbindPresenter(token)
+                feedbackPresenterToken = nil
+            }
+        }
     }
 
     // 轨道顺序与侧边栏一致：Codex → OpenCode → Claude Code。被侧边栏隐藏的 agent 同步隐藏其切换器。
@@ -267,11 +288,6 @@ struct MenuBarView: View {
                     .padding(.vertical, 8)
                 }
                 .frame(maxHeight: 600)
-                .overlay(alignment: .bottom) {
-                    if let message = activationMessage {
-                        activationToast(message: message, success: activationSuccess)
-                    }
-                }
             }
         }
     }

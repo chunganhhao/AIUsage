@@ -10,19 +10,70 @@ struct GitHubCLISession {
     let sessionFingerprint: String
 }
 
+private nonisolated let githubCLISessionCacheLock = NSLock()
+private nonisolated(unsafe) var githubCLISessionCache: (key: String, fetchedAt: Date, session: GitHubCLISession?)?
+
 extension ProviderAuthManager {
     // MARK: - Parsing Helpers
 
-    static func currentGitHubCLISession() -> GitHubCLISession? {
-        let token = runCommand(path: "/opt/homebrew/bin/gh", arguments: ["auth", "token"])
-            ?? runCommand(path: "/usr/local/bin/gh", arguments: ["auth", "token"])
-            ?? runCommand(path: "/usr/bin/gh", arguments: ["auth", "token"])
-        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+    static func githubCLIHostsPath(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) -> String {
+        if let ghConfigDir = environment["GH_CONFIG_DIR"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !ghConfigDir.isEmpty {
+            return (expand(ghConfigDir) as NSString).appendingPathComponent("hosts.yml")
+        }
+        if let xdgConfigHome = environment["XDG_CONFIG_HOME"]?.trimmingCharacters(in: .whitespacesAndNewlines),
+           !xdgConfigHome.isEmpty {
+            return ((expand(xdgConfigHome) as NSString).appendingPathComponent("gh") as NSString)
+                .appendingPathComponent("hosts.yml")
+        }
+        return (homeDirectory as NSString).appendingPathComponent(".config/gh/hosts.yml")
+    }
+
+    static func currentGitHubCLISession(
+        environment: [String: String] = ProcessInfo.processInfo.environment,
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        commandRunner: ((String, [String]) -> String?)? = nil
+    ) -> GitHubCLISession? {
+        let envToken = environment["GH_TOKEN"]?.nilIfBlank ?? environment["GITHUB_TOKEN"]?.nilIfBlank
+        let hostsPath = githubCLIHostsPath(environment: environment, homeDirectory: homeDirectory)
+        let hostsExists = FileManager.default.fileExists(atPath: hostsPath)
+        guard envToken != nil || hostsExists else {
             return nil
         }
 
-        let hostsPath = expand("~/.config/gh/hosts.yml")
-        let hostsContent = try? String(contentsOfFile: hostsPath, encoding: .utf8)
+        let attrs = hostsExists ? (try? FileManager.default.attributesOfItem(atPath: hostsPath)) : nil
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let size = (attrs?[.size] as? Int) ?? 0
+        let cacheKey = "\(hostsPath)|\(hostsExists ? "\(mtime):\(size)" : "none")|\(envToken.map(tokenFingerprint) ?? "")"
+        let now = Date()
+
+        githubCLISessionCacheLock.lock()
+        if let cached = githubCLISessionCache,
+           cached.key == cacheKey,
+           now.timeIntervalSince(cached.fetchedAt) < 300 {
+            githubCLISessionCacheLock.unlock()
+            return cached.session
+        }
+        githubCLISessionCacheLock.unlock()
+
+        let runner = commandRunner ?? { path, args in
+            runCommand(path: path, arguments: args, environment: environment)
+        }
+        let token = runner("/opt/homebrew/bin/gh", ["auth", "token"])
+            ?? runner("/usr/local/bin/gh", ["auth", "token"])
+            ?? runner("/usr/bin/gh", ["auth", "token"])
+            ?? envToken
+        guard let token = token?.trimmingCharacters(in: .whitespacesAndNewlines), !token.isEmpty else {
+            githubCLISessionCacheLock.lock()
+            githubCLISessionCache = (cacheKey, now, nil)
+            githubCLISessionCacheLock.unlock()
+            return nil
+        }
+
+        let hostsContent = hostsExists ? (try? String(contentsOfFile: hostsPath, encoding: .utf8)) : nil
         let username = hostsContent?
             .components(separatedBy: .newlines)
             .first(where: { $0.trimmingCharacters(in: .whitespaces).hasPrefix("user:") })?
@@ -32,13 +83,17 @@ extension ProviderAuthManager {
             .trimmingCharacters(in: .whitespacesAndNewlines)
 
         let label = username?.nilIfBlank ?? "Current GitHub CLI session"
-        return GitHubCLISession(
+        let session = GitHubCLISession(
             label: label,
             token: token,
             detail: displayPath(hostsPath),
             sourceIdentifier: "gh-cli:\(label.lowercased())",
             sessionFingerprint: tokenFingerprint(token)
         )
+        githubCLISessionCacheLock.lock()
+        githubCLISessionCache = (cacheKey, now, session)
+        githubCLISessionCacheLock.unlock()
+        return session
     }
 
     static func loadJSONObject(at path: String) -> [String: Any]? {
@@ -270,12 +325,28 @@ extension ProviderAuthManager {
                     ?? credential.metadata["sourcePath"]
                     ?? authFileSourceIdentifier(for: credential.credential, authMethod: credential.authMethod)
             }),
-            sessionFingerprints: Set(credentials.compactMap { credential in
+            sessionFingerprints: Set(credentials.flatMap { credential -> [String] in
                 if providerId == "codex" {
-                    return CodexAccountIdentity(credential: credential).key
+                    let fp = CodexAccountIdentity(credential: credential).key
                         ?? credential.metadata["sessionFingerprint"].flatMap { $0.hasPrefix("codex:") ? $0 : nil }
+                    return fp.map { [$0] } ?? []
                 }
-                return normalizedHandle(credential.metadata["sessionFingerprint"])
+                var results: [String] = []
+                if let fp = normalizedHandle(credential.metadata["sessionFingerprint"]) {
+                    results.append(fp)
+                }
+                if providerId == "antigravity",
+                   let email = normalizedHandle(
+                       credential.metadata["accountHandle"]
+                           ?? credential.metadata["accountEmail"]
+                           ?? credential.accountLabel
+                   ),
+                   let proj = AntigravityProvider.normalizedProjectId(
+                       credential.metadata["projectId"] ?? credential.metadata["project_id"]
+                   )?.lowercased() {
+                    results.append("antigravity:\(email)#\(proj)")
+                }
+                return results
             }),
             accountHandles: Set(credentials.compactMap { credential in
                 normalizedHandle(
@@ -293,6 +364,11 @@ extension ProviderAuthManager {
             guard let fingerprint = candidate.sessionFingerprint, fingerprint.hasPrefix("codex:") else { return false }
             return monitored.sessionFingerprints.contains(fingerprint)
         }
+        if candidate.providerId == "antigravity",
+           let proj = AntigravityProvider.normalizedProjectId(candidate.workspaceId)?.lowercased(),
+           let email = normalizedHandle(candidate.sessionFingerprint ?? candidate.title) {
+            return monitored.sessionFingerprints.contains("antigravity:\(email)#\(proj)")
+        }
         if sourceIdentifierIsStableIdentity(for: candidate),
            monitored.sourceIdentifiers.contains(candidate.sourceIdentifier) {
             return true
@@ -307,11 +383,14 @@ extension ProviderAuthManager {
         return monitored.accountHandles.contains(normalizedTitle)
     }
 
-    static func runCommand(path: String, arguments: [String]) -> String? {
+    static func runCommand(path: String, arguments: [String], environment: [String: String]? = nil) -> String? {
         guard FileManager.default.fileExists(atPath: path) else { return nil }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
         process.arguments = arguments
+        if let environment {
+            process.environment = environment
+        }
         let output = Pipe()
         process.standardOutput = output
         process.standardError = Pipe()

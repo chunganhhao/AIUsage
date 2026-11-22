@@ -63,65 +63,120 @@ struct AntigravityLocalQuotaReader: Sendable {
         }
     }
 
+    private final class SessionProbeCache: @unchecked Sendable {
+        private let lock = NSLock()
+        private let ttl: TimeInterval
+        private var entry: (timestamp: Date, session: ActiveSession?)?
+
+        init(ttl: TimeInterval) {
+            self.ttl = ttl
+        }
+
+        func get(now: Date) -> ActiveSession?? {
+            lock.lock()
+            defer { lock.unlock() }
+            guard let entry, now.timeIntervalSince(entry.timestamp) < ttl else {
+                return nil
+            }
+            return .some(entry.session)
+        }
+
+        func set(_ session: ActiveSession?, now: Date) {
+            lock.lock()
+            defer { lock.unlock() }
+            entry = (now, session)
+        }
+    }
+
     typealias ProcessLister = @Sendable () -> [ServerProcess]
     typealias PortLister = @Sendable (Int32) -> [Int]
     typealias RPCCaller = @Sendable (URL, String, String, [String: Any]) async -> [String: Any]?
 
-    static let live = AntigravityLocalQuotaReader()
+    static let live = AntigravityLocalQuotaReader(
+        listProcesses: { AntigravityLocalQuotaReader.discoverDaemonHubServers() },
+        fallbackListProcesses: { AntigravityLocalQuotaReader.discoverPSFallbackServers() },
+        sessionCacheTTL: 2.0
+    )
 
     private let listProcesses: ProcessLister
+    private let fallbackListProcesses: ProcessLister?
     private let listPorts: PortLister
     private let callRPC: RPCCaller
+    private let sessionCache: SessionProbeCache?
 
     init(
         listProcesses: @escaping ProcessLister = { AntigravityLocalQuotaReader.discoverRunningServers() },
         listPorts: @escaping PortLister = { AntigravityLocalQuotaReader.discoverListeningPorts(pid: $0) },
-        callRPC: @escaping RPCCaller = { await AntigravityLocalQuotaReader.defaultPerformRPC(baseURL: $0, methodPath: $1, csrfToken: $2, body: $3) }
+        callRPC: @escaping RPCCaller = { await AntigravityLocalQuotaReader.defaultPerformRPC(baseURL: $0, methodPath: $1, csrfToken: $2, body: $3) },
+        fallbackListProcesses: ProcessLister? = nil,
+        sessionCacheTTL: TimeInterval? = nil
     ) {
         self.listProcesses = listProcesses
+        self.fallbackListProcesses = fallbackListProcesses
         self.listPorts = listPorts
         self.callRPC = callRPC
+        self.sessionCache = sessionCacheTTL.map { SessionProbeCache(ttl: $0) }
     }
 
-    func probeActiveSession() async -> ActiveSession? {
-        for server in listProcesses() {
+    func probeActiveSession(allowCached: Bool = true) async -> ActiveSession? {
+        if allowCached, let cached = sessionCache?.get(now: Date()) {
+            return cached
+        }
+        var session = await probeServers(listProcesses())
+        if session == nil, let fallbackListProcesses {
+            session = await probeServers(fallbackListProcesses())
+        }
+        sessionCache?.set(session, now: Date())
+        return session
+    }
+
+    private func probeServers(_ servers: [ServerProcess]) async -> ActiveSession? {
+        for server in servers {
             let ports = server.preferredPorts.isEmpty ? listPorts(server.pid) : server.preferredPorts
             for port in ports {
                 for scheme in ["http", "https"] {
                     guard let baseURL = URL(string: "\(scheme)://127.0.0.1:\(port)") else { continue }
-                    guard let status = await callRPC(
-                        baseURL,
-                        "exa.language_server_pb.LanguageServerService/GetUserStatus",
-                        server.csrfToken,
-                        [:]
-                    ),
-                    let userStatus = status["userStatus"] as? [String: Any],
-                    let rawEmail = userStatus["email"] as? String else { continue }
-                    let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
-                    guard !email.isEmpty else { continue }
-                    let userTier = userStatus["userTier"] as? [String: Any]
-                    let statusProjects = Self.embeddedProjectIds(in: [status, userStatus])
-                    if Set(statusProjects.map { $0.lowercased() }).count > 1 { continue }
-                    let tierId = (userTier?["id"] as? String)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    let tierName = (userTier?["name"] as? String)?
-                        .trimmingCharacters(in: .whitespacesAndNewlines)
-                    return ActiveSession(
-                        baseURL: baseURL,
-                        csrfToken: server.csrfToken,
-                        email: email,
-                        tierId: tierId?.isEmpty == false ? tierId : nil,
-                        tierName: tierName?.isEmpty == false ? tierName : nil,
-                        projectId: statusProjects.first
-                    )
+                    if let session = await probeSessionStatus(baseURL: baseURL, csrfToken: server.csrfToken) {
+                        return session
+                    }
                 }
             }
         }
         return nil
     }
 
+    private func probeSessionStatus(baseURL: URL, csrfToken: String) async -> ActiveSession? {
+        guard let status = await callRPC(
+            baseURL,
+            "exa.language_server_pb.LanguageServerService/GetUserStatus",
+            csrfToken,
+            [:]
+        ),
+        let userStatus = status["userStatus"] as? [String: Any],
+        let rawEmail = userStatus["email"] as? String else {
+            return nil
+        }
+        let email = rawEmail.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !email.isEmpty else { return nil }
+        let userTier = userStatus["userTier"] as? [String: Any]
+        let statusProjects = Self.embeddedProjectIds(in: [status, userStatus])
+        if Set(statusProjects.map { $0.lowercased() }).count > 1 { return nil }
+        let tierId = (userTier?["id"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let tierName = (userTier?["name"] as? String)?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return ActiveSession(
+            baseURL: baseURL,
+            csrfToken: csrfToken,
+            email: email,
+            tierId: tierId?.isEmpty == false ? tierId : nil,
+            tierName: tierName?.isEmpty == false ? tierName : nil,
+            projectId: statusProjects.first
+        )
+    }
+
     func probeActiveEmail() async -> String? {
-        await probeActiveSession()?.email
+        await probeActiveSession(allowCached: true)?.email
     }
 
     func fetchMatchingQuota(
@@ -131,14 +186,20 @@ struct AntigravityLocalQuotaReader: Sendable {
     ) async -> LocalQuotaResult? {
         guard let lhs = expectedEmail?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
               !lhs.isEmpty,
-              let session = await probeActiveSession(),
-              lhs == session.email.lowercased() else {
+              let preSession = await probeActiveSession(allowCached: false),
+              lhs == preSession.email.lowercased() else {
+            return nil
+        }
+        let normalizedExpectedProject = Self.normalizedProjectId(expectedProjectId)?.lowercased()
+        if let expectedProj = normalizedExpectedProject,
+           let preProj = preSession.projectId?.lowercased(),
+           preProj != expectedProj {
             return nil
         }
         guard let summary = await callRPC(
-            session.baseURL,
+            preSession.baseURL,
             "exa.language_server_pb.LanguageServerService/RetrieveUserQuotaSummary",
-            session.csrfToken,
+            preSession.csrfToken,
             ["request": [String: Any](), "forceRefresh": false]
         ) else { return nil }
 
@@ -149,15 +210,48 @@ struct AntigravityLocalQuotaReader: Sendable {
             (summary["userStatus"] as? [String: Any])?["email"] as? String,
             (payload["userStatus"] as? [String: Any])?["email"] as? String
         ]
+        var normalizedResponseEmails: [String] = []
         for rawEmbedded in embeddedEmails {
             if let embedded = rawEmbedded?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased(),
-               !embedded.isEmpty,
-               embedded != lhs {
-                return nil
+               !embedded.isEmpty {
+                if embedded != lhs {
+                    return nil
+                }
+                normalizedResponseEmails.append(embedded)
             }
         }
+        let responseHasMatchingEmail = normalizedResponseEmails.contains(lhs)
+        let responseEmbeddedProjects = Self.embeddedProjectIds(in: [
+            summary,
+            payload,
+            summary["userStatus"] as? [String: Any],
+            payload["userStatus"] as? [String: Any]
+        ])
+        if Set(responseEmbeddedProjects.map { $0.lowercased() }).count > 1 {
+            return nil
+        }
+        let needsProjectProof = (normalizedExpectedProject != nil || requireProjectMatch || preSession.projectId != nil)
+            && responseEmbeddedProjects.isEmpty
+
+        let verifiedSession: ActiveSession
+        if !responseHasMatchingEmail || needsProjectProof {
+            // Revalidate the live IDE session after acquiring an identity-less summary so an A->B switch cannot slip through.
+            guard let postSession = await probeSessionStatus(baseURL: preSession.baseURL, csrfToken: preSession.csrfToken) else {
+                sessionCache?.set(nil, now: Date())
+                return nil
+            }
+            sessionCache?.set(postSession, now: Date())
+            guard postSession.email.lowercased() == lhs,
+                  postSession.projectId?.lowercased() == preSession.projectId?.lowercased() else {
+                return nil
+            }
+            verifiedSession = postSession
+        } else {
+            verifiedSession = preSession
+        }
+
         let embeddedProjects = Self.embeddedProjectIds(in: [
-            session.projectId.map { ["projectId": $0] },
+            verifiedSession.projectId.map { ["projectId": $0] },
             summary,
             payload,
             summary["userStatus"] as? [String: Any],
@@ -167,7 +261,7 @@ struct AntigravityLocalQuotaReader: Sendable {
             return nil
         }
         let observedProjectId = embeddedProjects.first
-        if let normalizedExpectedProject = Self.normalizedProjectId(expectedProjectId)?.lowercased() {
+        if let normalizedExpectedProject {
             if let observedLower = observedProjectId?.lowercased(),
                observedLower != normalizedExpectedProject {
                 return nil
@@ -182,9 +276,9 @@ struct AntigravityLocalQuotaReader: Sendable {
             return nil
         }
         return LocalQuotaResult(
-            email: session.email,
-            tierId: session.tierId,
-            tierName: session.tierName,
+            email: verifiedSession.email,
+            tierId: verifiedSession.tierId,
+            tierName: verifiedSession.tierName,
             projectId: observedProjectId,
             models: models
         )
@@ -323,6 +417,13 @@ struct AntigravityLocalQuotaReader: Sendable {
         }
     }
 
+    private static func discoverPSFallbackServers() -> [ServerProcess] {
+        guard let output = runProcessCapture(executable: "/bin/ps", arguments: ["-axo", "pid=,args="]) else {
+            return []
+        }
+        return parseServerProcesses(fromPSOutput: output)
+    }
+
     private static func discoverRunningServers() -> [ServerProcess] {
         var combined: [ServerProcess] = []
         var seen = Set<String>()
@@ -334,9 +435,10 @@ struct AntigravityLocalQuotaReader: Sendable {
                 }
             }
         }
-        appendUnique(discoverDaemonHubServers())
-        if let output = runProcessCapture(executable: "/bin/ps", arguments: ["-axo", "pid=,args="]) {
-            appendUnique(parseServerProcesses(fromPSOutput: output))
+        let hubServers = discoverDaemonHubServers()
+        appendUnique(hubServers)
+        if hubServers.isEmpty {
+            appendUnique(discoverPSFallbackServers())
         }
         return combined
     }

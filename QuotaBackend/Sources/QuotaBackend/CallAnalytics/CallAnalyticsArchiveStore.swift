@@ -19,7 +19,7 @@ private let callAnalyticsArchiveLog = Logger(subsystem: "com.aiusage.quotabacken
 // 线程：本类仅由 CallAnalyticsEngine（actor）持有并访问，故无需自身做锁——访问被引擎 actor 串行化。
 
 /// 一天的冻结调用数据：该日全部归一化条目 + 该日各 agent 的被调用次数。
-struct CallAnalyticsDayBucket: Codable, Sendable {
+struct CallAnalyticsDayBucket: Codable, Sendable, Equatable {
     var entries: [CallAnalyticsEntry]
     var agentInvocations: [AgentInvocationCount]
 
@@ -59,21 +59,16 @@ final class CallAnalyticsArchiveStore {
         computed: [String: CallAnalyticsDayBucket],
         todayKey: String,
         completedFullHistory: Bool,
-        backfill: Bool = false
+        backfill: Bool = false,
+        preservedSources: Set<CallSourceKind> = []
     ) -> [String: CallAnalyticsDayBucket] {
         var archive = load()
         let isLegacyV1Migration = (archive.fullHistoryImportedAt == nil)
         var changed = false
 
         for (day, bucket) in computed where !bucket.isEmpty {
-            if day == todayKey {
-                var cleanBucket = bucket
-                for i in cleanBucket.entries.indices {
-                    cleanBucket.entries[i].reclassifiedBuiltinCount = 0
-                }
-                archive.days[day] = cleanBucket
-                changed = true
-            } else if backfill, var previous = archive.days[day] {
+            guard day != todayKey else { continue }
+            if backfill, var previous = archive.days[day] {
                 // Backfill missing calls without deleting history whose source sessions were removed.
                 previous = Self.migratedV1DayBucket(previous)
                 for entry in bucket.entries {
@@ -119,8 +114,26 @@ final class CallAnalyticsArchiveStore {
             }
         }
 
-        // 今天若重算为空（当天调用被全部删除）且归档里有今天 → 移除，避免显示陈旧的今天数据。
-        if (computed[todayKey]?.isEmpty ?? true), archive.days.removeValue(forKey: todayKey) != nil {
+        // Rebuild today's bucket from active sources while preserving already-archived excluded sources.
+        let existingToday = archive.days[todayKey]
+        let preservedEntries = preservedSources.isEmpty
+            ? []
+            : (existingToday?.entries.filter { preservedSources.contains($0.source) } ?? [])
+        let preservedInvocations = preservedSources.isEmpty
+            ? []
+            : (existingToday?.agentInvocations.filter { preservedSources.contains($0.source) } ?? [])
+        var recomputedToday = computed[todayKey] ?? .empty
+        for i in recomputedToday.entries.indices {
+            recomputedToday.entries[i].reclassifiedBuiltinCount = 0
+        }
+        recomputedToday.entries.append(contentsOf: preservedEntries)
+        recomputedToday.agentInvocations.append(contentsOf: preservedInvocations)
+        if recomputedToday.isEmpty {
+            if archive.days.removeValue(forKey: todayKey) != nil {
+                changed = true
+            }
+        } else if existingToday != recomputedToday {
+            archive.days[todayKey] = recomputedToday
             changed = true
         }
 

@@ -944,7 +944,9 @@ public actor ProviderEngine {
         credential: AccountCredential? = nil,
         key: String,
         version: Int,
-        useRecentResults: Bool
+        useRecentResults: Bool,
+        snapshotDocument: QuotaSnapshotDocument? = nil,
+        hasPreloadedSnapshotDocument: Bool = false
     ) -> ProviderResult? {
         if let providerId, let credential {
             guard isCredentialEligibleForDispatch(providerId: providerId, credential: credential) else {
@@ -989,7 +991,7 @@ public actor ProviderEngine {
         if !useRecentResults || providerId == "antigravity",
            let providerId,
            let credential,
-           let doc = snapshotStore?.loadDocument(),
+           let doc = hasPreloadedSnapshotDocument ? snapshotDocument : snapshotStore?.loadDocument(),
            let snap = QuotaSnapshotStore.matchingSnapshot(in: doc, for: credential) {
             let diskDate = SharedFormatters.parseISO8601(snap.fetchedAt)
             if let memoryCandidate,
@@ -1251,6 +1253,7 @@ public actor ProviderEngine {
                     }
                 }
 
+                let preloadedSnapshotDocument = snapshotStore?.loadDocument()
                 var results: [ProviderResult] = []
                 for credential in shuffledCredentials {
                     if let entry = localAndImmediateById[credential.id] ?? chosenRemoteResultById[credential.id] {
@@ -1266,7 +1269,9 @@ public actor ProviderEngine {
                         credential: credential,
                         key: key,
                         version: version,
-                        useRecentResults: useRecentResults
+                        useRecentResults: useRecentResults,
+                        snapshotDocument: preloadedSnapshotDocument,
+                        hasPreloadedSnapshotDocument: true
                     ) {
                         results.append(preserved)
                     }

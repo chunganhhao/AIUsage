@@ -115,7 +115,8 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         let priceCatalog = try? await ModelsDevPricingService.catalog()
         let providers = APIProviderStore.shared.providers.map(\.id)
         let profiles = NodeProfileStore.shared.profiles.map(\.id)
-        let openCodeNodes = OpenCodeNodeStore.shared.nodes.map(\.id)
+        let isOpenCodeVisible = AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+        let openCodeNodes = isOpenCodeVisible ? OpenCodeNodeStore.shared.nodes.map(\.id) : []
 
         // 先并发预取所有需要的上游列表，再按顺序落盘（落盘涉及主线程状态，串行更安全）。
         let specs = providers.compactMap { fetchSpec(for: .provider($0)) }
@@ -142,10 +143,14 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             if report.fetchError != nil { failures += 1 }
         }
 
+        let preservedOpenCodeKeys = isOpenCodeVisible
+            ? []
+            : Array(state.entries.keys.filter { $0.hasPrefix("opencode:") })
         pruneState(validKeys: Set(
             providers.map { Target.provider($0).stateKey }
                 + profiles.map { Target.profile($0).stateKey }
                 + openCodeNodes.map { Target.openCode($0).stateKey }
+                + preservedOpenCodeKeys
         ))
         state.lastRunAt = Date()
         lastRunAt = state.lastRunAt
