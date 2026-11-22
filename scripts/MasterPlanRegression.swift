@@ -82,6 +82,30 @@ private actor Attempts {
         try check(AppSettingsAddressFixture.remoteBaseURL(host: http.host, port: http.port) == "http://127.0.0.1:4319",
                   "loopback HTTP still uses the configured port")
     }
+    static func archiveRescanMetrics(_ home: URL) throws {
+        let archive = CallAnalyticsArchiveStore(homeDirectory: home.path)
+        let pastDay = "2026-11-10"
+        let today = "2026-11-11"
+        let archived = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 2,
+            outcomeKnownCount: 2, successCount: 0, durationSampleCount: 2, durationMsTotal: 1050
+        )
+        let rescanned = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 3,
+            outcomeKnownCount: 1, successCount: 1, durationSampleCount: 3, durationMsTotal: 150
+        )
+        try check(archived.avgDurationMs == 525 && rescanned.avgDurationMs == 50, "partial rescan duration fixture")
+        _ = archive.freeze(computed: [pastDay: .init(entries: [archived], agentInvocations: [])],
+                           todayKey: today, completedFullHistory: true)
+        let merged = archive.freeze(computed: [pastDay: .init(entries: [rescanned], agentInvocations: [])],
+                                    todayKey: today, completedFullHistory: true, backfill: true)[pastDay]?.entries.first
+        try check(merged?.count == 3, "partial rescan keeps the existing count merge")
+        try check(merged?.avgDurationMs == 50 && merged?.durationSampleCount == 3,
+                  "use the better-sampled 50 ms rescan; without call IDs the 287.5 ms union cannot be reconstructed")
+        try check(merged?.outcomeKnownCount == 2 && merged?.successRate == 0,
+                  "keep both archived outcome values when the archive has better coverage")
+    }
+
     static func analytics(_ home: URL) async throws {
         let actual = home.appendingPathComponent("archive")
         let sessions = home.appendingPathComponent(".codex/sessions")
@@ -102,8 +126,16 @@ private actor Attempts {
         let engine = CallAnalyticsEngine(homeDirectory: home.path, timeZone: TimeZone(secondsFromGMT: 0)!, environment: [:])
         let recovered = await engine.computeSnapshot(rangeKey: "all", cutoff: nil)
         try check(recovered.entries.contains(where: { $0.source == .codex }), "poisoned empty import self-recovers")
+        try check(recovered.entries.contains(where: { $0.source == .antigravity }), "visible Antigravity contributes calls")
+        let excluded = AgentVisibility.hiddenCallSources(hidden: [AppSection.antigravityManagement.rawValue])
+        try check(excluded == [.antigravity], "hiding Antigravity excludes just its call source")
+        let hidden = await engine.computeSnapshot(rangeKey: "all", cutoff: nil, excludedSources: excluded)
+        try check(!hidden.entries.contains(where: { $0.source == .antigravity })
+                    && !hidden.sources.contains(where: { $0.source == .antigravity }),
+                  "hidden Antigravity contributes neither calls nor scan status")
         let rescanned = await engine.computeSnapshot(rangeKey: "all", cutoff: nil, rescan: true)
         try check(rescanned.entries.filter { $0.source == .codex }.map(\.count) == recovered.entries.filter { $0.source == .codex }.map(\.count), "rescan idempotent")
+        try archiveRescanMetrics(home.appendingPathComponent("codex-rescan-metrics"))
 
         let modernHome = home.appendingPathComponent("codex-modern")
         let modernLines = [

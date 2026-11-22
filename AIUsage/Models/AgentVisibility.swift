@@ -70,7 +70,9 @@ enum AgentVisibility {
 
     /// 被隐藏 agent 对应的调用分析来源集合。
     static func hiddenCallSources(hidden: Set<String>) -> Set<CallSourceKind> {
-        Set(AgentKind.allCases.filter { isHidden($0, hidden: hidden) }.map(\.callSourceKind))
+        var sources = Set(AgentKind.allCases.filter { isHidden($0, hidden: hidden) }.map(\.callSourceKind))
+        if hidden.contains(AppSection.antigravityManagement.rawValue) { sources.insert(.antigravity) }
+        return sources
     }
 
     /// Catalog / live provider id → owning agent. Cursor 等订阅源没有对应侧边栏 agent。

@@ -80,10 +80,14 @@ final class CallAnalyticsArchiveStore {
                         addedCount = max(0, cleanedEntry.count - existing.count)
                         var merged = cleanedEntry
                         merged.count = max(cleanedEntry.count, existing.count)
-                        merged.outcomeKnownCount = min(merged.count, max(cleanedEntry.outcomeKnownCount, existing.outcomeKnownCount))
-                        merged.successCount = min(merged.outcomeKnownCount, max(cleanedEntry.successCount, existing.successCount))
-                        merged.durationSampleCount = min(merged.count, max(cleanedEntry.durationSampleCount, existing.durationSampleCount))
-                        merged.durationMsTotal = max(cleanedEntry.durationMsTotal, existing.durationMsTotal)
+                        if existing.outcomeKnownCount > cleanedEntry.outcomeKnownCount {
+                            merged.outcomeKnownCount = existing.outcomeKnownCount
+                            merged.successCount = existing.successCount
+                        }
+                        if existing.durationSampleCount > cleanedEntry.durationSampleCount {
+                            merged.durationSampleCount = existing.durationSampleCount
+                            merged.durationMsTotal = existing.durationMsTotal
+                        }
                         previous.entries[index] = merged
                     } else {
                         addedCount = cleanedEntry.count

@@ -257,7 +257,7 @@ struct TokenSaverRuntimeSection: View {
                 Button(saver.copiedDiagnostic ? L("✓ Copied!", "✓ 已复制！") : L("Copy optional agent diagnostic", "复制可选代理诊断提示词")) {
                     _ = saver.copyDiagnostic()
                 }
-                .disabled(saver.onboarding?.agentCommands == nil)
+                .disabled(saver.isRefreshingRules || saver.onboarding?.agentCommands == nil)
                 .accessibilityIdentifier("token-saver-setup-copy")
             }
             if saver.harness == .hermes {
@@ -372,6 +372,7 @@ final class TokenSaverSettingsController: ObservableObject {
     }
 
     func reloadFromExternalNotification() {
+        onboarding = nil
         do {
             settings = try TokenSaverSettingsStore.load(home: home)
             error = nil
@@ -496,7 +497,7 @@ final class TokenSaverSettingsController: ObservableObject {
 
     @discardableResult
     func copyDiagnostic() -> Bool {
-        guard let commands = onboarding?.agentCommands, copyToClipboard(commands) else {
+        guard !isRefreshingRules, let commands = onboarding?.agentCommands, copyToClipboard(commands) else {
             copiedDiagnostic = false
             return false
         }
