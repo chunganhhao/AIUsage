@@ -19,7 +19,13 @@ struct DashboardQuotaAttentionSection: View {
                 if SubscriptionAccountListLogic.hasQuotaAlert(entry) { return true }
                 let bucket = SubscriptionAccountListLogic.bucket(for: entry, isLoading: isLoading(entry))
                 switch bucket {
-                case .attention, .needsConnection, .offline:
+                case .attention, .needsConnection:
+                    return true
+                case .offline:
+                    if entry.providerId == "antigravity",
+                       entry.storedAccount?.credentialId != nil {
+                        return false
+                    }
                     return true
                 case .ready, .loading:
                     return false

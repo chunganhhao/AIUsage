@@ -16,6 +16,8 @@ public actor CallAnalyticsEngine {
     /// OpenCode 明细账本（issue #67 调用分析部分）：按 part.id upsert、读不到的不删，删 session 后调用明细不丢。
     private let opencodeLedger: OpenCodeCallLedgerStore
     private let claudeLedger: ClaudeCallLedgerStore
+    private let antigravitySource: AntigravityCallEventSource
+    private var checkedLegacyEmptyCodexArchive = false
 
     public init(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
@@ -28,6 +30,7 @@ public actor CallAnalyticsEngine {
         self.archive = CallAnalyticsArchiveStore(homeDirectory: homeDirectory)
         self.opencodeLedger = OpenCodeCallLedgerStore(homeDirectory: homeDirectory)
         self.claudeLedger = ClaudeCallLedgerStore(homeDirectory: homeDirectory)
+        self.antigravitySource = AntigravityCallEventSource(homeDirectory: homeDirectory, timeZone: timeZone)
     }
 
     /// 计算调用分析快照。
@@ -38,16 +41,26 @@ public actor CallAnalyticsEngine {
     ///
     /// 注：`cutoff` 既用于「按文件 mtime / 库时间」预筛跳过窗外文件（省 IO），也用于对**每条事件**按
     /// `dayKey` 精确过滤——后者保证「今日」只含今天的调用，不被跨天会话的旧调用串味。
-    public func computeSnapshot(rangeKey: String, cutoff: Date?, end: Date? = nil) -> CallAnalyticsSnapshot {
+    public func computeSnapshot(
+        rangeKey: String,
+        cutoff: Date?,
+        end: Date? = nil,
+        rescan: Bool = false,
+        excludedSources: Set<CallSourceKind> = []
+    ) -> CallAnalyticsSnapshot {
         let clock = CallAnalyticsClock(timeZone: timeZone)
         let todayKey = clock.dayKey(Date())
+        let excludeClaude = excludedSources.contains(.claude)
+        let excludeCodex = excludedSources.contains(.codex)
+        let excludeOpenCode = excludedSources.contains(.opencode)
+        let excludeAntigravity = excludedSources.contains(.antigravity)
 
         // 先建清单：OpenCode 已装 MCP server 名要回灌给其事件源做精确前缀匹配。
         // 清单（已装技能/MCP）读本地目录与配置，与会话无关，不需冻结。
         let inventory = CallAnalyticsInventory(homeDirectory: homeDirectory, environment: environment)
-        let installedSkills = inventory.installedSkills()
-        let installedMCP = inventory.installedMCPServers()
-        let openCodeServers = Set(installedMCP.filter { $0.source == .opencode }.map(\.name))
+        let installedSkills = inventory.installedSkills(excludedSources: excludedSources)
+        let installedMCP = inventory.installedMCPServers(excludedSources: excludedSources)
+        let openCodeServers = excludeOpenCode ? Set<String>() : Set(installedMCP.filter { $0.source == .opencode }.map(\.name))
 
         // Claude 按文件变化补采全目录，新增配置可补入过去日；Codex 保留既有冻结语义。
         // OpenCode 明细账本与日聚合归档是两套独立的全量导入标记，scan cutoff 也分开计算：
@@ -55,40 +68,72 @@ public actor CallAnalyticsEngine {
         // - opencode 账本未全量时也全量；已全量则从上次成功扫描游标带安全重叠补采
         //   （不能固定只扫今天，否则 23:xx 产生、00:xx 才首次同步的调用永久漏掉）。
         //   两者互不影响，避免因 opencode 一直无法全量（如未安装）导致 Claude/Codex 每轮全量扫。
-        let archiveNeedsFullImport = !archive.fullHistoryImported
-        let ledgerNeedsFullImport = !opencodeLedger.fullHistoryImported
+        // Repair the old symlink-import marker once per engine, not on every empty-source tick.
+        let repairLegacyCodexImport = !excludeCodex && !checkedLegacyEmptyCodexArchive && !archive.allDays.values.contains { $0.entries.contains { $0.source == .codex } }
+        if !excludeCodex {
+            checkedLegacyEmptyCodexArchive = true
+        }
+        let archiveNeedsFullImport = !excludeCodex && (rescan || !archive.fullHistoryImported || repairLegacyCodexImport)
         let nonOpenCodeScanCutoff: Date? = archiveNeedsFullImport ? nil : cutoff
-        let openCodeScanCutoff = Self.openCodeScanCutoff(
-            ledgerNeedsFullImport: ledgerNeedsFullImport,
-            lastSuccessfulScanDate: opencodeLedger.lastSuccessfulScanDate,
-            fallbackCutoff: cutoff
-        )
 
-        let claudeSource = ClaudeCallEventSource(homeDirectory: homeDirectory, timeZone: timeZone, environment: environment)
-        let legacyClaude = archive.allDays.mapValues { bucket in
+        let legacyClaude: [String: CallAnalyticsDayBucket] = excludeClaude ? [:] : archive.allDays.mapValues { bucket in
             CallAnalyticsDayBucket(entries: bucket.entries.filter { $0.source == .claude },
                 agentInvocations: bucket.agentInvocations.filter { $0.source == .claude })
         }
         let claude: (days: [String: CallAnalyticsDayBucket], status: CallSourceStatus)
-        do { claude = try claudeLedger.collect(source: claudeSource, legacy: legacyClaude) }
-        catch {
-            claude = (claudeLedger.retainedDays(legacy: legacyClaude), CallSourceStatus(source: .claude, available: false,
-                eventCount: 0, filesScanned: 0, errorCode: "ledger_io_failed"))
+        if excludeClaude {
+            claude = ([:], CallSourceStatus(source: .claude, available: false, eventCount: 0, filesScanned: 0, errorCode: nil))
+        } else {
+            let claudeSource = ClaudeCallEventSource(homeDirectory: homeDirectory, timeZone: timeZone, environment: environment)
+            do { claude = try claudeLedger.collect(source: claudeSource, legacy: legacyClaude) }
+            catch {
+                claude = (claudeLedger.retainedDays(legacy: legacyClaude), CallSourceStatus(source: .claude, available: false,
+                    eventCount: 0, filesScanned: 0, errorCode: "ledger_io_failed"))
+            }
         }
-        let codex = CodexCallEventSource(homeDirectory: homeDirectory, timeZone: timeZone, environment: environment)
-            .collect(cutoff: nonOpenCodeScanCutoff)
-        let opencodeRaw = OpenCodeCallEventSource(
-            homeDirectory: homeDirectory, timeZone: timeZone, environment: environment,
-            knownMCPServers: openCodeServers
-        ).collect(cutoff: openCodeScanCutoff)
+        let codex: (entries: [CallAnalyticsEntry], status: CallSourceStatus)
+        if excludeCodex {
+            codex = ([], CallSourceStatus(source: .codex, available: false, eventCount: 0, filesScanned: 0, errorCode: nil))
+        } else {
+            let codexServers = Set(installedMCP.filter { $0.source == .codex }.map(\.name))
+            codex = CodexCallEventSource(
+                homeDirectory: homeDirectory,
+                timeZone: timeZone,
+                environment: environment,
+                knownMCPServers: codexServers
+            ).collect(cutoff: nonOpenCodeScanCutoff)
+        }
+        let antigravity: (entries: [CallAnalyticsEntry], status: CallSourceStatus)
+        if excludeAntigravity {
+            antigravity = ([], CallSourceStatus(source: .antigravity, available: false, eventCount: 0, filesScanned: 0, errorCode: nil))
+        } else {
+            antigravity = antigravitySource.collect(cutoff: cutoff, rescan: rescan, knownMCPServers: Set(installedMCP.filter { $0.source == .antigravity }.map(\.name)))
+        }
+        let opencodeRaw: (entries: [OpenCodeCallLedgerEntry], status: CallSourceStatus)
+        let opencodeEntries: [CallAnalyticsEntry]
+        if excludeOpenCode {
+            opencodeRaw = ([], CallSourceStatus(source: .opencode, available: false, eventCount: 0, filesScanned: 0, errorCode: nil))
+            opencodeEntries = []
+        } else {
+            let ledgerNeedsFullImport = !opencodeLedger.fullHistoryImported
+            let openCodeScanCutoff = Self.openCodeScanCutoff(
+                ledgerNeedsFullImport: ledgerNeedsFullImport,
+                lastSuccessfulScanDate: opencodeLedger.lastSuccessfulScanDate,
+                fallbackCutoff: cutoff
+            )
+            opencodeRaw = OpenCodeCallEventSource(
+                homeDirectory: homeDirectory, timeZone: timeZone, environment: environment,
+                knownMCPServers: openCodeServers
+            ).collect(cutoff: openCodeScanCutoff)
 
-        // OpenCode 明细账本：issue #67 调用分析部分。按 part.id upsert、读不到的不删，
-        // 使删除 opencode 会话后已记录的调用明细不丢；再从账本聚合回计数条目。
-        // 只有本次扫描成功（DB 快照创建+查询+解析全成功）才推进游标与全量标记，
-        // 失败或目录不可用保留原状态下次重试。
-        let openCodeScanSucceeded = opencodeRaw.status.available && opencodeRaw.status.errorCode == nil
-        let opencodeLedgerEntries = opencodeLedger.merge(newEntries: opencodeRaw.entries, scanSucceeded: openCodeScanSucceeded)
-        let opencodeEntries = OpenCodeCallLedgerStore.aggregate(opencodeLedgerEntries)
+            // OpenCode 明细账本：issue #67 调用分析部分。按 part.id upsert、读不到的不删，
+            // 使删除 opencode 会话后已记录的调用明细不丢；再从账本聚合回计数条目。
+            // 只有本次扫描成功（DB 快照创建+查询+解析全成功）才推进游标与全量标记，
+            // 失败或目录不可用保留原状态下次重试。
+            let openCodeScanSucceeded = opencodeRaw.status.available && opencodeRaw.status.errorCode == nil
+            let opencodeLedgerEntries = opencodeLedger.merge(newEntries: opencodeRaw.entries, scanSucceeded: openCodeScanSucceeded)
+            opencodeEntries = OpenCodeCallLedgerStore.aggregate(opencodeLedgerEntries)
+        }
 
         // 实时结果按日分桶：Codex 走归档冻结；Claude 已在按文件账本中保留历史。
         // OpenCode 的过去日直接从账本聚合取——账本可补采历史日，而归档的「过去日首写冻结」
@@ -96,7 +141,7 @@ public actor CallAnalyticsEngine {
         var nonOpenCodeComputed: [String: CallAnalyticsDayBucket] = [:]
         for entry in codex.entries { nonOpenCodeComputed[entry.dayKey, default: .empty].entries.append(entry) }
         // 迁移失败时保留旧 Claude 归档，不能因 Codex 今日重算把唯一旧副本清掉。
-        if claude.status.errorCode != nil || !claude.status.available {
+        if !excludeClaude && (claude.status.errorCode != nil || !claude.status.available) {
             for (day, bucket) in legacyClaude where !bucket.isEmpty {
                 nonOpenCodeComputed[day, default: .empty].entries.append(contentsOf: bucket.entries)
                 nonOpenCodeComputed[day, default: .empty].agentInvocations.append(contentsOf: bucket.agentInvocations)
@@ -104,17 +149,23 @@ public actor CallAnalyticsEngine {
         }
 
         // 冻结 Codex → 拿回全量归档日（同时保留历史版本条目供迁移）。
-        let frozenDays = archive.freeze(computed: nonOpenCodeComputed, todayKey: todayKey, completedFullHistory: archiveNeedsFullImport)
+        let frozenDays = archive.freeze(
+            computed: nonOpenCodeComputed,
+            todayKey: todayKey,
+            completedFullHistory: archiveNeedsFullImport && (!codex.status.available || codex.status.filesScanned > 0),
+            backfill: archiveNeedsFullImport,
+            preservedSources: excludedSources
+        )
 
         // 展示组装：Claude 从文件账本，Codex 从冻结归档；
         // OpenCode 从账本聚合（含补采回的历史日，且删 session 不丢账）。
         // 旧归档 OpenCode 迁移：账本完成全量回填后，一次性计算旧归档相对账本聚合的残差并持久化，
         // 之后旧归档 OpenCode 条目让位残差（不再参与展示），避免与首次回填双计，也避免丢删会话独有记录。
-        if opencodeLedger.fullHistoryImported && !opencodeLedger.legacyArchiveMigrated {
+        if !excludeOpenCode && opencodeLedger.fullHistoryImported && !opencodeLedger.legacyArchiveMigrated {
             let legacyOpenCodeEntries = frozenDays.values.flatMap { $0.entries }.filter { $0.source == .opencode }
             opencodeLedger.migrateLegacyResidual(Self.residualEntries(legacy: legacyOpenCodeEntries, ledger: opencodeEntries))
         }
-        let residualOpenCodeEntries = opencodeLedger.legacyResidual
+        let residualOpenCodeEntries = excludeOpenCode ? [] : opencodeLedger.legacyResidual
         let lowerKey = cutoff.map { clock.dayKey($0) }
         let upperKey = end.map { clock.dayKey($0) }
         var entries: [CallAnalyticsEntry] = []
@@ -124,10 +175,10 @@ public actor CallAnalyticsEngine {
             if let upperKey, day > upperKey { continue }
             let deduped = Self.deduplicateLegacyOpenCode(
                 entries: bucket.entries,
-                legacyArchiveMigrated: opencodeLedger.legacyArchiveMigrated
+                legacyArchiveMigrated: !excludeOpenCode && opencodeLedger.legacyArchiveMigrated
             )
-            entries.append(contentsOf: deduped.filter { $0.source != .claude })
-            for inv in bucket.agentInvocations where inv.source != .claude {
+            entries.append(contentsOf: deduped.filter { $0.source != .claude && !excludedSources.contains($0.source) })
+            for inv in bucket.agentInvocations where inv.source != .claude && !excludedSources.contains(inv.source) {
                 agentTotals[AgentInvocationKey(source: inv.source, agent: inv.agent), default: 0] += inv.count
             }
         }
@@ -138,6 +189,11 @@ public actor CallAnalyticsEngine {
             for inv in bucket.agentInvocations {
                 agentTotals[AgentInvocationKey(source: inv.source, agent: inv.agent), default: 0] += inv.count
             }
+        }
+        for entry in antigravity.entries {
+            if let lowerKey, entry.dayKey < lowerKey { continue }
+            if let upperKey, entry.dayKey > upperKey { continue }
+            entries.append(entry)
         }
         for entry in opencodeEntries {
             if let lowerKey, entry.dayKey < lowerKey { continue }
@@ -155,7 +211,8 @@ public actor CallAnalyticsEngine {
 
         // 各源对外展示的「调用次数」以归档展示条目为准，避免页脚 M 次调用与上方 KPI 对不上；
         // available / filesScanned / errorCode 沿用本次实时扫描状态。
-        let rawStatuses = [claude.status, codex.status, opencodeRaw.status]
+        let rawStatuses = [claude.status, codex.status, opencodeRaw.status, antigravity.status]
+            .filter { !excludedSources.contains($0.source) }
         let statuses = rawStatuses.map { status -> CallSourceStatus in
             let count = entries.filter { $0.source == status.source }.reduce(0) { $0 + $1.count }
             return CallSourceStatus(
@@ -182,10 +239,10 @@ public actor CallAnalyticsEngine {
     /// 增量写入账本并冻结归档。不打开「调用分析」页也能持续记录，删除会话后已记录调用不丢。
     /// 复用 computeSnapshot 的账本 merge + 归档 freeze 副作用，丢弃展示快照；
     /// 频率由 App 侧 autoRefreshInterval 控制（默认 300s）。
-    public func syncToday() {
+    public func syncToday(excludedSources: Set<CallSourceKind> = []) {
         let clock = CallAnalyticsClock(timeZone: timeZone)
         let todayStart = clock.calendar.startOfDay(for: Date())
-        _ = computeSnapshot(rangeKey: "today", cutoff: todayStart, end: nil)
+        _ = computeSnapshot(rangeKey: "today", cutoff: todayStart, end: nil, excludedSources: excludedSources)
     }
 
     /// OpenCode 源的扫描下限：未完成全量 → nil（扫全历史）；已完成 → 从上次成功扫描

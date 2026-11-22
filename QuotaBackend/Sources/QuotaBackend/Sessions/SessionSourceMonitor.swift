@@ -13,6 +13,7 @@ public final class SessionSourceMonitor: @unchecked Sendable {
         var claude: String
         var codex: String
         var openCode: String
+        var antigravity: String = ""
     }
 
     private let environment: SessionEnvironment
@@ -21,7 +22,7 @@ public final class SessionSourceMonitor: @unchecked Sendable {
     private let queue = DispatchQueue(label: "AIUsage.SessionSourceMonitor")
     private var stream: FSEventStreamRef?
     private var watched: [String] = []
-    private var roots = Roots(claude: "", codex: "", openCode: "")
+    private var roots = Roots(claude: "", codex: "", openCode: "", antigravity: "")
 
     public init(
         environment: SessionEnvironment = SessionEnvironment(),
@@ -40,7 +41,7 @@ public final class SessionSourceMonitor: @unchecked Sendable {
     public func start() {
         queue.sync {
             let roots = Self.resolvedRoots(environment)
-            let paths = [roots.claude, roots.codex, roots.openCode].filter { path in
+            let paths = [roots.claude, roots.codex, roots.openCode, roots.antigravity].filter { path in
                 var isDirectory: ObjCBool = false
                 return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
             }
@@ -114,7 +115,8 @@ public final class SessionSourceMonitor: @unchecked Sendable {
         return Roots(
             claude: resolve(environment.claudeRoot),
             codex: resolve(environment.codexRoot),
-            openCode: resolve(environment.openCodeDataDirectory)
+            openCode: resolve(environment.openCodeDataDirectory),
+            antigravity: resolve(environment.antigravityRoot)
         )
     }
 
@@ -137,6 +139,15 @@ public final class SessionSourceMonitor: @unchecked Sendable {
         if let parts = components(of: path, under: roots.openCode) {
             if parts.count == 1 { return parts[0].hasPrefix("opencode.db") }
             return parts.count >= 2 && parts[0] == "storage" && ["session", "message", "part"].contains(parts[1])
+        }
+        if let parts = components(of: path, under: roots.antigravity) {
+            if parts.count == 1 { return parts[0].hasPrefix("conversation_summaries.db") }
+            if parts.first == "brain" {
+                return parts.count <= 2
+                    || (parts.count == 5 && parts[2] == ".system_generated" && parts[3] == "logs"
+                        && (parts[4] == "transcript.jsonl" || parts[4] == "transcript_full.jsonl"))
+            }
+            return false
         }
         return false
     }

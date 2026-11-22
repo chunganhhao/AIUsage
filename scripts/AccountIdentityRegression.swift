@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Network
 import SQLite3
@@ -40,7 +41,143 @@ struct AccountIdentityRegression {
         })
     }
 
+    static func decodePersistedHiddenFlag(from vaultURL: URL) throws -> Bool? {
+        let reopened = QuotaBackend.AccountCredentialStore(
+            readVaultData: {
+                guard FileManager.default.fileExists(atPath: vaultURL.path) else { return nil }
+                return try Data(contentsOf: vaultURL)
+            },
+            writeVaultData: { _ in }
+        )
+        guard let data = reopened.loadAuxiliaryData(forKey: "providerAccounts.registry") else { return nil }
+        let rows = try JSONDecoder().decode([StoredProviderAccount].self, from: data)
+        return rows.first?.isHidden
+    }
+
+    @MainActor
+    static func runSection12ChildWrite(vaultFileURL: URL, writeLogURL: URL) async throws {
+        final class ChildWriteController: @unchecked Sendable {
+            private let lock = NSLock()
+            let preLockSem = DispatchSemaphore(value: 0)
+            private var trapNextNonHidden = true
+            private var _didTrap = false
+            private var _staleReleased = false
+            private var _staleDone = false
+            private var _staleSuperseded = false
+            let logURL: URL
+
+            init(logURL: URL) { self.logURL = logURL }
+            var didTrap: Bool { lock.withLock { _didTrap } }
+            var staleDone: Bool { lock.withLock { _staleDone } }
+            var staleSuperseded: Bool { lock.withLock { _staleSuperseded } }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let isHidden = accounts.first?.isHidden == true
+                let shouldTrap: Bool = lock.withLock {
+                    if !isHidden && trapNextNonHidden {
+                        trapNextNonHidden = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = preLockSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                let line = ((accounts.first?.isHidden == true) ? "true" : "false") + "\n"
+                lock.withLock {
+                    if let handle = try? FileHandle(forWritingTo: logURL) {
+                        defer { try? handle.close() }
+                        _ = try? handle.seekToEnd()
+                        try? handle.write(contentsOf: Data(line.utf8))
+                    } else {
+                        try? Data(line.utf8).write(to: logURL)
+                    }
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                lock.withLock {
+                    guard accounts.first?.isHidden == false, _staleReleased else { return }
+                    _staleDone = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+
+            func releaseStale() {
+                lock.withLock { _staleReleased = true }
+                preLockSem.signal()
+            }
+        }
+
+        let controller = ChildWriteController(logURL: writeLogURL)
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: vaultFileURL,
+            beforeAcquireLock: { accounts, _ in controller.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in controller.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in controller.afterLock(accounts, outcome) }
+        )
+
+        let cred = credential(
+            "child-sec12",
+            workspace: "ws-child12",
+            user: "user-child12",
+            email: "child12@example.invalid",
+            path: "/tmp/identity-fixtures/child12/auth.json"
+        )
+        AccountCredentialStore.shared.credentials = [cred]
+        let liveCred = try live(cred)
+        let store = AccountStore.shared
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+
+        await store.reconcileAccountRegistry(with: [liveCred])
+        for _ in 0..<100 {
+            if controller.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(controller.didTrap, "[§12.1b-child] stale background write reached pre-lock boundary")
+
+        var callbackFired = false
+        store.hideAccount(entry(liveCred, store: store), onPostRegistryChange: { callbackFired = true })
+        check(callbackFired, "[§12.1b-child] hideAccount callback fired")
+
+        controller.releaseStale()
+        for _ in 0..<200 {
+            if controller.staleDone { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(controller.staleDone && controller.staleSuperseded, "[§12.1b-child] stale writer returned superseded without overwriting disk")
+    }
+
+    @MainActor
+    static func runSection12ChildReopen(vaultFileURL: URL) {
+        SecureAccountVault.shared.configureTestHooks(backingFileURL: vaultFileURL)
+        let store = AccountStore.shared
+        check(
+            store.accountRegistry.count == 1 && store.accountRegistry.first?.isHidden == true,
+            "[§12.1b-reopen] fresh process AccountStore.init reloads isHidden=true"
+        )
+    }
+
     @MainActor static func main() async throws {
+        let cliArgs = CommandLine.arguments
+        if cliArgs.count >= 4 && cliArgs[1] == "--section12-child-write" {
+            try await runSection12ChildWrite(
+                vaultFileURL: URL(fileURLWithPath: cliArgs[2]),
+                writeLogURL: URL(fileURLWithPath: cliArgs[3])
+            )
+            Darwin._exit(0)
+        }
+        if cliArgs.count >= 3 && cliArgs[1] == "--section12-child-reopen" {
+            runSection12ChildReopen(vaultFileURL: URL(fileURLWithPath: cliArgs[2]))
+            Darwin._exit(0)
+        }
+
         let store = AccountStore.shared
         let fingerprintA = ProviderAuthManager.codexSessionFingerprint(from: ["account_id": "business-1", "chatgpt_user_id": "a", "email": "same@example.invalid"])!
         let fingerprintB = ProviderAuthManager.codexSessionFingerprint(from: ["account_id": "business-1", "chatgpt_user_id": "b", "email": "same@example.invalid"])!
@@ -172,6 +309,7 @@ struct AccountIdentityRegression {
 
         // R1: 批量删除部分失败时，回调与返回值仅包含真正删除成功的账号（C），保留失败账号（B）且不清理托管文件。
         ProviderManagedImportStore.cleanupInvocations = 0
+        ProviderManagedImportStore.deletedCleanupCredentialIDs = []
         AccountCredentialStore.shared.failedDeleteIDs = ["b"]
         var callbackDeletedIDs: [String] = []
         let returnedDeleted = store.deleteAccounts([entry(liveB, store: store), entry(liveC, store: store)]) { deletedEntries in
@@ -194,8 +332,9 @@ struct AccountIdentityRegression {
         }
         check(callbackDeletedIDs == [liveB.id] && remainingDeleted.map(\.id) == [liveB.id],
               "R1: 重试删除 B 成功后回调仅传递 B")
-        check(ProviderManagedImportStore.cleanupInvocations == 1,
-              "R1: 全部请求凭据删除成功后正常清理托管导入")
+        check(ProviderManagedImportStore.cleanupInvocations == 1
+              && ProviderManagedImportStore.deletedCleanupCredentialIDs == ["b"],
+              "R1: 全部请求凭据删除成功后仅针对被删凭据触发托管导入清理")
         check(Set(store.accountRegistry.filter { !$0.isHidden }.compactMap(\.credentialId)) == ["a", "personal"], "批量删除仅移除选中的成员与空间")
         check(Set(AccountCredentialStore.shared.credentials.map(\.id)) == ["a", "personal"], "批量删除保留未选中凭据")
 
@@ -286,7 +425,1097 @@ struct AccountIdentityRegression {
         // AGY Switcher: Verify state.vscdb protobuf/JSON account switching, field preservation, snapshot recovery, and restart lifecycle.
         await testAntigravityAccountSwitcher()
 
+        // [M1] Non-Codex (Antigravity) Pause/Hide & Delete Tombstone Isolation: preserve credentialId, survive normalize & reconcile, exact engine exclusion filters.
+        try await testAntigravityHideAndTombstoneIsolation(store: store)
+
+        // [§54-AGY] Hidden Antigravity Connect-modal visibility & credential-reusing unhide without orphaned duplicates.
+        try await testAntigravityHiddenSessionReconnectAndDeduplication(store: store)
+
+        // lastSeenAt Keychain write throttling regression (Fix #3)
+        let refNow = Date(timeIntervalSince1970: 1_800_000_000)
+        check(AccountStore.shouldRefreshLastSeenAt(existing: nil, now: refNow),
+              "[PerfFix3] nil lastSeenAt requires refresh")
+        check(AccountStore.shouldRefreshLastSeenAt(existing: "   ", now: refNow),
+              "[PerfFix3] blank lastSeenAt requires refresh")
+        check(AccountStore.shouldRefreshLastSeenAt(existing: "not-a-date", now: refNow),
+              "[PerfFix3] unparseable lastSeenAt requires refresh")
+        check(!AccountStore.shouldRefreshLastSeenAt(
+            existing: SharedFormatters.iso8601String(from: refNow.addingTimeInterval(-899)),
+            now: refNow
+        ), "[PerfFix3] recent lastSeenAt (< 900s) skips rewrite")
+        check(AccountStore.shouldRefreshLastSeenAt(
+            existing: SharedFormatters.iso8601String(from: refNow.addingTimeInterval(-900)),
+            now: refNow
+        ), "[PerfFix3] stale lastSeenAt (>= 900s) triggers refresh")
+
+        let throttleCred = credential("throttle-codex", workspace: "ws-throttle", user: "user-throttle", email: "throttle@example.invalid")
+        try AccountCredentialStore.shared.saveCredential(throttleCred)
+        let throttleLive = try live(throttleCred)
+        let recentSeen = SharedFormatters.iso8601String(from: Date().addingTimeInterval(-60))
+        let staleSeen = SharedFormatters.iso8601String(from: Date().addingTimeInterval(-960))
+        store.accountRegistry = [
+            StoredProviderAccount(
+                id: "throttle-row",
+                providerId: "codex",
+                email: "throttle@example.invalid",
+                displayName: nil,
+                note: nil,
+                accountId: "ws-throttle",
+                providerResultId: throttleLive.id,
+                credentialId: throttleCred.id,
+                createdAt: staleSeen,
+                lastSeenAt: recentSeen,
+                isHidden: false,
+                isPermanentlyRemoved: false,
+                sourceFilePath: throttleCred.credential,
+                workspaceUserId: "user-throttle"
+            )
+        ]
+        let revBeforeRecentReconcile = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.lastSeenAt == recentSeen
+                && store.accountRegistryRevision == revBeforeRecentReconcile,
+              "[PerfFix3] unchanged account with recent lastSeenAt (<15m) triggers zero registry mutation/Keychain write")
+
+        // Real metadata updates still commit immediately even when lastSeenAt is recent
+        store.accountRegistry[0].sourceFilePath = "/tmp/identity-fixtures/old-path/auth.json"
+        let revBeforeMetaChange = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.sourceFilePath == throttleCred.credential
+                && store.accountRegistry.first?.lastSeenAt == recentSeen
+                && store.accountRegistryRevision > revBeforeMetaChange,
+              "[PerfFix3] real metadata change commits immediately while recent lastSeenAt remains unchurned")
+
+        // Stale lastSeenAt (>=15m) refreshes timestamp on reconcile
+        store.accountRegistry[0].lastSeenAt = staleSeen
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistry.first?.lastSeenAt != staleSeen
+                && store.accountRegistry.first?.lastSeenAt != nil,
+              "[PerfFix3] stale lastSeenAt (>=15m) updates during reconcile")
+
+        // [§6.3] Failed Keychain persist stays pending and retries on next valid identical poll without RAM/revision churn
+        final class SaveSpy: @unchecked Sendable {
+            private let lock = NSLock()
+            private var _attempts = 0
+            var failAttempts: Set<Int> = []
+            func recordAttempt() throws {
+                let attempt = lock.withLock {
+                    _attempts += 1
+                    return _attempts
+                }
+                if lock.withLock({ failAttempts.contains(attempt) }) {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+            var attempts: Int { lock.withLock { _attempts } }
+        }
+
+        let saveSpy = SaveSpy()
+        saveSpy.failAttempts = [1]
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            onPhysicalWrite: { _, _ in try saveSpy.recordAttempt() }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 20_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 1 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 1
+                && SecureAccountVault.shared.accounts.isEmpty
+                && store.accountRegistry.count == 1,
+              "[§6.3] failed Keychain save yields 1 attempt, 0 durable rows, 1 RAM row")
+
+        let revBeforeRetryPoll = store.accountRegistryRevision
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        check(store.accountRegistryRevision == revBeforeRetryPoll,
+              "[§6.3] identical retry poll does not mutate RAM or revision")
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 2 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 2
+                && SecureAccountVault.shared.accounts.count == 1,
+              "[§6.3] next identical poll while lastSeenAt is recent retries and persists row durably")
+
+        await store.reconcileAccountRegistry(with: [throttleLive])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        check(saveSpy.attempts == 2,
+              "[§6.3] pending retry clears after success so subsequent unchanged poll writes 0 times")
+
+        saveSpy.failAttempts = [3]
+        let throttleCredUpdated = credential(
+            "throttle-codex",
+            workspace: "ws-throttle",
+            user: "user-throttle",
+            email: "throttle@example.invalid",
+            path: "/tmp/identity-fixtures/throttle-codex-v2/auth.json"
+        )
+        let throttleLiveUpdated = try live(throttleCredUpdated)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 3 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 3, "[§6.3] second fail enters pending retry before user edit")
+
+        store.accountRegistry[0].displayName = "User Edited Name"
+        check(store.persistAccountRegistry(), "[§6.3] immediate user save commits synchronously")
+        try await Task.sleep(nanoseconds: 50_000_000)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 50_000_000)
+        check(saveSpy.attempts == 4
+                && SecureAccountVault.shared.accounts.first?.displayName == "User Edited Name",
+              "[§6.3] user save supersedes pending retry and is never overwritten")
+
+        store.accountRegistry[0].displayName = "Direct Persist Retry"
+        await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: store.accountRegistryRevision)
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<50 {
+            if saveSpy.attempts >= 5 { break }
+            try await Task.sleep(nanoseconds: 20_000_000)
+        }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(saveSpy.attempts == 5
+                && SecureAccountVault.shared.accounts.first?.displayName == "Direct Persist Retry",
+              "[§6.3] direct persistAccountRegistry failure is also retried on next valid poll")
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 1_500_000_000)
+
+        // [§8.1] Pre-lock background refresh write produces 0 physical writes and cannot overwrite user hideAccount
+        final class PreLockRaceHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            private let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNextNonHidden = true
+            private var staleReleased = false
+            private var _didTrap = false
+            private var _staleFinished = false
+            private var _staleSuperseded = false
+            private var _physicalWrites: [Bool] = []
+
+            var didTrap: Bool { stateLock.withLock { _didTrap } }
+            var staleFinished: Bool { stateLock.withLock { _staleFinished } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var physicalWrites: [Bool] { stateLock.withLock { _physicalWrites } }
+
+            func releaseTrappedWriter() {
+                stateLock.withLock { staleReleased = true }
+                releaseSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNextNonHidden && accounts.first?.isHidden == false {
+                        trapNextNonHidden = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                stateLock.withLock {
+                    _physicalWrites.append(accounts.first?.isHidden == true)
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                stateLock.withLock {
+                    guard accounts.first?.isHidden == false, staleReleased else { return }
+                    _staleFinished = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+        }
+
+        let raceHook = PreLockRaceHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in raceHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in raceHook.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in raceHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if raceHook.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(raceHook.didTrap, "[§8.1] background refresh reached pre-lock vault save boundary")
+        let revBeforeHide = store.accountRegistryRevision
+
+        // User hides the account while stale background write is paused before AccountCredentialStore.lock
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        check(store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true
+                && raceHook.physicalWrites == [true],
+              "[§8.1] hideAccount commits isHidden=true while stale background writer is trapped")
+
+        raceHook.releaseTrappedWriter()
+        for _ in 0..<100 {
+            if raceHook.staleFinished { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        try await Task.sleep(nanoseconds: 30_000_000)
+        check(raceHook.staleFinished
+                && raceHook.staleSuperseded
+                && raceHook.physicalWrites == [true]
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] stale background writer is superseded inside vault lock with 0 physical false writes")
+
+        let staleOutcome = try SecureAccountVault.shared.saveAccounts(
+            [store.accountRegistry[0]].map {
+                var copy = $0
+                copy.isHidden = false
+                return copy
+            },
+            revision: revBeforeHide
+        )
+        if case .superseded = staleOutcome {
+            // expected
+        } else {
+            check(false, "[§8.1] direct SecureAccountVault rejects stale revision commit")
+        }
+        check(raceHook.physicalWrites == [true]
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] SecureAccountVault leaves vault isHidden=true with 0 physical writes after rejecting stale revision")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 40_000_000)
+        check(raceHook.physicalWrites == [true]
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§8.1] subsequent identical poll preserves hidden state in RAM and vault")
+
+        // [Gatekeeper #2] Overlapping newer write failure never downgrades vault to older committed revision
+        final class NewerFailHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            private let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNextRev2 = true
+            private var _didTrapRev2 = false
+            var didTrapRev2: Bool { stateLock.withLock { _didTrapRev2 } }
+            func releaseRev2() { releaseSem.signal() }
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                guard accounts.first?.displayName == "Rev2" else { return }
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNextRev2 {
+                        trapNextRev2 = false
+                        _didTrapRev2 = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                if accounts.first?.displayName == "Rev3" {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+        }
+        let newerFailHook = NewerFailHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in newerFailHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in try newerFailHook.onWrite(accounts) }
+        )
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        var baseRow = store.accountRegistry[0]
+        baseRow.displayName = "Rev1"
+        _ = try SecureAccountVault.shared.saveAccounts([baseRow], revision: 1)
+        var rev2Row = baseRow
+        rev2Row.displayName = "Rev2"
+        var rev3Row = baseRow
+        rev3Row.displayName = "Rev3"
+
+        let rev2Task = Task.detached {
+            _ = try? SecureAccountVault.shared.saveAccounts([rev2Row], revision: 2)
+        }
+        for _ in 0..<100 {
+            if newerFailHook.didTrapRev2 { break }
+            try await Task.sleep(nanoseconds: 5_000_000)
+        }
+        var rev3Threw = false
+        do {
+            _ = try SecureAccountVault.shared.saveAccounts([rev3Row], revision: 3)
+        } catch {
+            rev3Threw = true
+        }
+        check(rev3Threw && SecureAccountVault.shared.committedRevision == 1,
+              "[Gatekeeper #2] rev3 failure preserves committed revision 1")
+        newerFailHook.releaseRev2()
+        await rev2Task.value
+        check(SecureAccountVault.shared.accounts.first?.displayName == "Rev2"
+                && SecureAccountVault.shared.committedRevision == 2,
+              "[Gatekeeper #2] rev2 completion commits rev2 and is not downgraded back to rev1 after rev3 failure")
+
+        // [§10.1] Reversed post-unlock completion order still produces strictly [true] physical writes (stale writer never writes)
+        final class PostUnlockOrderHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            let preLockSem = DispatchSemaphore(value: 0)
+            let postUnlockSem = DispatchSemaphore(value: 0)
+            private var trapNonHiddenPreLock = true
+            private var trapHiddenPostUnlock = true
+            private var staleReleased = false
+            private var _didTrapPreLock = false
+            private var _didTrapPostUnlock = false
+            private var _oldFinishedAfterRelease = false
+            private var _staleSuperseded = false
+            private var _writeOrder: [Bool] = []
+
+            var didTrapPreLock: Bool { stateLock.withLock { _didTrapPreLock } }
+            var didTrapPostUnlock: Bool { stateLock.withLock { _didTrapPostUnlock } }
+            var oldFinishedAfterRelease: Bool { stateLock.withLock { _oldFinishedAfterRelease } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var writeOrder: [Bool] { stateLock.withLock { _writeOrder } }
+
+            func releaseStale() {
+                stateLock.withLock { staleReleased = true }
+                preLockSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let isHidden = accounts.first?.isHidden == true
+                let holdPreLock: Bool = stateLock.withLock {
+                    if !isHidden && trapNonHiddenPreLock {
+                        trapNonHiddenPreLock = false
+                        _didTrapPreLock = true
+                        return true
+                    }
+                    return false
+                }
+                if holdPreLock {
+                    _ = preLockSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func recordPhysicalWrite(_ accounts: [StoredProviderAccount]) {
+                stateLock.withLock { _writeOrder.append(accounts.first?.isHidden == true) }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                let isHidden = accounts.first?.isHidden == true
+                if !isHidden {
+                    stateLock.withLock {
+                        guard staleReleased else { return }
+                        _oldFinishedAfterRelease = true
+                        if case .superseded = outcome {
+                            _staleSuperseded = true
+                        }
+                    }
+                    return
+                }
+                let holdPostUnlock: Bool = stateLock.withLock {
+                    if isHidden && trapHiddenPostUnlock {
+                        trapHiddenPostUnlock = false
+                        _didTrapPostUnlock = true
+                        return true
+                    }
+                    return false
+                }
+                if holdPostUnlock {
+                    _ = postUnlockSem.wait(timeout: .now() + 5)
+                }
+            }
+        }
+
+        let orderHook = PostUnlockOrderHook()
+        SecureAccountVault.shared.configureTestHooks(
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in orderHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in orderHook.recordPhysicalWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in orderHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if orderHook.didTrapPreLock { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(orderHook.didTrapPreLock, "[§10.1] background non-hidden write paused before vault lock")
+
+        let releaseOrchestrator = Task.detached {
+            for _ in 0..<200 {
+                if orderHook.didTrapPostUnlock { break }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            // Release older write so it enters vault lock and returns FIRST
+            orderHook.releaseStale()
+            for _ in 0..<200 {
+                if orderHook.oldFinishedAfterRelease { break }
+                try? await Task.sleep(nanoseconds: 5_000_000)
+            }
+            try? await Task.sleep(nanoseconds: 20_000_000)
+            // Now let hideAccount return SECOND
+            orderHook.postUnlockSem.signal()
+        }
+
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        await releaseOrchestrator.value
+        check(orderHook.didTrapPostUnlock
+                && orderHook.staleSuperseded
+                && orderHook.writeOrder == [true]
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == true,
+              "[§10.1] reversed return order still rejects stale write inside vault lock with writeOrder == [true]")
+
+        // [§12.1a] Disk-backed vault + simulated Keychain failure after hideAccount preserves durable isHidden=true without replay
+        let sec12TempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-section12-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: sec12TempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: sec12TempDir) }
+
+        final class DiskDurabilityHook: @unchecked Sendable {
+            private let stateLock = NSLock()
+            let releaseSem = DispatchSemaphore(value: 0)
+            private var trapNonHiddenPreLock = true
+            private var failSubsequentWrites = false
+            private var staleReleased = false
+            private var _didTrap = false
+            private var _staleDone = false
+            private var _staleSuperseded = false
+            private var _writes: [Bool] = []
+
+            var didTrap: Bool { stateLock.withLock { _didTrap } }
+            var staleDone: Bool { stateLock.withLock { _staleDone } }
+            var staleSuperseded: Bool { stateLock.withLock { _staleSuperseded } }
+            var writes: [Bool] { stateLock.withLock { _writes } }
+
+            func armFailAndReleaseStale() {
+                stateLock.withLock {
+                    failSubsequentWrites = true
+                    staleReleased = true
+                }
+                releaseSem.signal()
+            }
+
+            func beforeLock(_ accounts: [StoredProviderAccount]) {
+                let shouldTrap: Bool = stateLock.withLock {
+                    if trapNonHiddenPreLock && accounts.first?.isHidden == false {
+                        trapNonHiddenPreLock = false
+                        _didTrap = true
+                        return true
+                    }
+                    return false
+                }
+                if shouldTrap {
+                    _ = releaseSem.wait(timeout: .now() + 5)
+                }
+            }
+
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                let shouldFail = stateLock.withLock {
+                    _writes.append(accounts.first?.isHidden == true)
+                    return failSubsequentWrites
+                }
+                if shouldFail {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+            }
+
+            func afterLock(_ accounts: [StoredProviderAccount], _ outcome: AccountRegistrySaveOutcome) {
+                stateLock.withLock {
+                    guard staleReleased && accounts.first?.isHidden == false else { return }
+                    _staleDone = true
+                    if case .superseded(_, let committed) = outcome {
+                        _staleSuperseded = committed?.first?.isHidden == true
+                    }
+                }
+            }
+        }
+
+        let diskVaultURL = sec12TempDir.appendingPathComponent("disk-vault.json")
+        let diskHook = DiskDurabilityHook()
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: diskVaultURL,
+            resetStore: true,
+            beforeAcquireLock: { accounts, _ in diskHook.beforeLock(accounts) },
+            onPhysicalWrite: { _, accounts in try diskHook.onWrite(accounts) },
+            afterReleaseLock: { accounts, _, outcome in diskHook.afterLock(accounts, outcome) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 15_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if diskHook.didTrap { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        check(diskHook.didTrap, "[§12.1a] stale background write trapped before vault lock")
+
+        var hideCallbackFired = false
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: { hideCallbackFired = true })
+        let hiddenOnDiskAfterHide = try decodePersistedHiddenFlag(from: diskVaultURL)
+        check(hideCallbackFired
+                && diskHook.writes == [true]
+                && hiddenOnDiskAfterHide == true,
+              "[§12.1a] hideAccount commits isHidden=true to disk immediately before callback returns")
+
+        diskHook.armFailAndReleaseStale()
+        for _ in 0..<100 {
+            if diskHook.staleDone { break }
+            try await Task.sleep(nanoseconds: 10_000_000)
+        }
+        let hiddenOnDiskAfterStale = try decodePersistedHiddenFlag(from: diskVaultURL)
+        check(diskHook.staleDone
+                && diskHook.staleSuperseded
+                && diskHook.writes == [true]
+                && hiddenOnDiskAfterStale == true,
+              "[§12.1a] stale writer produces 0 physical writes and fresh disk reopen still reads isHidden=true")
+
+        // [§12.1b] Cross-process _exit(0) after stale writer release + fresh process AccountStore.init() reopen
+        let childVaultURL = sec12TempDir.appendingPathComponent("child-vault.json")
+        let childLogURL = sec12TempDir.appendingPathComponent("child-writes.log")
+        let writeChild = Process()
+        writeChild.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        writeChild.arguments = ["--section12-child-write", childVaultURL.path, childLogURL.path]
+        try writeChild.run()
+        writeChild.waitUntilExit()
+        check(writeChild.terminationStatus == 0, "[§12.1b] child write + stale release + _exit(0) succeeded")
+        let loggedWrites = try String(contentsOf: childLogURL, encoding: .utf8)
+            .split(separator: "\n")
+            .map(String.init)
+        let childHiddenOnDisk = try decodePersistedHiddenFlag(from: childVaultURL)
+        check(loggedWrites == ["true"] && childHiddenOnDisk == true,
+              "[§12.1b] child process logged strictly [true] physical writes on disk")
+
+        let reopenChild = Process()
+        reopenChild.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+        reopenChild.arguments = ["--section12-child-reopen", childVaultURL.path]
+        try reopenChild.run()
+        reopenChild.waitUntilExit()
+        check(reopenChild.terminationStatus == 0,
+              "[§12.1b] fresh child process AccountStore.init() reopened isHidden=true from disk")
+
+        // [§12.1c] Failed latest-revision hideAccount retries on first unchanged poll even with late older ack
+        final class LatestFailureRetryHook: @unchecked Sendable {
+            private let lock = NSLock()
+            private var failNextHiddenWrite = false
+            private var _writes: [Bool] = []
+            var writes: [Bool] { lock.withLock { _writes } }
+            func setFailNextHidden(_ value: Bool) { lock.withLock { failNextHiddenWrite = value } }
+            func onWrite(_ accounts: [StoredProviderAccount]) throws {
+                let isHidden = accounts.first?.isHidden == true
+                let shouldFail = lock.withLock {
+                    if isHidden && failNextHiddenWrite {
+                        failNextHiddenWrite = false
+                        return true
+                    }
+                    return false
+                }
+                if shouldFail {
+                    throw CredentialStoreError.keychainWriteFailed(-25291)
+                }
+                lock.withLock { _writes.append(isHidden) }
+            }
+        }
+
+        let retryHook = LatestFailureRetryHook()
+        SecureAccountVault.shared.configureTestHooks(
+            backingFileURL: nil,
+            resetStore: true,
+            onPhysicalWrite: { _, accounts in try retryHook.onWrite(accounts) }
+        )
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+        store.accountRegistry = []
+        SecureAccountVault.shared.accounts = []
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([], revision: store.accountRegistryRevision)
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        for _ in 0..<100 {
+            if retryHook.writes == [false] { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        try await Task.sleep(nanoseconds: 25_000_000)
+        let r1Rev = store.accountRegistryRevision
+        let r1Snapshot = store.accountRegistry
+        check(retryHook.writes == [false] && SecureAccountVault.shared.committedRevision == r1Rev,
+              "[§12.1c] initial non-hidden snapshot committed cleanly")
+
+        retryHook.setFailNextHidden(true)
+        store.hideAccount(entry(throttleLiveUpdated, store: store), onPostRegistryChange: {})
+        let r2Rev = store.accountRegistryRevision
+        check(r2Rev > r1Rev
+                && store.accountRegistry.first?.isHidden == true
+                && SecureAccountVault.shared.accounts.first?.isHidden == false
+                && SecureAccountVault.shared.committedRevision == r1Rev,
+              "[§12.1c] failed latest hideAccount keeps RAM isHidden=true and vault isHidden=false")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 15_000_000)
+        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(r1Snapshot, revision: r1Rev)
+        for _ in 0..<100 {
+            if SecureAccountVault.shared.accounts.first?.isHidden == true { break }
+            try await Task.sleep(nanoseconds: 15_000_000)
+        }
+        check(SecureAccountVault.shared.accounts.first?.isHidden == true
+                && SecureAccountVault.shared.committedRevision == r2Rev
+                && retryHook.writes == [false, true],
+              "[§12.1c] late older ack does not cancel first-poll retry of failed latest hideAccount")
+
+        await store.reconcileAccountRegistry(with: [throttleLiveUpdated])
+        try await Task.sleep(nanoseconds: 80_000_000)
+        check(retryHook.writes == [false, true],
+              "[§12.1c] subsequent identical poll after recovery writes 0 extra times")
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+
+        // [§8.2] Older detached events arriving during newer debounce never cancel newer commit
+        for variant in ["schedulePersist", "notePersistedSnapshot", "noteFailedPersist"] {
+            SecureAccountVault.shared.configureTestHooks(resetStore: true)
+            await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 60_000_000)
+            var row = StoredProviderAccount(
+                id: "throttle-row-\(variant)",
+                providerId: "codex",
+                email: "throttle@example.invalid",
+                displayName: "Initial-\(variant)",
+                note: nil,
+                accountId: "ws-throttle",
+                providerResultId: throttleLiveUpdated.id,
+                credentialId: throttleCredUpdated.id,
+                createdAt: staleSeen,
+                lastSeenAt: recentSeen,
+                isHidden: false,
+                isPermanentlyRemoved: false,
+                sourceFilePath: throttleCredUpdated.credential,
+                workspaceUserId: "user-throttle"
+            )
+            store.accountRegistry = [row]
+            let initialRev = store.accountRegistryRevision
+            SecureAccountVault.shared.accounts = [row]
+            await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([row], revision: initialRev)
+
+            row.displayName = "Older-\(variant)"
+            let olderRow = row
+            store.accountRegistry = [olderRow]
+            let olderRev = store.accountRegistryRevision
+
+            row.displayName = "Newest-\(variant)"
+            let newestRow = row
+            store.accountRegistry = [newestRow]
+            let newerRev = store.accountRegistryRevision
+
+            let newerTask = Task.detached {
+                await AccountRegistryRefreshWorker.shared.schedulePersist([newestRow], revision: newerRev)
+            }
+            try await Task.sleep(nanoseconds: 15_000_000)
+
+            switch variant {
+            case "schedulePersist":
+                await AccountRegistryRefreshWorker.shared.schedulePersist([olderRow], revision: olderRev)
+            case "notePersistedSnapshot":
+                await AccountRegistryRefreshWorker.shared.notePersistedSnapshot([olderRow], revision: olderRev)
+            default:
+                await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: olderRev)
+            }
+
+            await newerTask.value
+            check(SecureAccountVault.shared.accounts.first?.displayName == "Newest-\(variant)",
+                  "[§8.2] older \(variant) during newer debounce does not drop newer snapshot")
+        }
+
+        SecureAccountVault.shared.configureTestHooks()
+        await AccountRegistryRefreshWorker.shared.configurePersistForTesting(debounceNanoseconds: 1_500_000_000)
+
         print("PASS: \(assertions) account identity & OAuth assertions (production save/reconcile/hide/delete/OAuth, isolated storage)")
+    }
+
+    @MainActor
+    static func testAntigravityHideAndTombstoneIsolation(store: AccountStore) async throws {
+        store.accountRegistry = []
+        AccountCredentialStore.shared.credentials = []
+
+        let agyActive = AccountCredential(
+            id: "agy-cred-1",
+            providerId: "antigravity",
+            accountLabel: "paused@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-fixtures/paused.json",
+            metadata: ["projectId": "proj-1", "accountEmail": "paused@example.invalid"]
+        )
+        let agyPeer = AccountCredential(
+            id: "agy-cred-2",
+            providerId: "antigravity",
+            accountLabel: "peer@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-fixtures/peer.json",
+            metadata: ["projectId": "proj-2", "accountEmail": "peer@example.invalid"]
+        )
+        try AccountCredentialStore.shared.saveCredential(agyActive)
+        try AccountCredentialStore.shared.saveCredential(agyPeer)
+
+        check(store.saveAccount(
+            providerId: "antigravity",
+            email: "paused@example.invalid",
+            displayName: "Paused AGY",
+            accountId: "proj-1",
+            credentialId: "agy-cred-1",
+            ensureProviderSelected: { _ in }
+        ), "[M1] save AGY paused candidate")
+        check(store.saveAccount(
+            providerId: "antigravity",
+            email: "peer@example.invalid",
+            displayName: "Peer AGY",
+            accountId: "proj-2",
+            credentialId: "agy-cred-2",
+            ensureProviderSelected: { _ in }
+        ), "[M1] save AGY peer candidate")
+
+        func agyLive(_ cred: AccountCredential, withPath: Bool = true) throws -> ProviderData {
+            var usage = ProviderUsage(provider: "antigravity", label: "Antigravity")
+            usage.usageAccountId = cred.metadata["projectId"]
+            usage.accountEmail = cred.accountLabel
+            var summary = UsageNormalizer.normalize(provider: AntigravityProvider(), usage: usage)
+            summary.id = "antigravity:cred:\(cred.id)"
+            summary.sourceFilePath = withPath ? cred.credential : nil
+            return try JSONDecoder().decode(ProviderData.self, from: JSONEncoder().encode(summary))
+        }
+
+        let livePaused = try agyLive(agyActive)
+        let livePausedLateNoPath = try agyLive(agyActive, withPath: false)
+        let livePeer = try agyLive(agyPeer)
+
+        // Soft-hide agy-cred-1
+        let pausedEntry = ProviderAccountEntry(
+            id: livePaused.id,
+            providerId: "antigravity",
+            providerTitle: "Antigravity",
+            providerSubtitle: nil,
+            liveProvider: livePaused,
+            storedAccount: store.accountRegistry.first { $0.credentialId == "agy-cred-1" }
+        )
+        store.hideAccount(pausedEntry, onPostRegistryChange: {})
+        let hiddenRow = store.hiddenAccounts().first { $0.providerId == "antigravity" }
+        check(hiddenRow != nil && hiddenRow?.credentialId == "agy-cred-1",
+              "[M1] soft-hide preserves credentialId for Antigravity")
+        check(store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] excludedEngineAccountFilters includes soft-hidden Antigravity credential")
+
+        // Normalize & reconcile with late response (including path-less live result) must NEVER un-hide agy-cred-1
+        _ = store.normalizeAccountRegistryAgainstCredentials()
+        await store.reconcileAccountRegistry(with: [livePaused, livePausedLateNoPath, livePeer])
+        check(store.hiddenAccounts().count == 1 && store.accountRegistry.filter { $0.providerId == "antigravity" && !$0.isHidden }.count == 1,
+              "[M1] normalize + reconcile never unhides soft-hidden Antigravity or duplicates peer")
+
+        // Explicit restore brings agy-cred-1 back and clears engine exclusion
+        store.restoreAccount(hiddenRow!.id, onRestored: { _ in })
+        check(store.hiddenAccounts().isEmpty && !store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] explicit restore lifts soft-hide and updates engine filter")
+
+        // Delete creates permanent tombstone; late reconcile with live result must NEVER resurrect tombstone
+        let restoredEntry = ProviderAccountEntry(
+            id: livePaused.id,
+            providerId: "antigravity",
+            providerTitle: "Antigravity",
+            providerSubtitle: nil,
+            liveProvider: livePaused,
+            storedAccount: store.accountRegistry.first { $0.credentialId == "agy-cred-1" }
+        )
+        store.deleteAccount(restoredEntry, onPostRegistryDelete: {})
+        try AccountCredentialStore.shared.saveCredential(agyActive) // simulate race where cred wasn't gone yet
+        await store.reconcileAccountRegistry(with: [livePaused, livePeer])
+        check(store.accountRegistry.contains(where: { $0.providerId == "antigravity" && $0.isPermanentlyRemoved && $0.credentialId == nil }),
+              "[M1] permanent tombstone stays permanentlyRemoved without credential re-attachment on reconcile")
+        check(store.excludedEngineAccountFilters().credentialIDs.contains("agy-cred-1"),
+              "[M1] tombstoned providerResultId keeps credentialId excluded from engine")
+        check(store.hasHiddenRegistryMatch(providerId: "antigravity", normalizedEmail: "paused@example.invalid", normalizedAccountId: "proj-1", sourceFilePath: "/tmp/new-ephemeral-copy/uuid2.json"),
+              "[M1] tombstoned Antigravity IDE session suppresses ephemeral copy even with new UUID path")
+        check(!store.hasHiddenRegistryMatch(providerId: "antigravity", normalizedEmail: "paused@example.invalid", normalizedAccountId: "proj-other", sourceFilePath: "/tmp/new-ephemeral-copy/uuid3.json"),
+              "[M1] distinct projectId with same email is not suppressed by Antigravity tombstone")
+    }
+
+    @MainActor
+    static func testAntigravityHiddenSessionReconnectAndDeduplication(store: AccountStore) async throws {
+        store.accountRegistry = []
+        AccountCredentialStore.shared.credentials = []
+
+        let existingCred = AccountCredential(
+            id: "agy-hidden-1",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-hidden/hidden.json",
+            metadata: [
+                "projectId": "aicode-consumers",
+                "accountEmail": "hidden-reconnect@example.invalid",
+                "accountHandle": "hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid"
+            ]
+        )
+        try AccountCredentialStore.shared.saveCredential(existingCred)
+
+        // Include an orphaned hidden row for the same project, the hidden credential-backed row,
+        // a permanent tombstone, and an unrelated soft-hidden project row under the same email.
+        store.accountRegistry = [
+            StoredProviderAccount(
+                id: "orphan-hidden-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "aicode-consumers",
+                providerResultId: "antigravity:cred:deleted-stale-cred",
+                credentialId: nil,
+                createdAt: "2026-11-10T00:00:00Z",
+                lastSeenAt: "2026-11-10T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/stale-oauth.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "hidden-cred-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "aicode-consumers",
+                providerResultId: "antigravity:cred:agy-hidden-1",
+                credentialId: "agy-hidden-1",
+                createdAt: "2026-11-11T00:00:00Z",
+                lastSeenAt: "2026-11-11T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/agy-hidden/hidden.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "tombstone-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "tombstoned-proj",
+                providerResultId: "antigravity:cred:tombstoned-dead-cred",
+                credentialId: nil,
+                createdAt: "2026-11-09T00:00:00Z",
+                lastSeenAt: "2026-11-09T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: true,
+                sourceFilePath: "/tmp/tombstoned.json",
+                workspaceUserId: nil
+            ),
+            StoredProviderAccount(
+                id: "orphan-other-proj-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "other-project",
+                providerResultId: "antigravity:cred:deleted-other-cred",
+                credentialId: nil,
+                createdAt: "2026-11-08T00:00:00Z",
+                lastSeenAt: "2026-11-08T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/other-proj.json",
+                workspaceUserId: nil
+            )
+        ]
+
+        let candidate = ProviderAuthCandidate(
+            id: "antigravity:antigravity-ide:hidden-reconnect@example.invalid",
+            providerId: "antigravity",
+            sourceIdentifier: "antigravity-ide:hidden-reconnect@example.invalid",
+            sessionFingerprint: "hidden-reconnect@example.invalid",
+            title: "hidden-reconnect@example.invalid",
+            subtitle: nil,
+            detail: "",
+            modifiedAt: Date(),
+            authMethod: .authFile,
+            credentialValue: "/tmp/new-ide-copy.json",
+            sourcePath: "/tmp/new-ide-copy.json",
+            shouldCopyFile: false,
+            identityScope: .sharedSource
+        )
+
+        check(
+            ProviderAuthManager.isCandidateManaged(
+                candidate,
+                monitored: ProviderAuthManager.monitoredSessions(for: "antigravity", includeHidden: true)
+            ),
+            "[§54-AGY] includeHidden: true keeps hidden Antigravity session suppressed in background discovery"
+        )
+        check(
+            !ProviderAuthManager.isCandidateManaged(
+                candidate,
+                monitored: ProviderAuthManager.monitoredSessions(for: "antigravity", includeHidden: false)
+            ),
+            "[§54-AGY] includeHidden: false surfaces soft-hidden Antigravity session as connectable in Connect dialog"
+        )
+
+        let incomingCred = AccountCredential(
+            id: "new-ephemeral-id",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy.json",
+            metadata: [
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        var incomingUsage = ProviderUsage(provider: "antigravity", label: "Antigravity")
+        incomingUsage.accountEmail = "hidden-reconnect@example.invalid"
+        incomingUsage.usageAccountId = "hidden-reconnect@example.invalid"
+
+        let resultId = try store.registerAuthenticatedCredential(
+            incomingCred,
+            usage: incomingUsage,
+            note: nil,
+            providerDisplayTitle: "Antigravity",
+            insertImmediateProviderData: { _, _, _, _ in },
+            ensureProviderSelected: { _ in }
+        )
+
+        check(resultId == "antigravity:cred:agy-hidden-1",
+              "[§54-AGY] reconnect from project-less IDE candidate reuses existing Antigravity credential ID")
+        let savedCred = AccountCredentialStore.shared.loadCredential(providerId: "antigravity", credentialId: "agy-hidden-1")
+        check(savedCred?.metadata["projectId"] == "aicode-consumers",
+              "[§54-AGY] reconnect preserves existing projectId metadata on reused credential")
+        let agyRows = store.accountRegistry.filter {
+            $0.providerId == "antigravity" && $0.normalizedEmail == "hidden-reconnect@example.invalid"
+        }
+        check(agyRows.contains(where: {
+                $0.id == "hidden-cred-row"
+                    && $0.credentialId == "agy-hidden-1"
+                    && $0.accountId == "aicode-consumers"
+                    && !$0.isHidden
+                    && !$0.isPermanentlyRemoved
+              })
+                && !agyRows.contains(where: { $0.id == "orphan-hidden-row" })
+                && agyRows.contains(where: { $0.id == "tombstone-row" && $0.isHidden && $0.isPermanentlyRemoved })
+                && agyRows.contains(where: { $0.id == "orphan-other-proj-row" && $0.isHidden && $0.accountId == "other-project" }),
+              "[§54-AGY] reconnect unhides matching project, removes same-project hidden orphan, and preserves tombstones/other projects")
+        check(!store.excludedEngineAccountFilters().credentialIDs.contains("agy-hidden-1"),
+              "[§54-AGY] reconnected credential ID is removed from excludedEngineAccountFilters")
+
+        // Multi-project guard: adding a second live project credential prevents guessing when incoming projectId is nil,
+        // and project-qualified reconnect preserves both tombstones and distinct soft-hidden projects.
+        let siblingCred = AccountCredential(
+            id: "agy-hidden-2",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/agy-hidden/other.json",
+            metadata: [
+                "projectId": "other-project",
+                "accountEmail": "hidden-reconnect@example.invalid",
+                "accountHandle": "hidden-reconnect@example.invalid"
+            ]
+        )
+        try AccountCredentialStore.shared.saveCredential(siblingCred)
+        store.accountRegistry.append(
+            StoredProviderAccount(
+                id: "sibling-proj-row",
+                providerId: "antigravity",
+                email: "hidden-reconnect@example.invalid",
+                displayName: "hidden-reconnect@example.invalid",
+                note: nil,
+                accountId: "other-project",
+                providerResultId: "antigravity:cred:agy-hidden-2",
+                credentialId: "agy-hidden-2",
+                createdAt: "2026-11-11T00:00:00Z",
+                lastSeenAt: "2026-11-11T00:00:00Z",
+                isHidden: true,
+                isPermanentlyRemoved: false,
+                sourceFilePath: "/tmp/agy-hidden/other.json",
+                workspaceUserId: nil
+            )
+        )
+        let ambiguousIncomingCred = AccountCredential(
+            id: "new-ephemeral-ambiguous",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy-ambiguous.json",
+            metadata: [
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        check(
+            store.existingAuthenticatedCredential(
+                incomingCredential: ambiguousIncomingCred,
+                providerId: "antigravity",
+                accountHandle: "hidden-reconnect@example.invalid",
+                accountId: "hidden-reconnect@example.invalid",
+                sessionFingerprint: "hidden-reconnect@example.invalid",
+                sourceIdentifier: "antigravity-ide:hidden-reconnect@example.invalid",
+                sourceIdentifierIsStable: false
+            ) == nil,
+            "[§54-AGY] project-less incoming credential does not guess when email spans multiple projects"
+        )
+
+        if let hiddenIndex = store.accountRegistry.firstIndex(where: { $0.id == "hidden-cred-row" }) {
+            store.accountRegistry[hiddenIndex].isHidden = true
+        }
+        let incomingCredWithProject = AccountCredential(
+            id: "new-ephemeral-with-project",
+            providerId: "antigravity",
+            accountLabel: "hidden-reconnect@example.invalid",
+            authMethod: .authFile,
+            credential: "/tmp/new-ide-copy-2.json",
+            metadata: [
+                "projectId": "aicode-consumers",
+                "sourceIdentifier": "antigravity-ide:hidden-reconnect@example.invalid",
+                "sessionFingerprint": "hidden-reconnect@example.invalid",
+                "identityScope": ProviderAuthCandidate.IdentityScope.sharedSource.rawValue
+            ]
+        )
+        var usageWithProject = ProviderUsage(provider: "antigravity", label: "Antigravity")
+        usageWithProject.accountEmail = "hidden-reconnect@example.invalid"
+        usageWithProject.usageAccountId = "hidden-reconnect@example.invalid"
+        usageWithProject.extra["projectId"] = AnyCodable("aicode-consumers")
+
+        let projectResultId = try store.registerAuthenticatedCredential(
+            incomingCredWithProject,
+            usage: usageWithProject,
+            note: nil,
+            providerDisplayTitle: "Antigravity",
+            insertImmediateProviderData: { _, _, _, _ in },
+            ensureProviderSelected: { _ in }
+        )
+        check(projectResultId == "antigravity:cred:agy-hidden-1",
+              "[§54-AGY] project-qualified reconnect reuses matching project credential")
+        check(
+            store.accountRegistry.contains(where: { $0.id == "hidden-cred-row" && !$0.isHidden && $0.accountId == "aicode-consumers" })
+                && store.accountRegistry.contains(where: { $0.id == "sibling-proj-row" && $0.credentialId == "agy-hidden-2" && $0.isHidden })
+                && store.accountRegistry.contains(where: { $0.id == "tombstone-row" && $0.isHidden && $0.isPermanentlyRemoved }),
+            "[§54-AGY] project-qualified reconnect unhides target project while keeping sibling soft-hidden project and tombstone intact"
+        )
     }
 
     static func testProductionCredentialStoreFaultInjection() throws {
@@ -407,6 +1636,20 @@ struct AccountIdentityRegression {
               "FIX-03: authorization URL includes code_challenge_method=S256")
         check(AntigravityLoginCoordinator.queryParameter("state", in: authItems) == .single("state-123"),
               "FIX-03: authorization URL preserves state")
+        let grantedScopes = Set((AntigravityLoginCoordinator.queryParameter("scope", in: authItems) == .single("") ? "" : authItems.first(where: { $0.name == "scope" })?.value ?? "")
+            .split(separator: " ").map(String.init))
+        for requiredScope in [
+            "openid",
+            "https://www.googleapis.com/auth/cloud-platform",
+            "https://www.googleapis.com/auth/userinfo.email",
+            "https://www.googleapis.com/auth/userinfo.profile",
+            "https://www.googleapis.com/auth/cclog",
+            "https://www.googleapis.com/auth/experimentsandconfigs",
+            "https://www.googleapis.com/auth/aicode"
+        ] {
+            check(grantedScopes.contains(requiredScope),
+                  "AGY OAuth scope includes \(requiredScope)")
+        }
 
         let tokenReq = AntigravityLoginCoordinator.makeTokenRequest(
             clientId: "client-id-1",
@@ -550,70 +1793,33 @@ struct AccountIdentityRegression {
             fatalError("R3: expected coordinator phase to be .failed when loopback listener setup fails")
         }
 
-        // R2: Real local NWListener/NWConnection transport test with split TCP headers and truncated EOF
-        coordinator.start()
-        for _ in 0..<100 {
-            if coordinator.phase == .waitingForBrowser { break }
-            try await Task.sleep(nanoseconds: 20_000_000)
-        }
-        check(coordinator.phase == .waitingForBrowser, "R2: real loopback listener reaches waitingForBrowser state")
-        let liveItems = URLComponents(url: coordinator.authURL!, resolvingAgainstBaseURL: false)!.queryItems!
-        guard case .single(let tcpState) = AntigravityLoginCoordinator.queryParameter("state", in: liveItems),
-              case .single(let tcpChallenge) = AntigravityLoginCoordinator.queryParameter("code_challenge", in: liveItems),
-              case .single(let tcpRedirect) = AntigravityLoginCoordinator.queryParameter("redirect_uri", in: liveItems),
-              let tcpPort = URL(string: tcpRedirect)?.port else {
-            fatalError("R2: missing callback endpoint parameters")
-        }
-
-        // R2a: Truncated request (EOF before \r\n\r\n) returns HTTP 400 and keeps session alive
-        let truncatedPrefix = "GET /oauth2callback?code=TruncatedCode&state=\(tcpState) HTTP/1.1\r\nHost: 127."
-        let truncatedConnection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(tcpPort))!, using: .tcp)
-        let truncatedResponse: String = await withCheckedContinuation { continuation in
-            truncatedConnection.stateUpdateHandler = { state in
-                guard case .ready = state else { return }
-                truncatedConnection.stateUpdateHandler = nil
-                truncatedConnection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                    continuation.resume(returning: String(data: data ?? Data(), encoding: .utf8) ?? "")
-                }
-                truncatedConnection.send(
-                    content: Data(truncatedPrefix.utf8),
-                    contentContext: .finalMessage,
-                    isComplete: true,
-                    completion: .contentProcessed { _ in }
-                )
+        // R2 / Policy compliance: direct Antigravity browser OAuth must fail closed with 0 listeners, 0 browser launches, and 0 network calls
+        var browserOpenedCount = 0
+        let blockedOAuthCoordinator = AntigravityLoginCoordinator(
+            dataLoader: { _ in
+                fatalError("Policy-blocked OAuth must not make network calls")
+            },
+            oauthConfigurationProvider: {
+                .init(clientId: "test-client-id", clientSecret: "test-client-secret")
+            },
+            openBrowserHandler: { _ in
+                browserOpenedCount += 1
+            },
+            listenerFactory: {
+                fatalError("Policy-blocked OAuth must not start a loopback listener")
             }
-            truncatedConnection.start(queue: DispatchQueue.global())
+        )
+        blockedOAuthCoordinator.start()
+        if case .failed(let message) = blockedOAuthCoordinator.phase {
+            check(message.contains("policy compliance")
+                    && blockedOAuthCoordinator.authURL == nil
+                    && !blockedOAuthCoordinator.isRunning
+                    && browserOpenedCount == 0,
+                  "R2/Policy: AntigravityLoginCoordinator.start() fails closed with 0 browser opens and 0 HTTP calls")
+        } else {
+            fatalError("R2/Policy: expected coordinator phase to fail closed on start()")
         }
-        truncatedConnection.cancel()
-        check(truncatedResponse.hasPrefix("HTTP/1.1 400"), "R2: truncated EOF header returns HTTP 400")
-        check(coordinator.phase == .waitingForBrowser, "R2: truncated EOF header does not abort waitingForBrowser session")
-
-        // R2b: Valid callback split across multiple TCP segments reassembles and succeeds with HTTP 200
-        let splitPart1 = "GET /oauth2callback?code=FragmentedCode&state=\(tcpState) HTTP/1.1\r\nHost: 127."
-        let splitPart2 = "0.0.1:\(tcpPort)\r\nUser-Agent: SplitTest/1.0\r\n\r\n"
-        let splitConnection = NWConnection(host: "127.0.0.1", port: NWEndpoint.Port(rawValue: UInt16(tcpPort))!, using: .tcp)
-        let splitResponse: String = await withCheckedContinuation { continuation in
-            splitConnection.stateUpdateHandler = { state in
-                guard case .ready = state else { return }
-                splitConnection.stateUpdateHandler = nil
-                splitConnection.receive(minimumIncompleteLength: 1, maximumLength: 8192) { data, _, _, _ in
-                    continuation.resume(returning: String(data: data ?? Data(), encoding: .utf8) ?? "")
-                }
-                splitConnection.send(content: Data(splitPart1.utf8), completion: .contentProcessed { _ in
-                    DispatchQueue.global().asyncAfter(deadline: .now() + .milliseconds(40)) {
-                        splitConnection.send(content: Data(splitPart2.utf8), completion: .contentProcessed { _ in })
-                    }
-                })
-            }
-            splitConnection.start(queue: DispatchQueue.global())
-        }
-        splitConnection.cancel()
-        check(splitResponse.hasPrefix("HTTP/1.1 200 OK"), "R2: split TCP header request succeeds with HTTP 200 OK after reassembly")
-        check(coordinator.phase == .succeeded, "R2: coordinator reaches .succeeded after split TCP callback")
-        check(capturedTokenVerifiers.values.count == 2 && AntigravityLoginCoordinator.pkceCodeChallenge(for: capturedTokenVerifiers.values[1]) == tcpChallenge,
-              "R2: split TCP callback exchanges token with matching PKCE code_verifier")
-
-        coordinator.discardImportedSession()
+        blockedOAuthCoordinator.discardImportedSession()
     }
 
     @MainActor
@@ -1249,5 +2455,697 @@ struct AccountIdentityRegression {
                 && AntigravityAccountSwitcher.extractRefreshToken(forEmail: "b@example.com", homeDirectory: r5NegativeHome.path) == "1//refresh-b-only"
                 && AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: r5NegativeHome.path) == nil,
               "AGY 2.0 R6 P2: refresh-only standalone is retained in resolveActiveStorageCandidates over conflicting legacy DB and returns default + explicit refresh token")
+
+        // 8l. [R7] Antigravity 2.0 credential-user-scope (u<sha256(sub)[:16]>) and post-termination reapplyBeforeRelaunch
+        let scopeHome = fm.temporaryDirectory.appendingPathComponent("agy2-user-scope-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: scopeHome) }
+
+        let jwtHeader = Data(#"{"alg":"RS256","typ":"JWT"}"#.utf8).base64EncodedString()
+        let jwtPayload = Data(#"{"sub":"102124208064353618681","email":"haindl8799@gmail.com"}"#.utf8)
+            .base64EncodedString()
+            .replacingOccurrences(of: "=", with: "")
+        let sampleIDToken = "\(jwtHeader).\(jwtPayload).sig"
+        check(AntigravityAccountSwitcher.computeUserScope(fromIDToken: sampleIDToken) == "uc292414f69fafb89",
+              "AGY 2.0 R7: computeUserScope computes u<sha256(sub)[:16]> matching language_server authstore.scopeForUserID")
+
+        let scopePath = AntigravityAccountSwitcher.credentialUserScopePath(homeDirectory: scopeHome.path)
+        let scopeAppStorage = AntigravityAccountSwitcher.appStoragePath(homeDirectory: scopeHome.path)
+        try! fm.createDirectory(at: URL(fileURLWithPath: scopePath).deletingLastPathComponent(), withIntermediateDirectories: true)
+        try! JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "chuydehotboy@gmail.com"])
+            .write(to: URL(fileURLWithPath: scopeAppStorage))
+
+        let haindlAuthFile = scopeHome.appendingPathComponent("haindl8799.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "haindl8799@gmail.com",
+            "access_token": "ya29.haindl_access",
+            "refresh_token": "1//haindl_refresh",
+            "id_token": sampleIDToken,
+            "project_id": "proj-haindl",
+            "expiry_date": 1_893_456_000_000
+        ]).write(to: haindlAuthFile)
+
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
+        let writtenScope = (try? String(contentsOfFile: scopePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        check(writtenScope == "uc292414f69fafb89",
+              "AGY 2.0 R7: switchAccount writes u<sha256(sub)[:16]> to credential-user-scope when id_token is present")
+        let importedWithMetadata = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: scopeHome.path)
+        check(importedWithMetadata?.idToken == sampleIDToken
+                && importedWithMetadata?.projectId == "proj-haindl"
+                && importedWithMetadata?.expiryDate.map { Int64($0.timeIntervalSince1970) } == 1_893_456_000,
+              "AGY 2.0: compact Keychain StoredToken and IDE discovery preserve id_token, project_id, and real expiry")
+        let giantIDToken = "\(jwtHeader).\(jwtPayload)." + String(repeating: "z", count: 4000)
+        let oversizedCompactAuthFile = scopeHome.appendingPathComponent("oversized_compact_id_token.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "oversized@gmail.com",
+            "access_token": "ya29.over_access",
+            "refresh_token": "1//over_refresh",
+            "id_token": giantIDToken
+        ]).write(to: oversizedCompactAuthFile)
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: oversizedCompactAuthFile, homeDirectory: scopeHome.path)
+        let oversizedImported = AntigravityAccountSwitcher.discoverIDECandidatePayload(homeDirectory: scopeHome.path)
+        check(oversizedImported?.email == "oversized@gmail.com" && oversizedImported?.idToken == nil,
+              "AGY 2.0: oversized id_token gracefully omitted from compact Keychain StoredToken under 3800B limit")
+        check(AntigravityAccountSwitcher.hasExternalHubProcess(inProcessListOutput: """
+              123 /Applications/Antigravity.app/Contents/Resources/bin/language_server --app_data_dir antigravity
+              456 /Users/apple/.gemini/bin/agy --hub --app_data_dir antigravity
+              """)
+                && !AntigravityAccountSwitcher.hasExternalHubProcess(inProcessListOutput: """
+                   123 /Applications/Antigravity.app/Contents/Resources/bin/language_server --app_data_dir antigravity
+                   """),
+              "AGY Switcher: detects external agy --hub daemon while ignoring Antigravity.app")
+        // Re-apply haindl8799 cleanly for restart test below
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
+
+        // Simulate running Electron + language_server clobbering Keyring, credential-user-scope, and app_storage.json on quit,
+        // and verify restartAntigravityApp's reapplyBeforeRelaunch hook restores all stores after termination and before relaunch.
+        var scopeAppRunning = true
+        let restartWithReapply = await AntigravityAccountSwitcher.restartAntigravityApp(
+            homeDirectory: scopeHome.path,
+            timeoutSeconds: 0.1,
+            pollIntervalMilliseconds: 10,
+            appExists: { $0 == "/Applications/Antigravity.app" },
+            isTargetRunning: { scopeAppRunning },
+            requestTerminate: {
+                // Simulate old process flushing stale account on exit
+                let clobberedToken = try! JSONSerialization.data(withJSONObject: [
+                    "id_token_email": "chuydehotboy@gmail.com",
+                    "token": ["access_token": "ya29.stale_chuyde", "refresh_token": "1//stale_chuyde"]
+                ])
+                try? AntigravityAccountSwitcher.writeKeyringRawSecret(
+                    AntigravityAccountSwitcher.encodeKeyringSecret(clobberedToken),
+                    homeDirectory: scopeHome.path
+                )
+                try? Data("ustale00000000000".utf8).write(to: URL(fileURLWithPath: scopePath))
+                try? JSONSerialization.data(withJSONObject: ["agy.onboarding.lastLoginUsername": "chuydehotboy@gmail.com"])
+                    .write(to: URL(fileURLWithPath: scopeAppStorage))
+                scopeAppRunning = false
+                return true
+            },
+            relaunchApp: { _ in true },
+            reapplyBeforeRelaunch: {
+                _ = try AntigravityAccountSwitcher.switchAccount(authFileURL: haindlAuthFile, homeDirectory: scopeHome.path)
+            }
+        )
+        let scopeAfterRestart = (try? String(contentsOfFile: scopePath, encoding: .utf8))?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let storageAfterRestart = (try? JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: scopeAppStorage)))) as? [String: Any]
+        check(restartWithReapply
+                && AntigravityAccountSwitcher.detectActiveAccount(homeDirectory: scopeHome.path)?.email == "haindl8799@gmail.com"
+                && scopeAfterRestart == "uc292414f69fafb89"
+                && storageAfterRestart?["agy.onboarding.lastLoginUsername"] as? String == "haindl8799@gmail.com",
+              "AGY 2.0 R7: restartAntigravityApp reapplyBeforeRelaunch restores Keyring, credential-user-scope, and app_storage.json after quit-time clobber")
+
+        // Switching to an account without id_token clears stale credential-user-scope so language_server derives scope cleanly
+        let noIDTokenAuth = scopeHome.appendingPathComponent("no_id_token.json")
+        try! JSONSerialization.data(withJSONObject: [
+            "email": "noidtoken@gmail.com",
+            "access_token": "ya29.noid_access",
+            "refresh_token": "1//noid_refresh"
+        ]).write(to: noIDTokenAuth)
+        _ = try! AntigravityAccountSwitcher.switchAccount(authFileURL: noIDTokenAuth, homeDirectory: scopeHome.path)
+        check(!fm.fileExists(atPath: scopePath),
+              "AGY 2.0 R7: switchAccount removes stale credential-user-scope when target account lacks id_token")
+
+        // [R8 Finding 4] restartAntigravityApp aborts before reapply/relaunch if language_server fails to exit
+        var lsReapplyCalled = false
+        var lsRelaunchCalled = false
+        let restartBlockedByLS = await AntigravityAccountSwitcher.restartAntigravityApp(
+            homeDirectory: scopeHome.path,
+            timeoutSeconds: 0.05,
+            pollIntervalMilliseconds: 10,
+            appExists: { $0 == "/Applications/Antigravity.app" },
+            isTargetRunning: { false },
+            requestTerminate: { true },
+            isLanguageServerRunning: { true },
+            terminateLanguageServer: { },
+            relaunchApp: { _ in
+                lsRelaunchCalled = true
+                return true
+            },
+            reapplyBeforeRelaunch: {
+                lsReapplyCalled = true
+            }
+        )
+        check(!restartBlockedByLS && !lsReapplyCalled && !lsRelaunchCalled,
+              "AGY 2.0 R8 Finding 4: restartAntigravityApp fails closed without reapply or relaunch when language_server refuses to exit")
+
+        // [R8 Finding 5] selectRestartTarget prefers newer lastActivated account over stale pre-await fallback entry
+        let candidateA = AntigravityAccountSwitcher.RestartTargetCandidate(
+            activeKey: haindlAuthFile.path.lowercased(),
+            authFileURL: haindlAuthFile,
+            email: "haindl8799@gmail.com",
+            displayName: "Haindl"
+        )
+        let candidateB = AntigravityAccountSwitcher.RestartTargetCandidate(
+            activeKey: noIDTokenAuth.path.lowercased(),
+            authFileURL: noIDTokenAuth,
+            email: "noidtoken@gmail.com",
+            displayName: "NoID"
+        )
+        let selectedDuringMidShutdownSwitch = AntigravityAccountSwitcher.selectRestartTarget(
+            lastActivated: candidateB,
+            currentActiveKey: noIDTokenAuth.path.lowercased(),
+            fallback: candidateA
+        )
+        check(selectedDuringMidShutdownSwitch == candidateB,
+              "AGY 2.0 R8 Finding 5: selectRestartTarget keeps newer mid-shutdown account B instead of reverting to stale pre-await fallback A")
+
+        // [R8 Re-review P2 #3] reapplyAuthoritativeRestartTarget retries and writes newer account B if generation advances during detached write of A
+        final class ReapplyRaceHarness: @unchecked Sendable {
+            var generation: UInt64 = 1
+            var activeCandidate: AntigravityAccountSwitcher.RestartTargetCandidate
+            var appliedEmails: [String] = []
+            var committedEmail: String?
+            let replacementCandidate: AntigravityAccountSwitcher.RestartTargetCandidate
+
+            init(
+                initial: AntigravityAccountSwitcher.RestartTargetCandidate,
+                replacement: AntigravityAccountSwitcher.RestartTargetCandidate
+            ) {
+                self.activeCandidate = initial
+                self.replacementCandidate = replacement
+            }
+        }
+        let raceHarness = ReapplyRaceHarness(initial: candidateA, replacement: candidateB)
+        try! await AntigravityAccountSwitcher.reapplyAuthoritativeRestartTarget(
+            resolveCurrentTarget: {
+                (raceHarness.generation, raceHarness.activeCandidate)
+            },
+            currentGeneration: {
+                raceHarness.generation
+            },
+            applyTarget: { candidate in
+                let email = candidate.email ?? ""
+                raceHarness.appliedEmails.append(email)
+                if raceHarness.generation == 1 {
+                    // Simulate another UI surface activating account B while account A's detached write is in flight
+                    raceHarness.generation = 2
+                    raceHarness.activeCandidate = raceHarness.replacementCandidate
+                }
+                return AntigravitySwitchedIdentity(
+                    email: email,
+                    name: candidate.displayName ?? email,
+                    sourceFilePath: candidate.authFileURL.path
+                )
+            },
+            commitAppliedTarget: { _, _, switched in
+                raceHarness.committedEmail = switched.email
+            }
+        )
+        check(raceHarness.appliedEmails == ["haindl8799@gmail.com", "noidtoken@gmail.com"]
+                && raceHarness.committedEmail == "noidtoken@gmail.com",
+              "AGY 2.0 R8 Re-review P2 #3: reapplyAuthoritativeRestartTarget detects mid-write generation change and re-applies latest account B before relaunch")
+
+        // 8m. Codex Desktop `.codex-global-state.json` `electron-account-renderer-state-v1` project preservation across switches
+        let codexNewPayload = try! JSONSerialization.data(withJSONObject: [
+            "email": "thuynmarket@gmail.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_user_id": "user-M3iQyBihTZHr2fsTMkxbdIIh",
+                "chatgpt_account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34"
+            ]
+        ]).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let codexNewIDToken = "\(jwtHeader).\(codexNewPayload).sig"
+        let codexNewAuthJSON: [String: Any] = [
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34"
+            ]
+        ]
+        let expectedNewOwner = "e5e65172e49b105ece5eb716096c7ebd5850162284878f507f991ee55623aefd"
+        let expectedOldOwner = "6faffb3f2b256e735438283a3e5367793c287e4d7b0eee82d0b1cec2050b4098"
+        let expectedThirdOwner = "feab04e26773b0b80be5aa0faa24f55e4a8fc214324f7e359fe47ee137c58fd8"
+
+        check(CodexAccountIdentity.rendererOwnerHash(fromAuthJSON: codexNewAuthJSON) == expectedNewOwner,
+              "Codex Desktop R8: rendererOwnerHash preserves mixed-case userId and matches sha256(JSON.stringify([userId, accountId]))")
+
+        let codexStateDir = scopeHome.appendingPathComponent("codex-global-state-r8", isDirectory: true)
+        try! fm.createDirectory(at: codexStateDir, withIntermediateDirectories: true)
+        let codexGlobalStateFile = codexStateDir.appendingPathComponent(".codex-global-state.json")
+
+        let simulatedGlobalState: [String: Any] = [
+            "electron-persisted-atom-state": ["theme": "dark-old"],
+            "active-workspace-roots": ["/Users/apple/Downloads/Repo Github/AIUsage"],
+            "electron-account-renderer-state-v1": [
+                "owner": expectedOldOwner,
+                "inactive": [
+                    expectedNewOwner: [
+                        "atoms": ["flat-project-sidebar-preferences-v1": ["mode": "project"], "pref": "new-owner"],
+                        "globals": [
+                            "active-workspace-roots": ["/tmp/keep-new-root"],
+                            "electron-workspace-root-labels": ["/tmp/keep-new-root": "NewRootLabel"]
+                        ]
+                    ]
+                ]
+            ],
+            "local-projects": [
+                "794e1659-fa82-4bbb-b1b0-64bcef1b9aae": [
+                    "id": "794e1659-fa82-4bbb-b1b0-64bcef1b9aae",
+                    "name": "AIUsage",
+                    "rootPaths": ["/Users/apple/Downloads/Repo Github/AIUsage"],
+                    "createdAt": 1_793_888_118_060,
+                    "updatedAt": 1_793_888_118_060,
+                    "chatGptBacking": ["accountId": "b73b560c-13eb-49f1-8bd7-666b0009a0cf", "userId": "user-betSUdib31A928IHX7RMfp9C", "projectId": "g-p-123"]
+                ]
+            ],
+            "project-order": ["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"],
+            "thread-project-assignments": [
+                "01a087c3-1de4-72d0-af42-0fba9478f1f7": [
+                    "projectKind": "local",
+                    "projectId": "794e1659-fa82-4bbb-b1b0-64bcef1b9aae"
+                ]
+            ]
+        ]
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+
+        // [R8 Finding 2] Same-owner sync retains the owner's own chatGptBacking and preserves inactive snapshots' roots/labels/atoms
+        _ = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedOldOwner,
+            additionalOwnerHashes: [expectedNewOwner, expectedThirdOwner]
+        )
+        let sameOwnerState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let sameOwnerTopProjects = (sameOwnerState["local-projects"] as? [String: Any]) ?? [:]
+        let sameOwnerAIUsage = (sameOwnerTopProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let sameOwnerRenderer = (sameOwnerState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let sameOwnerInactive = (sameOwnerRenderer["inactive"] as? [String: Any]) ?? [:]
+        let preseededNewEntry = (sameOwnerInactive[expectedNewOwner] as? [String: Any]) ?? [:]
+        let preseededNewAtoms = (preseededNewEntry["atoms"] as? [String: Any]) ?? [:]
+        let preseededNewGlobals = (preseededNewEntry["globals"] as? [String: Any]) ?? [:]
+        check(sameOwnerAIUsage["chatGptBacking"] != nil
+                && (preseededNewAtoms["pref"] as? String) == "new-owner"
+                && (preseededNewGlobals["active-workspace-roots"] as? [String]) == ["/tmp/keep-new-root"]
+                && ((preseededNewGlobals["electron-workspace-root-labels"] as? [String: String])?["/tmp/keep-new-root"]) == "NewRootLabel",
+              "Codex Desktop R8 Finding 1 & 2: same-owner sync retains owner's chatGptBacking and preserves inactive account's atoms, roots, and labels")
+
+        // [R8 Finding 1] Pre-auth sync (`transitionOwner: false`) does NOT change owner or delete target's inactive snapshot
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+        let preseedSync = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner, expectedThirdOwner],
+            transitionOwner: false
+        )
+        let preseededState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let preseededRenderer = (preseededState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let preseededInactive = (preseededRenderer["inactive"] as? [String: Any]) ?? [:]
+        check(!preseedSync.wasTargetPreseeded
+                && preseedSync.projectCount == 1
+                && (preseededRenderer["owner"] as? String) == expectedOldOwner
+                && preseededInactive[expectedNewOwner] != nil,
+              "Codex Desktop R8 Finding 1: non-transition sync preserves current owner and keeps destination account snapshot in inactive")
+
+        // [R8 Finding 1 & 2] Explicit owner transition (`transitionOwner: true`) restores target atoms/globals, strips foreign backing on target, and keeps source backing in inactive[oldOwner]
+        let transitionSync = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner, expectedThirdOwner],
+            transitionOwner: true
+        )
+        let syncedState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let syncedTopProjects = (syncedState["local-projects"] as? [String: Any]) ?? [:]
+        let syncedAIUsageProject = (syncedTopProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let syncedTopAtoms = (syncedState["electron-persisted-atom-state"] as? [String: Any]) ?? [:]
+        let syncedRendererState = (syncedState["electron-account-renderer-state-v1"] as? [String: Any]) ?? [:]
+        let syncedInactive = (syncedRendererState["inactive"] as? [String: Any]) ?? [:]
+        let oldOwnerEntry = (syncedInactive[expectedOldOwner] as? [String: Any]) ?? [:]
+        let oldOwnerGlobals = (oldOwnerEntry["globals"] as? [String: Any]) ?? [:]
+        let oldOwnerProjects = (oldOwnerGlobals["local-projects"] as? [String: Any]) ?? [:]
+        let oldOwnerAIUsage = (oldOwnerProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] as? [String: Any]) ?? [:]
+        let thirdOwnerEntry = (syncedInactive[expectedThirdOwner] as? [String: Any]) ?? [:]
+        let thirdOwnerGlobals = (thirdOwnerEntry["globals"] as? [String: Any]) ?? [:]
+        let thirdOwnerProjects = (thirdOwnerGlobals["local-projects"] as? [String: Any]) ?? [:]
+
+        check(transitionSync.wasTargetPreseeded
+                && (syncedRendererState["owner"] as? String) == expectedNewOwner
+                && (syncedAIUsageProject["name"] as? String) == "AIUsage"
+                && syncedAIUsageProject["chatGptBacking"] == nil
+                && oldOwnerAIUsage["chatGptBacking"] != nil
+                && (syncedTopAtoms["pref"] as? String) == "new-owner"
+                && (syncedState["active-workspace-roots"] as? [String]) == ["/tmp/keep-new-root"]
+                && thirdOwnerProjects["794e1659-fa82-4bbb-b1b0-64bcef1b9aae"] != nil
+                && syncedInactive[expectedNewOwner] == nil,
+              "Codex Desktop R8 Finding 1 & 2: transitionOwner restores target atoms/globals, strips foreign chatGptBacking on target, and retains source owner's chatGptBacking in inactive")
+
+        // [R8 Finding 3] reconcileRunningCodexDesktop fails closed if Codex Desktop refuses termination or times out, and transitions/relaunches only after verified exit
+        try! JSONSerialization.data(withJSONObject: simulatedGlobalState).write(to: codexGlobalStateFile)
+        var codexRelaunched = false
+        let codexTimeoutResult = await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner],
+            syncOutcome: preseedSync,
+            pollAttempts: 2,
+            pollIntervalNanoseconds: 1_000_000,
+            isCodexRunning: { true },
+            requestTerminate: { true },
+            relaunchCodex: { codexRelaunched = true }
+        )
+        let stateAfterTimeout = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterTimeout = ((stateAfterTimeout["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(!codexTimeoutResult && !codexRelaunched && ownerAfterTimeout == expectedOldOwner,
+              "Codex Desktop R8 Finding 3: reconcileRunningCodexDesktop fails closed without owner transition or relaunch when running Codex Desktop does not exit")
+
+        var simulatedCodexRunning = true
+        let cleanExitResult = await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: expectedNewOwner,
+            additionalOwnerHashes: [expectedOldOwner],
+            syncOutcome: preseedSync,
+            pollAttempts: 3,
+            pollIntervalNanoseconds: 1_000_000,
+            isCodexRunning: { simulatedCodexRunning },
+            requestTerminate: {
+                simulatedCodexRunning = false
+                return true
+            },
+            relaunchCodex: { codexRelaunched = true }
+        )
+        let stateAfterCleanExit = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterCleanExit = ((stateAfterCleanExit["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(cleanExitResult && codexRelaunched && ownerAfterCleanExit == expectedNewOwner,
+              "Codex Desktop R8 Finding 3: reconcileRunningCodexDesktop transitions owner and relaunches after verified Codex Desktop exit")
+
+        // [R8 Re-review P2 #1] accountId-only chatGptBacking (without userId) is preserved for a real hashed renderer owner
+        let realHashedOwnerA = CodexAccountIdentity.rendererOwnerHash(userId: "user-A", accountId: "account-A")!
+        try! JSONSerialization.data(withJSONObject: [
+            "local-projects": [
+                "p": [
+                    "id": "p",
+                    "name": "P",
+                    "chatGptBacking": ["accountId": "account-A", "projectId": "cloud-p"]
+                ]
+            ],
+            "electron-account-renderer-state-v1": [
+                "owner": realHashedOwnerA,
+                "inactive": [String: Any]()
+            ]
+        ]).write(to: codexGlobalStateFile)
+        _ = CodexGlobalStateSync.syncWorkspaceProjects(
+            codexDir: codexStateDir.path,
+            targetOwnerHash: realHashedOwnerA
+        )
+        let partialBackingState = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let partialBackingProject = ((partialBackingState["local-projects"] as? [String: Any])?["p"]) as? [String: Any]
+        check(partialBackingProject?["chatGptBacking"] != nil,
+              "Codex Desktop R8 Re-review P2 #1: accountId-only chatGptBacking is preserved for real hashed renderer owner")
+
+        // [R8 Re-review P2 #2] Cancelled reconciliation while suspended in isCodexRunning does not commit stale owner
+        try! JSONSerialization.data(withJSONObject: [
+            "local-projects": ["p": ["id": "p", "name": "P"]],
+            "electron-account-renderer-state-v1": [
+                "owner": expectedNewOwner,
+                "inactive": [String: Any]()
+            ]
+        ]).write(to: codexGlobalStateFile)
+        let cancelledDuringCheckTask = Task {
+            await CodexGlobalStateSync.reconcileRunningCodexDesktop(
+                codexDir: codexStateDir.path,
+                targetOwnerHash: expectedOldOwner,
+                syncOutcome: .init(wasTargetPreseeded: false, projectCount: 1),
+                isCodexRunning: {
+                    withUnsafeCurrentTask { $0?.cancel() }
+                    return false
+                },
+                requestTerminate: { false },
+                relaunchCodex: { }
+            )
+        }
+        let cancelledDuringCheckOutcome = await cancelledDuringCheckTask.value
+        let stateAfterCancelledCheck = ((try? JSONSerialization.jsonObject(with: Data(contentsOf: codexGlobalStateFile))) as? [String: Any]) ?? [:]
+        let ownerAfterCancelledCheck = ((stateAfterCancelledCheck["electron-account-renderer-state-v1"] as? [String: Any])?["owner"]) as? String
+        check(!cancelledDuringCheckOutcome && ownerAfterCancelledCheck == expectedNewOwner,
+              "Codex Desktop R8 Re-review P2 #2: reconciliation cancelled inside isCodexRunning aborts without mutating owner to stale account")
+
+        // [Restart UI Review P2] reconcileSameIdentityAuthData preserves newer same-identity live refresh token and rejects foreign-identity live credentials
+        let reconcileDir = scopeHome.appendingPathComponent("codex-restart-reconcile", isDirectory: true)
+        try! fm.createDirectory(at: reconcileDir, withIntermediateDirectories: true)
+        let managedStaleAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "refresh_token": "rt-stale-2026-11-01"
+            ],
+            "last_refresh": "2026-11-01T00:00:00Z"
+        ]
+        let liveFresherAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": codexNewIDToken,
+                "access_token": codexNewIDToken,
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "refresh_token": "rt-fresh-2026-11-08"
+            ],
+            "last_refresh": "2026-11-08T00:00:00Z"
+        ]
+        let managedStaleData = try! JSONSerialization.data(withJSONObject: managedStaleAuth)
+        let liveAuthFile = reconcileDir.appendingPathComponent("auth.json")
+        try! JSONSerialization.data(withJSONObject: liveFresherAuth).write(to: liveAuthFile)
+        let targetCodexIdentity = CodexAccountIdentity(authJSON: managedStaleAuth)
+
+        let sameIdentityReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let reconciledTokens = (sameIdentityReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        let healedManagedJSON = (sameIdentityReconciled.healedManagedData.flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }) ?? [:]
+        let healedManagedTokens = (healedManagedJSON["tokens"] as? [String: Any]) ?? [:]
+        check(sameIdentityReconciled.adoptedLiveCandidate
+                && (reconciledTokens["refresh_token"] as? String) == "rt-fresh-2026-11-08"
+                && (healedManagedTokens["refresh_token"] as? String) == "rt-fresh-2026-11-08",
+              "Codex Restart UI P2: reconcileSameIdentityAuthData preserves newer same-identity live refresh_token and heals managed copy")
+
+        let foreignPayload = try! JSONSerialization.data(withJSONObject: [
+            "email": "foreign@example.com",
+            "https://api.openai.com/auth": [
+                "chatgpt_user_id": "user-foreign-999",
+                "chatgpt_account_id": "account-foreign-999"
+            ]
+        ]).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+        let foreignIDToken = "\(jwtHeader).\(foreignPayload).sig"
+        let liveForeignAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "tokens": [
+                "id_token": foreignIDToken,
+                "access_token": foreignIDToken,
+                "account_id": "account-foreign-999",
+                "refresh_token": "rt-foreign-2026-11-09"
+            ],
+            "last_refresh": "2026-11-09T00:00:00Z"
+        ]
+        try! JSONSerialization.data(withJSONObject: liveForeignAuth).write(to: liveAuthFile)
+        let foreignRejectedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let foreignRejectedTokens = (foreignRejectedReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        check(!foreignRejectedReconciled.adoptedLiveCandidate
+                && (foreignRejectedTokens["refresh_token"] as? String) == "rt-stale-2026-11-01",
+              "Codex Restart UI P2: reconcileSameIdentityAuthData never preserves newer live credentials belonging to a different account")
+
+        let mixedNestedConflictAuth: [String: Any] = [
+            "auth_mode": "chatgpt",
+            "access_token": codexNewIDToken,
+            "id_token": codexNewIDToken,
+            "refresh_token": "rt-flat-2026-11-07",
+            "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+            "flat_last_refresh": "2026-11-07T00:00:00Z",
+            "tokens": [
+                "access_token": codexNewIDToken,
+                "id_token": foreignIDToken,
+                "refresh_token": "rt-nested-conflict-2026-11-08",
+                "account_id": "167ebc04-0aaa-4cce-bfdf-db8e7f53bb34",
+                "last_refresh": "2026-11-08T00:00:00Z"
+            ]
+        ]
+        try! JSONSerialization.data(withJSONObject: mixedNestedConflictAuth).write(to: liveAuthFile)
+        let mixedRejectedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: managedStaleData,
+            managedSourceData: managedStaleData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        let mixedRejectedTokens = (mixedRejectedReconciled.nativeJSON["tokens"] as? [String: Any]) ?? [:]
+        check(!mixedRejectedReconciled.adoptedLiveCandidate
+                && mixedRejectedReconciled.healedManagedData == nil
+                && (mixedRejectedTokens["id_token"] as? String) == codexNewIDToken
+                && (mixedRejectedTokens["refresh_token"] as? String) == "rt-stale-2026-11-01"
+                && CodexAccountIdentity(authJSON: mixedRejectedReconciled.nativeJSON).matches(targetCodexIdentity),
+              "Codex Restart UI P2 Re-review: reconcileSameIdentityAuthData rejects dual-group candidate when nested group has access/id conflict and preserves valid emitted identity")
+
+        try! JSONSerialization.data(withJSONObject: liveFresherAuth).write(to: liveAuthFile)
+        let mixedManagedConflictData = try! JSONSerialization.data(withJSONObject: mixedNestedConflictAuth)
+        let invalidManagedReconciled = CodexCredentialPolicy.reconcileSameIdentityAuthData(
+            managedNativeData: mixedManagedConflictData,
+            managedSourceData: mixedManagedConflictData,
+            expectedIdentity: targetCodexIdentity,
+            candidatePaths: [liveAuthFile.path],
+            fm: fm
+        )
+        check(!invalidManagedReconciled.isValidBaseline
+                && !invalidManagedReconciled.adoptedLiveCandidate
+                && invalidManagedReconciled.healedManagedData == nil
+                && invalidManagedReconciled.nativeData.isEmpty
+                && invalidManagedReconciled.nativeJSON.isEmpty
+                && invalidManagedReconciled.identity.accountId == nil
+                && !invalidManagedReconciled.identity.matches(targetCodexIdentity),
+              "Codex Restart UI Selected-Group P2: reconcileSameIdentityAuthData fails closed when managed baseline has dual-group access/id conflict")
+
+        // 8r. Round 3: Antigravity runtime & workspace telemetry (read-only state.vscdb + conversation_summaries.db + transcript.jsonl)
+        let parsedModelSelection = AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 4 Argon (Medium). No need to comment.\n</USER_SETTINGS_CHANGE>"
+        )
+        check(parsedModelSelection?.model == "gemini-4-argon" && parsedModelSelection?.effort == "MEDIUM",
+              "AGY R3: parseModelSelection extracts normalized model slug and thinking effort")
+
+        let parsedNoParenSuffix = AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Gemini 3 Flash. No need to comment.\n</USER_SETTINGS_CHANGE>"
+        )
+        check(parsedNoParenSuffix?.model == "gemini-3-flash" && parsedNoParenSuffix?.effort == nil,
+              "AGY R3 P2-1a: parseModelSelection strips '. No need to comment.' notification suffix when selection lacks parentheses")
+
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Carbon). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-4-carbon" && $0.effort == "CARBON" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Carbon) to gemini-4-carbon")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Hydrogen). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-4-hydrogen" && $0.effort == "HYDROGEN" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Hydrogen) to gemini-4-hydrogen")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Orchestrator (Flash). No need to comment</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gemini-3.8-flash" && $0.effort == "FLASH" } == true,
+              "AGY R7: parseModelSelection maps Orchestrator (Flash) to gemini-3.8-flash")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>`Model Selection` to Gemini 3.5 Flash</USER_SETTINGS_CHANGE>"
+        )?.model == "gemini-3.5-flash-lite",
+              "AGY R7: parseModelSelection supports fallback `Model Selection` marker and normalizes Gemini 3.5 Flash to gemini-3.5-flash-lite")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>Model Selection changed to GPT-OSS 120B (Medium)</USER_SETTINGS_CHANGE>"
+        ).map { $0.model == "gpt-oss-120b" && $0.effort == "MEDIUM" } == true,
+              "AGY R7: parseModelSelection supports legacy 'Model Selection changed' marker and normalizes GPT-OSS 120B")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>The user changed setting `Model Selection` from None to Gemini 4 Argon. Later Model Selection changed to Gemini 4 Carbon. No need to comment</USER_SETTINGS_CHANGE>"
+        )?.model == "gemini-4-carbon",
+              "AGY R7: parseModelSelection selects latest marker when multiple markers appear in one content block")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE> handler maps `Model Selection` to the active model</USER_SETTINGS_CHANGE>"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects prose mentioning 'to the active model'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "<USER_SETTINGS_CHANGE>When this fails, reset `Model Selection` to default</USER_SETTINGS_CHANGE>"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects prose mentioning 'to default'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "// <USER_SETTINGS_CHANGE> `Model Selection` changed to foo.bar()"
+        ) == nil,
+              "AGY R7: parseModelSelection rejects function call syntax 'foo.bar()'")
+        check(AntigravityAccountSwitcher.parseModelSelection(
+            from: "The user changed setting `Model Selection` from None to Gemini 4 Argon"
+        ) == nil,
+              "AGY R7: parseModelSelection requires <USER_SETTINGS_CHANGE> tag scoping")
+
+        let samplePrefsB64 = "ChsKF3BsYW5uaW5nTW9kZVNlbnRpbmVsS2V5EgAKKQofYXJ0aWZhY3RSZXZpZXdQb2xpY3lTZW50aW5lbEtleRIGCgRFQUU9CjAKJnRlcm1pbmFsQXV0b0V4ZWN1dGlvblBvbGljeVNlbnRpbmVsS2V5EgYKBEVBRT0KLAoidGVybWluYWxBbGxvd2VkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CisKIXRlcm1pbmFsRGVuaWVkQ29tbWFuZHNTZW50aW5lbEtleRIGCgRJZ0E9CjYKLGFsbG93QWdlbnRBY2Nlc3NOb25Xb3Jrc3BhY2VGaWxlc1NlbnRpbmVsS2V5EgYKBENBQT0KNQorYWxsb3dDYXNjYWRlQWNjZXNzR2l0aWdub3JlRmlsZXNTZW50aW5lbEtleRIGCgRDQUE9CjcKLWV4cGxhaW5BbmRGaXhJbkN1cnJlbnRDb252ZXJzYXRpb25TZW50aW5lbEtleRIGCgRDQUE9CjoKMGF1dG9Db250aW51ZU9uTWF4R2VuZXJhdG9ySW52b2NhdGlvbnNTZW50aW5lbEtleRIGCgRFQUE9Ch8KFXNlY3VyZU1vZGVTZW50aW5lbEtleRIGCgRDQUE9"
+        let parsedPrefs = AntigravityAccountSwitcher.parseAgentPreferencesProto(samplePrefsB64)
+        check(parsedPrefs.executionPolicy == "always-proceed"
+                && parsedPrefs.artifactReviewPolicy == "always-proceed"
+                && parsedPrefs.securityMode == "standard",
+              "AGY R3: parseAgentPreferencesProto decodes executionPolicy, artifactReviewPolicy, and securityMode")
+
+        let invalidPrefs = AntigravityAccountSwitcher.parseAgentPreferencesProto("!!!invalid-base64!!!")
+        check(invalidPrefs.executionPolicy == nil
+                && invalidPrefs.artifactReviewPolicy == nil
+                && invalidPrefs.securityMode == nil,
+              "AGY R3 P2-2a: parseAgentPreferencesProto returns nil policies for invalid base64")
+
+        let r3Home = r5NegativeHome.deletingLastPathComponent().appendingPathComponent("agy-r3-telemetry", isDirectory: true)
+        let r3DBDir = r3Home.appendingPathComponent("Library/Application Support/Antigravity/User/globalStorage", isDirectory: true)
+        let r3AGYRoot = r3Home.appendingPathComponent(".gemini/antigravity", isDirectory: true)
+        let r3ConvID = "11111111-2222-3333-4444-555555555555"
+        let r3LogDir = r3AGYRoot.appendingPathComponent("brain/\(r3ConvID)/.system_generated/logs", isDirectory: true)
+        try! fm.createDirectory(at: r3DBDir, withIntermediateDirectories: true)
+        try! fm.createDirectory(at: r3LogDir, withIntermediateDirectories: true)
+
+        var r3StateDB: OpaquePointer?
+        _ = sqlite3_open(r3DBDir.appendingPathComponent("state.vscdb").path, &r3StateDB)
+        _ = sqlite3_exec(r3StateDB, "CREATE TABLE ItemTable (key TEXT UNIQUE ON CONFLICT REPLACE, value TEXT);", nil, nil, nil)
+        _ = sqlite3_exec(
+            r3StateDB,
+            "INSERT INTO ItemTable (key, value) VALUES ('antigravityUnifiedStateSync.agentPreferences', '\(samplePrefsB64)');",
+            nil,
+            nil,
+            nil
+        )
+        sqlite3_close(r3StateDB)
+
+        var r3SummariesDB: OpaquePointer?
+        _ = sqlite3_open(r3AGYRoot.appendingPathComponent("conversation_summaries.db").path, &r3SummariesDB)
+        _ = sqlite3_exec(
+            r3SummariesDB,
+            """
+            CREATE TABLE conversation_summaries (
+                conversation_id TEXT PRIMARY KEY,
+                last_modified_time TEXT NOT NULL,
+                workspace_uris TEXT NOT NULL,
+                nesting_depth INTEGER NOT NULL DEFAULT 0
+            );
+            INSERT INTO conversation_summaries (conversation_id, last_modified_time, workspace_uris, nesting_depth)
+            VALUES ('\(r3ConvID)', '2026-11-08 18:00:00+00:00', '["file:///Users/test/projA","file:///Users/test/projB"]', 0);
+            """,
+            nil,
+            nil,
+            nil
+        )
+        sqlite3_close(r3SummariesDB)
+
+        let r3TranscriptURL = r3LogDir.appendingPathComponent("transcript.jsonl")
+        let r3TranscriptLine = #"{"step_index":0,"type":"USER_INPUT","content":"<USER_REQUEST>Hi</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from None to Claude Opus 5.5 (High).\n</USER_SETTINGS_CHANGE>"}"# + "\n"
+        try! Data(r3TranscriptLine.utf8).write(to: r3TranscriptURL)
+
+        let r3Env = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3Home.path)
+        check(r3Env.activeModel == "claude-opus-5.5"
+                && r3Env.thinkingEffort == "HIGH"
+                && r3Env.executionPolicy == "always-proceed"
+                && r3Env.artifactReviewPolicy == "always-proceed"
+                && r3Env.securityMode == "standard"
+                && r3Env.workspaceCount == 2,
+              "AGY R3: inspectEnvironmentAsync extracts model, thinking effort, execution/review/security policies, and unique workspace count in read-only mode")
+
+        let r3SwitchTranscript = r3TranscriptLine
+            + #"{"step_index":1,"type":"USER_INPUT","content":"<USER_REQUEST>Next</USER_REQUEST>\n<USER_SETTINGS_CHANGE>\nThe user changed setting `Model Selection` from Claude Opus 5.5 (High) to Gemini 3 Flash. No need to comment.\n</USER_SETTINGS_CHANGE>"}"# + "\n"
+        try! Data(r3SwitchTranscript.utf8).write(to: r3TranscriptURL)
+
+        let extractedSwitch = AntigravityAccountSwitcher.extractLatestModelAndEffort(fromTranscriptAt: r3TranscriptURL.path)
+        let r3SwitchedEnv = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3Home.path)
+        check(extractedSwitch?.model == "gemini-3-flash"
+                && extractedSwitch?.effort == nil
+                && r3SwitchedEnv.activeModel == "gemini-3-flash"
+                && r3SwitchedEnv.thinkingEffort == nil,
+              "AGY R3 P2-1b: switching to a model without effort clears previous model's HIGH effort to nil")
+
+        let r3MissingHome = r5NegativeHome.deletingLastPathComponent().appendingPathComponent("agy-r3-missing-telemetry", isDirectory: true)
+        try! fm.createDirectory(at: r3MissingHome, withIntermediateDirectories: true)
+        let r3MissingEnv = await AntigravityAccountSwitcher.inspectEnvironmentAsync(homeDirectory: r3MissingHome.path)
+        check(r3MissingEnv.activeModel == nil
+                && r3MissingEnv.thinkingEffort == nil
+                && r3MissingEnv.executionPolicy == nil
+                && r3MissingEnv.artifactReviewPolicy == nil
+                && r3MissingEnv.securityMode == nil
+                && r3MissingEnv.workspaceCount == 0,
+              "AGY R3 P2-2b: inspectEnvironmentAsync leaves optional runtime/policy fields nil when databases and transcripts are absent")
     }
 }

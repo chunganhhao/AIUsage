@@ -94,35 +94,55 @@ struct RefreshableTimeView: View {
 
 // MARK: - Shared Formatting Utilities
 
-func formatRelativeTime(_ isoString: String, language: String) -> String {
-    guard let date = parseISO8601(isoString) else { return "" }
-    let interval = Date().timeIntervalSince(date)
-    let isZh = language == "zh"
-
-    if interval < 60 {
-        return isZh ? "刚刚" : "Just now"
-    } else if interval < 3600 {
-        let minutes = Int(interval / 60)
-        return isZh ? "\(minutes) 分钟前" : "\(minutes)m ago"
-    } else if interval < 86400 {
-        let hours = Int(interval / 3600)
-        return isZh ? "\(hours) 小时前" : "\(hours)h ago"
+private func formatRelativeInterval(_ interval: TimeInterval, language: String) -> String {
+    let clamped = max(0, interval)
+    if clamped < 60 {
+        switch language {
+        case "zh": return "刚刚"
+        case "vi": return "Vừa xong"
+        default: return "Just now"
+        }
+    } else if clamped < 3600 {
+        let minutes = Int(clamped / 60)
+        switch language {
+        case "zh": return "\(minutes) 分钟前"
+        case "vi": return "\(minutes) phút trước"
+        default: return "\(minutes)m ago"
+        }
+    } else if clamped < 86400 {
+        let hours = Int(clamped / 3600)
+        switch language {
+        case "zh": return "\(hours) 小时前"
+        case "vi": return "\(hours) giờ trước"
+        default: return "\(hours)h ago"
+        }
     } else {
-        let days = Int(interval / 86400)
-        return isZh ? "\(days) 天前" : "\(days)d ago"
+        let days = Int(clamped / 86400)
+        switch language {
+        case "zh": return "\(days) 天前"
+        case "vi": return "\(days) ngày trước"
+        default: return "\(days)d ago"
+        }
     }
 }
 
+func formatRelativeTime(_ isoString: String, language: String) -> String {
+    guard let date = parseISO8601(isoString) else { return "" }
+    return formatRelativeInterval(Date().timeIntervalSince(date), language: language)
+}
+
 func formatRelativeTimeFromDate(_ date: Date, language: String) -> String {
-    let isZh = language == "zh"
-    return isZh
-        ? "最近活跃 \(date.formatted(.relative(presentation: .named)))"
-        : "Last seen \(date.formatted(.relative(presentation: .named)))"
+    let relative = date.formatted(.relative(presentation: .named))
+    switch language {
+    case "zh": return "最近活跃 \(relative)"
+    case "vi": return "Hoạt động gần nhất \(relative)"
+    default: return "Last seen \(relative)"
+    }
 }
 
 func formatRefreshTimestamp(_ date: Date, language: String) -> String {
-    let locale = Locale(identifier: language == "zh" ? "zh_CN" : "en_US_POSIX")
-    let clock = DateFormat.formatter("HH:mm:ss", timeZone: .current, locale: locale).string(from: date)
+    let localeId = language == "zh" ? "zh_CN" : (language == "vi" ? "vi_VN" : "en_US_POSIX")
+    let clock = DateFormat.formatter("HH:mm:ss", timeZone: .current, locale: Locale(identifier: localeId)).string(from: date)
     return "\(formatRelativeRefreshTime(date, language: language)) · \(clock)"
 }
 
@@ -132,20 +152,34 @@ func formatRefreshTimestamp(_ isoString: String, language: String) -> String {
 }
 
 func formatRelativeRefreshTime(_ date: Date, language: String) -> String {
-    let interval = max(0, Date().timeIntervalSince(date))
-    let isZh = language == "zh"
+    formatRelativeInterval(Date().timeIntervalSince(date), language: language)
+}
 
-    if interval < 60 {
-        return isZh ? "刚刚" : "Just now"
-    } else if interval < 3600 {
-        let minutes = Int(interval / 60)
-        return isZh ? "\(minutes) 分钟前" : "\(minutes)m ago"
-    } else if interval < 86400 {
-        let hours = Int(interval / 3600)
-        return isZh ? "\(hours) 小时前" : "\(hours)h ago"
-    } else {
-        let days = Int(interval / 86400)
-        return isZh ? "\(days) 天前" : "\(days)d ago"
+func localizedProviderStatusLabel(_ label: String, language: String) -> String {
+    switch (language, label) {
+    case ("zh", "Healthy"): return "正常"
+    case ("zh", "Watch"): return "偏低"
+    case ("zh", "Critical"): return "告急"
+    case ("zh", "Error"): return "错误"
+    case ("zh", "Tracking"): return "追踪中"
+    case ("zh", "Idle"): return "空闲"
+    case ("zh", "Active"): return "活跃"
+    case ("zh", "Snapshot"): return "额度快照"
+    case ("zh", "Waiting"): return "等待同步"
+    case ("zh", "Proxy session"): return "代理会话"
+    case ("zh", "Feedback disconnected"): return "同步已断开"
+    case ("vi", "Healthy"): return "Ổn định"
+    case ("vi", "Watch"): return "Cần theo dõi"
+    case ("vi", "Critical"): return "Cảnh báo gấp"
+    case ("vi", "Error"): return "Lỗi"
+    case ("vi", "Tracking"): return "Đang theo dõi"
+    case ("vi", "Idle"): return "Nhàn rỗi"
+    case ("vi", "Active"): return "Đang dùng"
+    case ("vi", "Snapshot"): return "Ảnh chụp hạn mức"
+    case ("vi", "Waiting"): return "Đang chờ đồng bộ"
+    case ("vi", "Proxy session"): return "Phiên proxy"
+    case ("vi", "Feedback disconnected"): return "Đã ngắt đồng bộ"
+    default: return label
     }
 }
 
@@ -387,10 +421,21 @@ enum QuotaResetFormatter {
         return max(0, Int(date.timeIntervalSince(now)))
     }
 
-    /// 紧凑倒计时文本：`2d 3h` / `3h 20m` / `15m` / 即将刷新。无 resetAt 时返回 nil。
+    static func isPastReset(resetAt: String?, now: Date = Date()) -> Bool {
+        guard let resetAt, let date = SharedFormatters.parseISO8601(resetAt) else { return false }
+        return now >= date
+    }
+
+    /// 紧凑倒计时文本：`2d 3h` / `3h 20m` / `15m` / 已过重置时间。无 resetAt 时返回 nil。
     static func compactText(resetAt: String?, language: String, now: Date = Date()) -> String? {
         guard let remaining = remainingSeconds(resetAt: resetAt, now: now) else { return nil }
-        if remaining == 0 { return language == "zh" ? "即将刷新" : "soon" }
+        if remaining == 0 {
+            switch language {
+            case "zh": return "已过重置时间"
+            case "vi": return "Đã qua đặt lại"
+            default: return "Past reset"
+            }
+        }
         let days = remaining / 86_400
         let hours = (remaining % 86_400) / 3_600
         let minutes = (remaining % 3_600) / 60
@@ -399,11 +444,51 @@ enum QuotaResetFormatter {
         return "\(max(1, minutes))m"
     }
 
-    /// 紧急度染色：<1h 红、<6h 橙，其余返回 `fallback`（默认次要色）。
+    /// 紧急度染色：已过重置提示橙色、<1h 红、<6h 橙，其余返回 `fallback`（默认次要色）。
     static func highlightColor(resetAt: String?, fallback: Color = .secondary, now: Date = Date()) -> Color {
         guard let remaining = remainingSeconds(resetAt: resetAt, now: now) else { return fallback }
+        if remaining == 0 { return .orange }
         if remaining < 3_600 { return .red }
         if remaining < 21_600 { return .orange }
         return fallback
+    }
+
+    static func snapshotHealth(for provider: ProviderData, now: Date = Date()) -> QuotaSnapshotHealthStatus {
+        let inputs = provider.windows.map {
+            QuotaSnapshotWindowInput(label: $0.label, remainingPercent: $0.remainingPercent, resetAt: $0.resetAt)
+        }
+        return QuotaSnapshotHealth.assess(windows: inputs, now: now)
+    }
+
+    static func snapshotHealthBannerText(
+        for status: QuotaSnapshotHealthStatus,
+        language: String,
+        now: Date = Date()
+    ) -> String? {
+        switch status {
+        case .fresh:
+            return nil
+        case .pastReset:
+            switch language {
+            case "zh": return "已过重置时间 — 请重新检查"
+            case "vi": return "Đã qua đặt lại — Kiểm tra lại"
+            default: return "Past reset — Check again"
+            }
+        case .weeklyDepleted(let resetAt):
+            let formatted = formattedResetDateTime(resetAt, language: language, now: now)
+            switch language {
+            case "zh": return "本周配额已耗尽 · 重置于 \(formatted)"
+            case "vi": return "Hết hạn mức tuần · Đặt lại lúc \(formatted)"
+            default: return "Weekly depleted · Resets at \(formatted)"
+            }
+        }
+    }
+
+    private static func formattedResetDateTime(_ date: Date, language: String, now: Date) -> String {
+        let localeId = language == "zh" ? "zh_CN" : (language == "vi" ? "vi_VN" : "en_US_POSIX")
+        let calendar = Calendar.current
+        let sameDay = calendar.isDate(date, inSameDayAs: now)
+        let pattern = sameDay ? "HH:mm" : "MM-dd HH:mm"
+        return DateFormat.formatter(pattern, timeZone: .current, locale: Locale(identifier: localeId)).string(from: date)
     }
 }

@@ -313,6 +313,13 @@ struct LocalTokenUsageHeatmap: View {
         return f
     }()
 
+    private static let monthFormatterVi: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "vi_VN")
+        f.dateFormat = "MMM"
+        return f
+    }()
+
     private static let monthFormatterEn: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -322,7 +329,11 @@ struct LocalTokenUsageHeatmap: View {
 
     private func monthLabelsRow(cellSide: CGFloat, columnPitch: CGFloat, height: CGFloat, visibleWeeks: Int, weekOffset: Int) -> some View {
         let weekdayLabelWidth = Self.weekdayLabelWidth
-        let formatter = appState.language == "zh" ? Self.monthFormatterZh : Self.monthFormatterEn
+        let formatter: DateFormatter = switch appState.language {
+        case "zh": Self.monthFormatterZh
+        case "vi": Self.monthFormatterVi
+        default: Self.monthFormatterEn
+        }
 
         let calendar = Calendar.current
         var labels: [(column: Int, text: String)] = []
@@ -472,7 +483,8 @@ struct LocalTokenUsageHeatmap: View {
 
     private func footerView(snap: HeatmapSnapshot) -> some View {
         let totalText = L("Total \(formatCompactNumber(Double(snap.totalTokens))) tokens",
-                          "合计 \(formatCompactNumber(Double(snap.totalTokens))) tokens")
+                          "合计 \(formatCompactNumber(Double(snap.totalTokens))) tokens",
+                          "Tổng \(formatCompactNumber(Double(snap.totalTokens))) token")
         let peakText = snap.maxDayTokens.map { peakSummaryText(for: $0, activeDays: snap.activeDayCount) }
 
         return ViewThatFits(in: .horizontal) {
@@ -541,6 +553,13 @@ struct LocalTokenUsageHeatmap: View {
         return f
     }()
 
+    private static let peakDateFormatterVi: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "vi_VN")
+        f.dateFormat = "d MMM"
+        return f
+    }()
+
     private static let peakDateFormatterEn: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
@@ -549,12 +568,17 @@ struct LocalTokenUsageHeatmap: View {
     }()
 
     private func peakSummaryText(for peak: (date: Date, tokens: Int), activeDays: Int) -> String {
-        let formatter = appState.language == "zh" ? Self.peakDateFormatterZh : Self.peakDateFormatterEn
+        let formatter: DateFormatter = switch appState.language {
+        case "zh": Self.peakDateFormatterZh
+        case "vi": Self.peakDateFormatterVi
+        default: Self.peakDateFormatterEn
+        }
         let peakDate = formatter.string(from: peak.date)
         let peakValue = formatCompactNumber(Double(peak.tokens))
         return L(
             "\(activeDays) active days · peak \(peakValue) on \(peakDate)",
-            "活跃 \(activeDays) 天 · 最高 \(peakValue) 于 \(peakDate)"
+            "活跃 \(activeDays) 天 · 最高 \(peakValue) 于 \(peakDate)",
+            "\(activeDays) ngày hoạt động · đỉnh \(peakValue) ngày \(peakDate)"
         )
     }
 }
@@ -749,7 +773,8 @@ struct HeatmapFloatingTooltipLayer: View {
             if presentation.models.count > Self.maxVisibleModels {
                 Text(L(
                     "+\(presentation.models.count - Self.maxVisibleModels) more models",
-                    "还有 \(presentation.models.count - Self.maxVisibleModels) 个模型"
+                    "还有 \(presentation.models.count - Self.maxVisibleModels) 个模型",
+                    "+\(presentation.models.count - Self.maxVisibleModels) mô hình khác"
                 ))
                 .font(.system(size: 8.5, weight: .medium))
                 .foregroundStyle(AppContent.floatingTertiary(colorScheme))
@@ -807,7 +832,11 @@ struct HeatmapFloatingTooltipLayer: View {
     }
 
     private var formattedDate: String {
-        let formatter = appState.language == "zh" ? Self.dateFormatterZh : Self.dateFormatterEn
+        let formatter: DateFormatter = switch appState.language {
+        case "zh": Self.dateFormatterZh
+        case "vi": Self.dateFormatterVi
+        default: Self.dateFormatterEn
+        }
         return formatter.string(from: presentation.date)
     }
 
@@ -815,6 +844,13 @@ struct HeatmapFloatingTooltipLayer: View {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
         formatter.dateFormat = "yyyy年M月d日 EEE"
+        return formatter
+    }()
+
+    private static let dateFormatterVi: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "vi_VN")
+        formatter.dateFormat = "EEE, d MMM, yyyy"
         return formatter
     }()
 

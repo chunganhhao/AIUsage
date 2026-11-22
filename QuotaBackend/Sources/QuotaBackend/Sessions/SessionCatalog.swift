@@ -11,6 +11,7 @@ public final class SessionCatalog: @unchecked Sendable {
     private let claude: ClaudeSessionSource
     private let codex: CodexSessionSource
     private let openCode: OpenCodeSessionSource
+    private let antigravity: AntigravitySessionSource
     /// 各来源的缓存只在扫描时读写；扫描串行化即可保证线程安全。
     private let scanLock = NSLock()
 
@@ -19,6 +20,7 @@ public final class SessionCatalog: @unchecked Sendable {
         claude = ClaudeSessionSource(environment: environment)
         codex = CodexSessionSource(environment: environment)
         openCode = OpenCodeSessionSource(environment: environment)
+        antigravity = AntigravitySessionSource(environment: environment)
     }
 
     /// 全部会话，按最后活动时间倒序。
@@ -26,14 +28,15 @@ public final class SessionCatalog: @unchecked Sendable {
         scanLock.lock()
         defer { scanLock.unlock() }
 
-        var results = [[SessionSummary]](repeating: [], count: 3)
+        var results = [[SessionSummary]](repeating: [], count: 4)
         let resultLock = NSLock()
-        DispatchQueue.concurrentPerform(iterations: 3) { index in
+        DispatchQueue.concurrentPerform(iterations: 4) { index in
             let found: [SessionSummary]
             switch index {
             case 0: found = claude.scan()
             case 1: found = codex.scan()
-            default: found = openCode.scan()
+            case 2: found = openCode.scan()
+            default: found = antigravity.scan()
             }
             resultLock.lock()
             results[index] = found
@@ -59,6 +62,8 @@ public final class SessionCatalog: @unchecked Sendable {
                 threadID: summary.sessionID, historyPath: historyDatabase, base: summary.directory, home: home, limit: limit)
         case .openCodeJSON, .openCodeDatabase:
             return try OpenCodeSessionSource.transcript(summary: summary, home: home, limit: limit)
+        case .antigravityBrain(let transcriptPath):
+            return try antigravity.transcript(path: transcriptPath, base: summary.directory, home: home, limit: limit, cached: cached)
         }
     }
 }

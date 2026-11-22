@@ -36,6 +36,20 @@ nonisolated enum AccountIdentityPolicy {
         value?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank
     }
 
+    static func antigravityProjectId(for credential: AccountCredential) -> String? {
+        normalizedLookupValue(credential.metadata["projectId"] ?? credential.metadata["project_id"])
+            ?? normalizedLookupValue(credential.metadata["accountId"]).flatMap { $0.contains("@") ? nil : $0 }
+    }
+
+    static func preferredAccountId(for credential: AccountCredential) -> String? {
+        if credential.providerId.lowercased() == "antigravity" {
+            return (credential.metadata["projectId"]?.nilIfBlank
+                ?? credential.metadata["project_id"]?.nilIfBlank)
+                ?? credential.metadata["accountId"]?.nilIfBlank.flatMap { $0.contains("@") ? nil : $0 }
+        }
+        return credential.metadata["accountId"]?.nilIfBlank
+    }
+
     static func extractCredentialId(from providerDataId: String) -> String? {
         guard let range = providerDataId.range(of: ":cred:") else { return nil }
         return String(providerDataId[range.upperBound...]).nilIfBlank
@@ -300,10 +314,11 @@ nonisolated enum AccountIdentityPolicy {
             merged.sourceFilePath = preferredPath
         }
         merged.lastSeenAt = maxTimestampString(preferred.lastSeenAt, secondary.lastSeenAt)
-        merged.isPermanentlyRemoved = preferred.providerId == "codex"
-            ? preferred.isPermanentlyRemoved
-            : preferred.isPermanentlyRemoved || secondary.isPermanentlyRemoved
-        merged.isHidden = (preferred.isHidden && secondary.isHidden) || merged.isPermanentlyRemoved
+        merged.isPermanentlyRemoved = preferred.isPermanentlyRemoved
+        let keepHidden = secondary.isPermanentlyRemoved
+            ? preferred.isHidden
+            : (preferred.isHidden || secondary.isHidden)
+        merged.isHidden = keepHidden || merged.isPermanentlyRemoved
         if merged.isPermanentlyRemoved {
             merged.credentialId = nil
             merged.note = nil
@@ -340,6 +355,10 @@ nonisolated enum AccountIdentityPolicy {
             if let savedId = stored.credentialId, let liveId = extractCredentialId(from: provider.id) {
                 return savedId == liveId
             }
+            if let savedResultId = stored.providerResultId.flatMap(extractCredentialId),
+               let liveId = extractCredentialId(from: provider.id) {
+                return savedResultId.caseInsensitiveCompare(liveId) == .orderedSame
+            }
             return sourceFilePathsMatch(stored.sourceFilePath, provider.sourceFilePath)
         }
 
@@ -352,6 +371,11 @@ nonisolated enum AccountIdentityPolicy {
         }
 
         if isMultiWorkspace(stored.providerId) {
+            if let storedResultId = stored.normalizedProviderResultId,
+               extractCredentialId(from: storedResultId) != nil,
+               storedResultId == provider.id.trimmingCharacters(in: .whitespacesAndNewlines).lowercased() {
+                return true
+            }
             if sourceFilePathsMatch(stored.sourceFilePath, provider.sourceFilePath) {
                 return true
             }
@@ -579,12 +603,53 @@ struct AccountRegistryReconcileResult: Sendable {
     let didChange: Bool
 }
 
+enum AccountRegistrySaveOutcome: Equatable, Sendable {
+    case committed
+    case superseded(committedRevision: UInt64, committedAccounts: [StoredProviderAccount]?)
+}
+
 actor AccountRegistryRefreshWorker {
     static let shared = AccountRegistryRefreshWorker()
+
+    private static let syncFailureLock = NSLock()
+    private nonisolated(unsafe) static var pendingSyncFailureRevision: UInt64?
 
     private var latestRequestedRevision: UInt64 = 0
     private var lastPersistedRevision: UInt64 = 0
     private var lastPersistedAccounts: [StoredProviderAccount]?
+    private var hasPendingPersistRetry = false
+    private var persistGeneration: UInt64 = 0
+    private var persistDebounceNanoseconds: UInt64 = 1_500_000_000
+
+    nonisolated static func recordSyncPersistFailure(revision: UInt64) {
+        syncFailureLock.withLock {
+            pendingSyncFailureRevision = max(pendingSyncFailureRevision ?? 0, revision)
+        }
+    }
+
+    nonisolated static func clearSyncPersistFailure(upTo revision: UInt64) {
+        syncFailureLock.withLock {
+            if let pending = pendingSyncFailureRevision, pending <= revision {
+                pendingSyncFailureRevision = nil
+            }
+        }
+    }
+
+    nonisolated static func hasPendingSyncFailure() -> Bool {
+        syncFailureLock.withLock { pendingSyncFailureRevision != nil }
+    }
+
+    func configurePersistForTesting(debounceNanoseconds: UInt64 = 1_500_000_000) {
+        Self.syncFailureLock.withLock {
+            Self.pendingSyncFailureRevision = nil
+        }
+        latestRequestedRevision = 0
+        lastPersistedRevision = 0
+        lastPersistedAccounts = nil
+        persistGeneration &+= 1
+        hasPendingPersistRetry = false
+        persistDebounceNanoseconds = debounceNanoseconds
+    }
 
     func reconcile(
         currentRegistry: [StoredProviderAccount],
@@ -598,23 +663,60 @@ actor AccountRegistryRefreshWorker {
             allCredentials: allCredentials
         )
         let didChange = snapshot.reconcile(with: providers)
+        let needsPersistRetry = Self.hasPendingSyncFailure()
+            || (hasPendingPersistRetry && snapshot.accountRegistry != lastPersistedAccounts)
         return AccountRegistryReconcileResult(accounts: snapshot.accountRegistry,
-                                             didChange: didChange || snapshot.accountRegistry != currentRegistry)
+                                             didChange: didChange || snapshot.accountRegistry != currentRegistry || needsPersistRetry)
     }
 
     func schedulePersist(_ accounts: [StoredProviderAccount], revision: UInt64) async {
-        latestRequestedRevision = max(latestRequestedRevision, revision)
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        guard revision >= latestRequestedRevision else { return }
+        guard Self.hasPendingSyncFailure() || hasPendingPersistRetry || revision > lastPersistedRevision else { return }
+        persistGeneration &+= 1
+        let generation = persistGeneration
+        latestRequestedRevision = revision
 
-        try? await Task.sleep(nanoseconds: 350_000_000)
+        try? await Task.sleep(nanoseconds: persistDebounceNanoseconds)
+        guard generation == persistGeneration else { return }
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
         guard revision == latestRequestedRevision else { return }
-        guard revision > lastPersistedRevision else { return }
-        guard lastPersistedAccounts != accounts else { return }
+        let currentMainRevision = await MainActor.run { AccountStore.shared.accountRegistryRevision }
+        guard generation == persistGeneration else { return }
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        guard revision == latestRequestedRevision, revision == currentMainRevision else { return }
+        let syncFailurePending = Self.hasPendingSyncFailure()
+        guard syncFailurePending || hasPendingPersistRetry || revision > lastPersistedRevision else { return }
+        guard syncFailurePending || lastPersistedAccounts != accounts else {
+            hasPendingPersistRetry = false
+            return
+        }
 
         do {
-            try SecureAccountVault.shared.saveAccounts(accounts)
-            lastPersistedRevision = revision
-            lastPersistedAccounts = accounts
+            switch try SecureAccountVault.shared.saveAccounts(accounts, revision: revision) {
+            case .committed:
+                Self.clearSyncPersistFailure(upTo: revision)
+                if revision >= lastPersistedRevision {
+                    lastPersistedRevision = revision
+                    lastPersistedAccounts = accounts
+                }
+                if revision >= latestRequestedRevision && !Self.hasPendingSyncFailure() {
+                    hasPendingPersistRetry = false
+                }
+            case .superseded(let committedRevision, let committedAccounts):
+                Self.clearSyncPersistFailure(upTo: committedRevision)
+                if let committedAccounts, committedRevision >= lastPersistedRevision {
+                    lastPersistedRevision = committedRevision
+                    lastPersistedAccounts = committedAccounts
+                }
+                if committedRevision >= latestRequestedRevision && !Self.hasPendingSyncFailure() {
+                    hasPendingPersistRetry = false
+                }
+            }
         } catch {
+            if SecureAccountVault.shared.committedRevision.map({ revision > $0 }) ?? true {
+                hasPendingPersistRetry = true
+            }
             Logger(subsystem: "com.aiusage.desktop", category: "AccountPersistence").error(
                 "Failed to persist account registry from background refresh worker (state kept in memory): \(String(describing: error), privacy: .public)"
             )
@@ -622,11 +724,26 @@ actor AccountRegistryRefreshWorker {
     }
 
     func notePersistedSnapshot(_ accounts: [StoredProviderAccount], revision: UInt64) {
-        latestRequestedRevision = max(latestRequestedRevision, revision)
+        if let committed = SecureAccountVault.shared.committedRevision, revision < committed { return }
+        Self.clearSyncPersistFailure(upTo: revision)
         if revision >= lastPersistedRevision {
             lastPersistedRevision = revision
             lastPersistedAccounts = accounts
         }
+        guard revision >= latestRequestedRevision else { return }
+        latestRequestedRevision = revision
+        persistGeneration &+= 1
+        hasPendingPersistRetry = false
+    }
+
+    func noteFailedPersist(revision: UInt64) {
+        if let committed = SecureAccountVault.shared.committedRevision, revision <= committed { return }
+        guard revision > lastPersistedRevision || (revision == lastPersistedRevision && lastPersistedAccounts == nil) else {
+            return
+        }
+        guard revision >= latestRequestedRevision else { return }
+        latestRequestedRevision = revision
+        hasPendingPersistRetry = true
     }
 }
 
@@ -659,7 +776,8 @@ private struct AccountRegistryRefreshSnapshot {
 
     nonisolated mutating func reconcile(with providers: [ProviderData]) -> Bool {
         var didChange = false
-        let now = SharedFormatters.iso8601String(from: Date())
+        let nowDate = Date()
+        let now = SharedFormatters.iso8601String(from: nowDate)
         var reservedStoredIDs = Set<String>()
         let allowUnseenCredentialFallback = providers.count == 1
         let orderedProviders = providers.sorted { lhs, rhs in
@@ -682,7 +800,7 @@ private struct AccountRegistryRefreshSnapshot {
 
             let inferredCredentialId = AccountIdentityPolicy.extractCredentialId(from: provider.id).flatMap { id in
                 // 删除前已发出的请求可能稍后返回；失效凭据不能借刷新结果复活删除记录。
-                provider.baseProviderId != "codex" || credentialLookup[id] != nil ? id : nil
+                credentialLookup[id] != nil ? id : nil
             }
 
             if let hiddenIndex = accountRegistry.firstIndex(where: {
@@ -690,59 +808,15 @@ private struct AccountRegistryRefreshSnapshot {
                 AccountIdentityPolicy.matchesLive(stored: $0, provider: provider)
             }) {
                 var hidden = accountRegistry[hiddenIndex]
-
-                // Credential-backed live row means the user re-imported / reconnected —
-                // revive permanent tombstones instead of keeping them suppressed forever.
-                if hidden.isPermanentlyRemoved, inferredCredentialId != nil {
-                    hidden.isPermanentlyRemoved = false
-                    hidden.isHidden = false
-                    hidden.credentialId = inferredCredentialId
-                    if hidden.providerResultId != provider.id {
-                        hidden.providerResultId = provider.id
-                    }
-                    let isLiveSuccess = provider.status != .error
-                    if isLiveSuccess, hidden.accountId != provider.accountId {
-                        hidden.accountId = provider.accountId
-                    }
-                    if let userId = provider.workspaceUserId { hidden.workspaceUserId = userId }
-                    if let livePath = provider.sourceFilePath,
-                       !AccountIdentityPolicy.sourceFilePathsMatch(hidden.sourceFilePath, livePath) {
-                        hidden.sourceFilePath = livePath
-                    }
-                    hidden.lastSeenAt = now
-                    accountRegistry[hiddenIndex] = hidden
+                if hidden.isPermanentlyRemoved {
                     reservedStoredIDs.insert(hidden.id)
-                    didChange = true
                     continue
                 }
-
-                if hidden.providerResultId != provider.id {
-                    hidden.providerResultId = provider.id
-                    didChange = true
-                }
-                let isLiveSuccess = provider.status != .error
-                if isLiveSuccess, hidden.accountId != provider.accountId {
-                    hidden.accountId = provider.accountId
-                    didChange = true
-                }
-                if let userId = provider.workspaceUserId, hidden.workspaceUserId != userId {
-                    hidden.workspaceUserId = userId
-                    didChange = true
-                }
-                if hidden.providerId != "codex", hidden.credentialId == nil, let inferredCredentialId, !hidden.isPermanentlyRemoved {
+                if hidden.credentialId == nil, let inferredCredentialId {
                     hidden.credentialId = inferredCredentialId
+                    accountRegistry[hiddenIndex] = hidden
                     didChange = true
                 }
-                if let livePath = provider.sourceFilePath,
-                   !AccountIdentityPolicy.sourceFilePathsMatch(hidden.sourceFilePath, livePath) {
-                    hidden.sourceFilePath = livePath
-                    didChange = true
-                }
-                if hidden.lastSeenAt != now {
-                    hidden.lastSeenAt = now
-                    didChange = true
-                }
-                accountRegistry[hiddenIndex] = hidden
                 reservedStoredIDs.insert(hidden.id)
                 continue
             }
@@ -780,16 +854,17 @@ private struct AccountRegistryRefreshSnapshot {
                     updated.sourceFilePath = livePath
                     didChange = true
                 }
-                if updated.lastSeenAt != now {
+                if AccountStore.shouldRefreshLastSeenAt(existing: updated.lastSeenAt, now: nowDate) {
                     updated.lastSeenAt = now
-                    didChange = true
-                }
-                if updated.isHidden {
-                    updated.isHidden = false
                     didChange = true
                 }
                 accountRegistry[index] = updated
                 reservedStoredIDs.insert(updated.id)
+            } else if accountRegistry.contains(where: {
+                !$0.id.isEmpty && reservedStoredIDs.contains($0.id) && $0.isHidden &&
+                AccountIdentityPolicy.matchesLive(stored: $0, provider: provider)
+            }) {
+                continue
             } else {
                 let normalizedNewEmail = label.lowercased()
                 let normalizedNewAccountId = AccountIdentityPolicy.normalizedLookupValue(provider.accountId)
@@ -841,7 +916,7 @@ private struct AccountRegistryRefreshSnapshot {
                         existing.sourceFilePath = livePath
                         didChange = true
                     }
-                    if existing.lastSeenAt != now {
+                    if AccountStore.shouldRefreshLastSeenAt(existing: existing.lastSeenAt, now: nowDate) {
                         existing.lastSeenAt = now
                         didChange = true
                     }
@@ -882,6 +957,21 @@ private struct AccountRegistryRefreshSnapshot {
 
 extension AccountStore {
     // MARK: - Persistence & normalization
+
+    nonisolated static let lastSeenAtRefreshInterval: TimeInterval = 900
+
+    nonisolated static func shouldRefreshLastSeenAt(
+        existing: String?,
+        now: Date,
+        minInterval: TimeInterval = lastSeenAtRefreshInterval
+    ) -> Bool {
+        guard let existing = existing?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !existing.isEmpty,
+              let existingDate = SharedFormatters.parseISO8601(existing) else {
+            return true
+        }
+        return now.timeIntervalSince(existingDate) >= minInterval
+    }
 
     func normalizePersistedState() {
         bootstrapCredentialIndexFromRegistry()
@@ -1026,13 +1116,51 @@ extension AccountStore {
         let normalizedAccountId = normalizedAccountLookupValue(accountId)
         let normalizedFingerprint = normalizedAccountLookupValue(sessionFingerprint)
         let normalizedSourceIdentifier = normalizedAccountLookupValue(sourceIdentifier)
+        let providerCredentials = AccountCredentialStore.shared.loadCredentials(for: providerId)
+        let isAntigravity = providerId.lowercased() == "antigravity"
+        let incomingProjectId = isAntigravity
+            ? AccountIdentityPolicy.antigravityProjectId(for: incomingCredential)
+            : nil
+        let allowAntigravityEmailFallback: Bool = {
+            guard isAntigravity,
+                  let normalizedHandle,
+                  normalizedHandle.contains("@") else {
+                return false
+            }
+            guard incomingProjectId == nil else { return true }
+            let matchingEmailProjects = Set(providerCredentials.compactMap { credential -> String? in
+                let existingEmail = normalizedAccountLookupValue(
+                    credential.metadata["accountEmail"]
+                        ?? credential.metadata["accountHandle"]
+                        ?? credential.accountLabel
+                )
+                guard existingEmail == normalizedHandle else { return nil }
+                return AccountIdentityPolicy.antigravityProjectId(for: credential)
+            })
+            return matchingEmailProjects.count <= 1
+        }()
 
-        return AccountCredentialStore.shared.loadCredentials(for: providerId).first { credential in
+        return providerCredentials.first { credential in
             if AccountCredentialStore.credentialsShareCanonicalIdentity(
                 credential,
                 incomingCredential
             ) {
                 return true
+            }
+            if allowAntigravityEmailFallback,
+               let normalizedHandle {
+                let existingProjectId = AccountIdentityPolicy.antigravityProjectId(for: credential)
+                let projectsDoNotConflict = existingProjectId == nil
+                    || incomingProjectId == nil
+                    || existingProjectId == incomingProjectId
+                let existingEmail = normalizedAccountLookupValue(
+                    credential.metadata["accountEmail"]
+                        ?? credential.metadata["accountHandle"]
+                        ?? credential.accountLabel
+                )
+                if projectsDoNotConflict, existingEmail == normalizedHandle {
+                    return true
+                }
             }
             let isMultiWs = AccountIdentityPolicy.isMultiWorkspace(providerId)
 
@@ -1103,7 +1231,7 @@ extension AccountStore {
                 ?? credential.metadata["accountHandle"]?.nilIfBlank
                 ?? credential.accountLabel?.nilIfBlank,
             displayName: credential.metadata["displayName"]?.nilIfBlank,
-            accountId: credential.metadata["accountId"]?.nilIfBlank,
+            accountId: AccountIdentityPolicy.preferredAccountId(for: credential),
             validatedAt: credential.metadata["lastValidatedAt"]?.nilIfBlank
                 ?? credential.lastUsedAt?.nilIfBlank,
             workspaceUserId: CodexAccountIdentity(credential: credential).userId
@@ -1119,8 +1247,16 @@ extension AccountStore {
 
         for index in accountRegistry.indices {
             var account = accountRegistry[index]
-            // 隐藏/删除记录保留身份，但不能通过旧 providerResultId 自动重新绑定凭据。
-            if account.providerId == "codex", account.isHidden { continue }
+            // 隐藏/删除记录保留身份，但不能在归一化阶段自动解除隔离或重新绑定凭据。
+            if account.isPermanentlyRemoved {
+                if account.credentialId != nil {
+                    account.credentialId = nil
+                    accountRegistry[index] = account
+                    didChange = true
+                }
+                continue
+            }
+            if account.isHidden { continue }
             var resolvedCredentialId = account.credentialId?.nilIfBlank
 
             if resolvedCredentialId == nil,
@@ -1159,7 +1295,7 @@ extension AccountStore {
                 ?? credential.metadata["accountHandle"]?.nilIfBlank
                 ?? credential.accountLabel?.nilIfBlank
             let displayName = credential.metadata["displayName"]?.nilIfBlank
-            let accountId = credential.metadata["accountId"]?.nilIfBlank
+            let accountId = AccountIdentityPolicy.preferredAccountId(for: credential)
             let validatedAt = credential.metadata["lastValidatedAt"]?.nilIfBlank
                 ?? credential.lastUsedAt?.nilIfBlank
             let expectedResultId = "\(account.providerId):cred:\(credential.id)"
@@ -1240,12 +1376,31 @@ extension AccountStore {
         let snapshot = accountRegistry
         let revision = accountRegistryRevision
         do {
-            try SecureAccountVault.shared.saveAccounts(snapshot)
-            Task.detached(priority: .utility) {
-                await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(snapshot, revision: revision)
+            switch try SecureAccountVault.shared.saveAccounts(snapshot, revision: revision) {
+            case .committed:
+                AccountRegistryRefreshWorker.clearSyncPersistFailure(upTo: revision)
+                Task.detached(priority: .utility) {
+                    await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(snapshot, revision: revision)
+                }
+            case .superseded(let committedRevision, let committedAccounts):
+                AccountRegistryRefreshWorker.clearSyncPersistFailure(upTo: committedRevision)
+                if let committedAccounts {
+                    Task.detached(priority: .utility) {
+                        await AccountRegistryRefreshWorker.shared.notePersistedSnapshot(
+                            committedAccounts,
+                            revision: committedRevision
+                        )
+                    }
+                }
             }
             return true
         } catch {
+            if SecureAccountVault.shared.committedRevision.map({ revision > $0 }) ?? true {
+                AccountRegistryRefreshWorker.recordSyncPersistFailure(revision: revision)
+                Task.detached(priority: .utility) {
+                    await AccountRegistryRefreshWorker.shared.noteFailedPersist(revision: revision)
+                }
+            }
             accountPersistenceLog.error("Failed to persist account registry (state kept in memory): \(String(describing: error), privacy: .public)")
             return false
         }
@@ -1255,5 +1410,14 @@ extension AccountStore {
         let credentials = AccountCredentialStore.shared.loadAllCredentials()
         guard !credentials.isEmpty else { return }
         ProviderManagedImportStore.cleanupOrphanedManagedImports(referencedBy: credentials)
+    }
+
+    func cleanupManagedCredentialArtifacts(forDeletedCredentials deletedCredentials: [AccountCredential]) {
+        guard !deletedCredentials.isEmpty else { return }
+        let remainingCredentials = AccountCredentialStore.shared.loadAllCredentials()
+        ProviderManagedImportStore.cleanupManagedImports(
+            forDeletedCredentials: deletedCredentials,
+            referencedBy: remainingCredentials
+        )
     }
 }

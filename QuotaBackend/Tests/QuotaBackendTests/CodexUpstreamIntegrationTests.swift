@@ -1,3 +1,4 @@
+import CryptoKit
 import XCTest
 @testable import QuotaBackend
 
@@ -133,22 +134,187 @@ final class CodexUpstreamIntegrationTests: XCTestCase {
         }
     }
 
-    func testUsageStillTripsMonthlyCircuitBreakerWhileResetReadDoesNotChangeIt() async throws {
+    private func recursiveArchiveManifest(at root: URL) throws -> [String] {
+        let fm = FileManager.default
+        let resolvedRoot = root.resolvingSymlinksInPath().standardizedFileURL
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        ) else { return [] }
+        var entries: [String] = []
+        for case let item as URL in enumerator {
+            let values = try item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            let resolvedItem = item.resolvingSymlinksInPath().standardizedFileURL
+            let rel = resolvedItem.path.replacingOccurrences(of: resolvedRoot.path + "/", with: "")
+            if values.isSymbolicLink == true {
+                let target = (try? fm.destinationOfSymbolicLink(atPath: item.path)) ?? ""
+                entries.append("L:\(rel)->\(target)")
+                enumerator.skipDescendants()
+            } else if values.isRegularFile == true {
+                let data = try Data(contentsOf: item)
+                let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                entries.append("F:\(rel):\(data.count):\(digest)")
+            }
+        }
+        return entries.sorted()
+    }
+
+    func testUsageAndResetReadNeverMutateLegacyCPAAuthFiles() async throws {
         let folder = "Library/Application Support/AIUsage/CLIProxyAPI/auth"
-        try FileManager.default.createDirectory(at: directory.appendingPathComponent(folder), withIntermediateDirectories: true)
-        let own = try write(folder + "/aiusage-codex-fixture.json", access: token("monthly", issuedAt: Int(Date().timeIntervalSince1970)))
+        let archiveDir = directory.appendingPathComponent(folder, isDirectory: true)
+        try FileManager.default.createDirectory(at: archiveDir, withIntermediateDirectories: true)
+        let own = try write(folder + "/aiusage-codex-fixture.json", access: token("monthly", issuedAt: Int(Date().timeIntervalSince1970)), refresh: "arch-r0")
+        var auth = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: own)) as? [String: Any])
+        auth["type"] = "codex"
+        auth["account_id"] = "integration-workspace"
+        auth["user_id"] = "member-a"
+        try JSONSerialization.data(withJSONObject: auth).write(to: own)
+        let preExistingLock = archiveDir.appendingPathComponent("preexisting.lock")
+        try Data("keep-me".utf8).write(to: preExistingLock)
+        try CodexPoolProtectionSettings.setEnabled(true, homeDirectory: directory.path)
+
+        let staleArchive = archiveDir.appendingPathComponent("nested/stale-cpa.json")
+        try FileManager.default.createDirectory(at: staleArchive.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let staleAccess = try token("arch-stale", issuedAt: Int(Date().timeIntervalSince1970) - 9 * 86_400)
+        let freshAccess = try token("arch-fresh", issuedAt: Int(Date().timeIntervalSince1970))
+        try JSONSerialization.data(withJSONObject: [
+            "type": "codex",
+            "account_id": "integration-workspace",
+            "user_id": "member-a",
+            "last_refresh": "2020-01-01T00:00:00Z",
+            "access_token": staleAccess,
+            "refresh_token": "stale-arch-r0"
+        ]).write(to: staleArchive)
+
+        let linkDir = directory.appendingPathComponent("outside-aliases", isDirectory: true)
+        try FileManager.default.createDirectory(at: linkDir, withIntermediateDirectories: true)
+        let outsideTarget = linkDir.appendingPathComponent("outside-target.json")
+        try JSONSerialization.data(withJSONObject: [
+            "type": "codex",
+            "account_id": "integration-workspace",
+            "user_id": "member-a",
+            "last_refresh": "2020-01-01T00:00:00Z",
+            "access_token": staleAccess,
+            "id_token": staleAccess,
+            "refresh_token": "r-outside-orig"
+        ]).write(to: outsideTarget)
+        let insideSymlinkOut = archiveDir.appendingPathComponent("inside-symlink-out.json")
+        let symlinkToArchiveFile = linkDir.appendingPathComponent("alias-file.json")
+        let symlinkToArchiveDir = linkDir.appendingPathComponent("alias-dir")
+        let symlinkToNestedDir = linkDir.appendingPathComponent("alias-nested-dir")
+        let brokenHop1 = linkDir.appendingPathComponent("broken-hop1.json")
+        let brokenHop2 = linkDir.appendingPathComponent("broken-hop2.json")
+        try FileManager.default.createSymbolicLink(at: insideSymlinkOut, withDestinationURL: outsideTarget)
+        try FileManager.default.createSymbolicLink(at: symlinkToArchiveFile, withDestinationURL: own)
+        try FileManager.default.createSymbolicLink(at: symlinkToArchiveDir, withDestinationURL: archiveDir)
+        try FileManager.default.createSymbolicLink(at: symlinkToNestedDir, withDestinationURL: staleArchive.deletingLastPathComponent())
+        try FileManager.default.createSymbolicLink(atPath: brokenHop1.path, withDestinationPath: archiveDir.appendingPathComponent("nonexistent/missing.json").path)
+        try FileManager.default.createSymbolicLink(atPath: brokenHop2.path, withDestinationPath: "broken-hop1.json")
+        let nestedViaDirAlias = symlinkToArchiveDir.appendingPathComponent("nested/stale-cpa.json")
+        let dotDotViaNestedAlias = symlinkToNestedDir.path + "/../missing-dotdot.json"
+        let upperArchivePath = directory.appendingPathComponent("Library/Application Support/AIUsage/CLIPROXYAPI/AUTH/nested/stale-cpa.json").path
+        XCTAssertTrue(CodexCredentialPolicy.isLegacyCPAArchivePath(brokenHop1.path, homeDirectory: directory.path))
+        XCTAssertTrue(CodexCredentialPolicy.isLegacyCPAArchivePath(brokenHop2.path, homeDirectory: directory.path))
+        XCTAssertTrue(CodexCredentialPolicy.isLegacyCPAArchivePath(dotDotViaNestedAlias, homeDirectory: directory.path))
+        XCTAssertTrue(CodexCredentialPolicy.isLegacyCPAArchivePath(upperArchivePath, homeDirectory: directory.path))
+        XCTAssertTrue(CodexCredentialPolicy.isLegacyCPAArchivePath("~/Library/Application Support/AIUsage/CLIProxyAPI/auth/fixture.json"))
+        XCTAssertFalse(CodexCredentialPolicy.isLegacyCPAArchivePath(outsideTarget.path, homeDirectory: directory.path))
+
         let provider = CodexProvider(homeDirectory: directory.path)
-        StubURLProtocol.respond(endpoint, body: list)
         let before = try Data(contentsOf: own)
+        let manifestBefore = try recursiveArchiveManifest(at: archiveDir)
+
+        // 1. Fresh archive read (reset credits + usage) leaves recursive manifest identical (0 locks created, preexisting.lock kept)
+        StubURLProtocol.respond(endpoint, body: list)
         _ = try await provider.fetchResetCredits(with: credential(own), identity: identity)
-        XCTAssertEqual(try Data(contentsOf: own), before, "Reset-card reads must not recover or trip the quota breaker")
+        XCTAssertEqual(try Data(contentsOf: own), before, "Reset-card reads must not mutate legacy CPA files")
+        XCTAssertEqual(try recursiveArchiveManifest(at: archiveDir), manifestBefore)
+
         StubURLProtocol.respond("https://chatgpt.com/backend-api/wham/usage", body: #"{"plan_type":"self_serve_business_usage_based","spend_control":{"individual_limit":{"limit":"1000","used":"980","used_percent":98}}}"#)
         let usage = try await provider.fetchUsage(with: credential(own))
-        XCTAssertEqual(usage.extra["circuitBreakerTripped"]?.value as? Bool, true)
-        let persisted = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: own)) as? [String: Any])
-        XCTAssertEqual(persisted["disabled"] as? Bool, true)
-        XCTAssertEqual(persisted["circuit_breaker_tripped"] as? Bool, true)
-        XCTAssertTrue((persisted["circuit_breaker_reason"] as? String)?.contains("Monthly") == true)
+        XCTAssertNil(usage.extra["circuitBreakerTripped"])
+        XCTAssertEqual(try recursiveArchiveManifest(at: archiveDir), manifestBefore, "Codex usage fetch must not mutate or lock legacy CPA directory")
+
+        // 2. Stale direct archive & symlink aliases never trigger OAuth refresh or write locks into archive
+        let oauthResponseData = try JSONSerialization.data(withJSONObject: ["access_token": freshAccess, "refresh_token": "r-new"])
+        StubURLProtocol.respond(oauth, body: String(decoding: oauthResponseData, as: UTF8.self))
+        StubURLProtocol.respond("https://chatgpt.com/backend-api/wham/usage", handler: { req in
+            req.headers["Authorization"] == "Bearer \(freshAccess)" ? (200, #"{"plan_type":"team"}"#) : (401, "{}")
+        })
+        let oauthCountBeforeDirect = StubURLProtocol.requestedURLs.filter { $0 == oauth }.count
+        for target in [own, staleArchive, symlinkToArchiveFile, nestedViaDirAlias] {
+            _ = try? await provider.fetchUsage(with: credential(target))
+        }
+        XCTAssertEqual(StubURLProtocol.requestedURLs.filter { $0 == oauth }.count, oauthCountBeforeDirect,
+                       "Archive-only credentials must not burn single-use OAuth refresh tokens")
+        XCTAssertEqual(try recursiveArchiveManifest(at: archiveDir), manifestBefore, "Symlink aliases and stale archive reads must not alter archive")
+
+        // 3. Direct persist sink refuses archive paths, symlink aliases, and inside-archive symlinks
+        let origLoaded = try provider.loadCredentials(from: own.path)
+        let outsideTargetBefore = try Data(contentsOf: outsideTarget)
+        let minted = CodexProvider.Credentials(
+            authFile: own.path, accessToken: freshAccess, refreshToken: "r-new", idToken: origLoaded.idToken,
+            accountId: origLoaded.accountId, accountEmail: origLoaded.accountEmail, jwtPlanType: origLoaded.jwtPlanType,
+            jwtUserId: origLoaded.jwtUserId, needsRefresh: false, isApiKeyMode: false
+        )
+        provider.persistRefreshedCredentials(minted, replacing: origLoaded, to: own.path)
+        provider.persistRefreshedCredentials(minted, replacing: origLoaded, to: symlinkToArchiveFile.path)
+        provider.persistRefreshedCredentials(minted, replacing: origLoaded, to: nestedViaDirAlias.path)
+        provider.persistRefreshedCredentials(minted, replacing: try provider.loadCredentials(from: outsideTarget.path), to: insideSymlinkOut.path)
+        XCTAssertEqual(try Data(contentsOf: outsideTarget), outsideTargetBefore)
+        XCTAssertEqual(try recursiveArchiveManifest(at: archiveDir), manifestBefore)
+
+        // 4. Managed Codex copy outside archive whose saved sourcePath points to archive refreshes & writes normally without touching archive
+        let managedOutside = linkDir.appendingPathComponent("managed-own.json")
+        try JSONSerialization.data(withJSONObject: [
+            "last_refresh": "2020-01-01T00:00:00Z",
+            "tokens": ["account_id": "integration-workspace", "id_token": staleAccess, "access_token": staleAccess, "refresh_token": "r-managed"]
+        ]).write(to: managedOutside)
+        _ = try await provider.fetchUsage(with: credential(managedOutside, source: symlinkToArchiveFile))
+        XCTAssertEqual(try provider.loadCredentials(from: managedOutside.path).accessToken, freshAccess)
+
+        // 5. Switch flush & warmup healing skip archive/aliases while healing writable copies outside archive
+        let liveNewer = linkDir.appendingPathComponent("live-newer.json")
+        let flushOutside = linkDir.appendingPathComponent("flush-outside.json")
+        let warmupOutside = linkDir.appendingPathComponent("warmup-outside.json")
+        let stagedNewer = linkDir.appendingPathComponent("staged-newer.json")
+        let newerEpoch = Int(Date().timeIntervalSince1970) + 10
+        let newerAccess = try token("arch-newer", issuedAt: newerEpoch)
+        let staleData = try JSONSerialization.data(withJSONObject: [
+            "last_refresh": "2020-01-01T00:00:00Z",
+            "tokens": ["account_id": "integration-workspace", "id_token": staleAccess, "access_token": staleAccess, "refresh_token": "r-stale-out"]
+        ])
+        let newerData = try JSONSerialization.data(withJSONObject: [
+            "last_refresh": SharedFormatters.iso8601String(from: Date(timeIntervalSince1970: TimeInterval(newerEpoch))),
+            "tokens": ["account_id": "integration-workspace", "id_token": newerAccess, "access_token": newerAccess, "refresh_token": "r-newer-out"]
+        ])
+        try newerData.write(to: liveNewer)
+        try newerData.write(to: stagedNewer)
+        try staleData.write(to: flushOutside)
+        try staleData.write(to: warmupOutside)
+        let flushedCount = CodexCredentialPolicy.flushLiveAuthToManagedCopies(
+            candidatePaths: [liveNewer.path],
+            excludingIdentity: CodexAccountIdentity(accountId: "other-ws", userId: "other-u"),
+            loadCredentials: { [credential(staleArchive), credential(symlinkToArchiveFile), credential(flushOutside)] },
+            homeDirectory: directory.path
+        )
+        XCTAssertEqual(flushedCount, 1)
+        XCTAssertEqual(try provider.loadCredentials(from: flushOutside.path).accessToken, newerAccess)
+
+        let healOk = OfficialWarmupProcess.healStagedCodexAuth(
+            stagedAuth: stagedNewer,
+            stagedBaselineData: staleData,
+            destinations: [staleArchive.path, symlinkToArchiveFile.path, insideSymlinkOut.path, warmupOutside.path],
+            expectedIdentity: identity,
+            boundary: ManagedAuthImportBoundary(bundleIdentifier: "com.test", applicationSupportDirectory: linkDir.appendingPathComponent("AppSupport")),
+            homeURL: directory
+        )
+        XCTAssertTrue(healOk)
+        XCTAssertEqual(try provider.loadCredentials(from: warmupOutside.path).accessToken, newerAccess)
+        XCTAssertEqual(try Data(contentsOf: outsideTarget), outsideTargetBefore)
+        XCTAssertEqual(try recursiveArchiveManifest(at: archiveDir), manifestBefore)
+        XCTAssertTrue(FileManager.default.fileExists(atPath: preExistingLock.path), "Pre-existing lock in archive must not be deleted")
     }
 
     func testNativeUserAndLegacySubjectUseSeparateNamespacesInEitherDirection() throws {

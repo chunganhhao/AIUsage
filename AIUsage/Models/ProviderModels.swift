@@ -204,20 +204,6 @@ struct ProviderAccountGroup: Identifiable {
     }
 }
 
-extension ProviderCatalogItem {
-    func title(for language: String) -> String {
-        language == "zh" ? titleZh : titleEn
-    }
-
-    func summary(for language: String) -> String {
-        language == "zh" ? summaryZh : summaryEn
-    }
-
-    func restriction(for language: String) -> String? {
-        language == "zh" ? restrictionZh : restrictionEn
-    }
-}
-
 extension String {
     nonisolated var nilIfBlank: String? {
         let trimmed = trimmingCharacters(in: .whitespacesAndNewlines)

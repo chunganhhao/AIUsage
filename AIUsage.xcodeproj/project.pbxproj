@@ -7,9 +7,12 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		AF7813F22E494D438DF55CCB /* AgentToolsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C73CAB12A82429690ADA677 /* AgentToolsView.swift */; };
+		12EA940922F545DB83E76B34 /* PoolProtectionControls.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */; };
 		9BEFE5B01F5DF04F8E29C1EE /* TokenSaverReleaseManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */; };
 		C1AG00012FD2000100B26789 /* AntigravityAccountSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */; };
 		C1AG00032FD2000200B26789 /* AntigravityManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */; };
+		C1CL00012FD2000300B26789 /* CodexLocalManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CL00022FD2000300B26789 /* CodexLocalManagementView.swift */; };
         C1CS00010000000000000001 /* ClaudeSubscriptionManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00010000000000000002 /* ClaudeSubscriptionManager.swift */; };
         C1CS00020000000000000001 /* ClaudeSubscriptionConnectionView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00020000000000000002 /* ClaudeSubscriptionConnectionView.swift */; };
         C1CS00030000000000000001 /* ClaudeSubscriptionAccountActions.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CS00030000000000000002 /* ClaudeSubscriptionAccountActions.swift */; };
@@ -26,6 +29,7 @@
 		5EF0C0D62F95000100A15674 /* ProviderCard+ResetCountdown.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF0C0D52F95000100A15674 /* ProviderCard+ResetCountdown.swift */; };
 		5EF87F012F8D0E9E002FE291 /* ProxyConfiguration.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF87F002F8D0E9E002FE291 /* ProxyConfiguration.swift */; };
 		5EF87F042F8D0ED3002FE291 /* ProxyViewModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF87F022F8D0ED3002FE291 /* ProxyViewModel.swift */; };
+		D2MS00B22FC0003000C22222 /* ModelAutoSyncCoordinator.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2MS00A22FC0003000C22222 /* ModelAutoSyncCoordinator.swift */; };
 		5EF87F072F8D0EED002FE291 /* ProxyConfigEditorView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF87F052F8D0EED002FE291 /* ProxyConfigEditorView.swift */; };
 		5EF87F082F8D0EED002FE291 /* ProxyManagementView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EF87F062F8D0EED002FE291 /* ProxyManagementView.swift */; };
 		5EFACT012F94000100A15674 /* ProviderActivationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5EFACT002F94000100A15674 /* ProviderActivationManager.swift */; };
@@ -118,6 +122,7 @@
 		A3F510012F97000100A15674 /* Localizable.strings in Resources */ = {isa = PBXBuildFile; fileRef = A3F510042F97000100A15674 /* Localizable.strings */; };
 		B1198DC3EFC5DB2DFC043BD7 /* ProxyStatsView+Distribution.swift in Sources */ = {isa = PBXBuildFile; fileRef = 2A97BD3A13311949E62C066C /* ProxyStatsView+Distribution.swift */; };
 		B1AP00012FA1000100A15674 /* APIProvider.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AP00002FA1000100A15674 /* APIProvider.swift */; };
+		D2PP00B12FC0003000C33333 /* ProviderPreset.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2PP00A12FC0003000C33333 /* ProviderPreset.swift */; };
 		B1AP00112FA1000100A15674 /* APIProviderStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AP00102FA1000100A15674 /* APIProviderStore.swift */; };
 		B1AP00212FA1000100A15674 /* APIProviderDistributor.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AP00202FA1000100A15674 /* APIProviderDistributor.swift */; };
 		B1AP00312FA1000200A15674 /* APIProviderCPALinkStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1AP00302FA1000200A15674 /* APIProviderCPALinkStore.swift */; };
@@ -139,6 +144,8 @@
 		B1REFA012F97002000A15674 /* ProxyRuntimeService.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1REFA002F97002000A15674 /* ProxyRuntimeService.swift */; };
 		B1REFB012F97002000A15674 /* ProviderRefreshResult.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1REFB002F97002000A15674 /* ProviderRefreshResult.swift */; };
 		B1TLS0012F97003000A15674 /* TLSCertificateManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = B1TLS0002F97003000A15674 /* TLSCertificateManager.swift */; };
+		D2MS00B12FC0003000C11111 /* ModelCatalogSyncSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2MS00A12FC0003000C11111 /* ModelCatalogSyncSupport.swift */; };
+		D2MD00B12FC0003000C55555 /* ModelsDevPricingService.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2MD00A12FC0003000C55555 /* ModelsDevPricingService.swift */; };
 		C1CDP0012FD1000100B26789 /* ClaudeDesktopProfileStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CDP0022FD1000100B26789 /* ClaudeDesktopProfileStore.swift */; };
 		5E55C0000000000000000002 /* TerminalLauncher.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E55C0000000000000000001 /* TerminalLauncher.swift */; };
 		C1CDI0012FD1000200B26789 /* ClaudeDesktopIntegrationManager.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CDI0022FD1000200B26789 /* ClaudeDesktopIntegrationManager.swift */; };
@@ -149,6 +156,7 @@
 		C1AA000300000000000000B3 /* ProxyModelLibraryEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AA000300000000000000A3 /* ProxyModelLibraryEditor.swift */; };
 		C1AA000500000000000000B5 /* ModelExtraParametersEditor.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AA000500000000000000A5 /* ModelExtraParametersEditor.swift */; };
 		C1AA000400000000000000B4 /* PublicModelPricingImport.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AA000400000000000000A4 /* PublicModelPricingImport.swift */; };
+		D2PP00B22FC0003000C44444 /* ProviderPresetViews.swift in Sources */ = {isa = PBXBuildFile; fileRef = D2PP00A22FC0003000C44444 /* ProviderPresetViews.swift */; };
 		C1AV00012FB0004000B26789 /* OpenCodeNodeAvailabilitySection.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1AV00022FB0004000B26789 /* OpenCodeNodeAvailabilitySection.swift */; };
 		C1CA00022FCA005000B26789 /* CallAnalyticsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CA00012FCA005000B26789 /* CallAnalyticsStore.swift */; };
 		5E55C0000000000000000004 /* SessionCenterStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5E55C0000000000000000003 /* SessionCenterStore.swift */; };
@@ -177,6 +185,8 @@
 		C1CPA0152FD000B000B26789 /* THIRD_PARTY_NOTICES.md in Resources */ = {isa = PBXBuildFile; fileRef = C1CPA0142FD000B000B26789 /* THIRD_PARTY_NOTICES.md */; };
 		C1CPA0172FD000C000B26789 /* CLIProxyCredentialAdapter.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */; };
 		C1CPA0592FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */; };
+		C1CPA0612FD0035000B26789 /* TokenSaverSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */; };
+		C1CPA0632FD0036000B26789 /* GeminiCredentialBridge.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */; };
 		C1CPA0312FD0020000B26789 /* CLIProxyUpstreamCapability.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0302FD0020000B26789 /* CLIProxyUpstreamCapability.swift */; };
 		C1CPA0332FD0021000B26789 /* CLIProxyAuthImportPlanner.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0322FD0021000B26789 /* CLIProxyAuthImportPlanner.swift */; };
 		C1CPA0352FD0022000B26789 /* CLIProxyGatewayManager+Import.swift in Sources */ = {isa = PBXBuildFile; fileRef = C1CPA0342FD0022000B26789 /* CLIProxyGatewayManager+Import.swift */; };
@@ -246,9 +256,12 @@
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
+		1C73CAB12A82429690ADA677 /* AgentToolsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AgentToolsView.swift; sourceTree = "<group>"; };
+		7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PoolProtectionControls.swift; sourceTree = "<group>"; };
 		FF2425D87185BEAB90F860DE /* TokenSaverReleaseManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenSaverReleaseManager.swift; sourceTree = "<group>"; };
 		C1AG00022FD2000100B26789 /* AntigravityAccountSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityAccountSwitcher.swift; sourceTree = "<group>"; };
 		C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AntigravityManagementView.swift; sourceTree = "<group>"; };
+		C1CL00022FD2000300B26789 /* CodexLocalManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexLocalManagementView.swift; sourceTree = "<group>"; };
         C1CS00010000000000000002 /* ClaudeSubscriptionManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionManager.swift; sourceTree = "<group>"; };
         C1CS00020000000000000002 /* ClaudeSubscriptionConnectionView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionConnectionView.swift; sourceTree = "<group>"; };
         C1CS00030000000000000002 /* ClaudeSubscriptionAccountActions.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeSubscriptionAccountActions.swift; sourceTree = "<group>"; };
@@ -266,6 +279,7 @@
 		5EF0C0D52F95000100A15674 /* ProviderCard+ResetCountdown.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "ProviderCard+ResetCountdown.swift"; sourceTree = "<group>"; };
 		5EF87F002F8D0E9E002FE291 /* ProxyConfiguration.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyConfiguration.swift; sourceTree = "<group>"; };
 		5EF87F022F8D0ED3002FE291 /* ProxyViewModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyViewModel.swift; sourceTree = "<group>"; };
+		D2MS00A22FC0003000C22222 /* ModelAutoSyncCoordinator.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelAutoSyncCoordinator.swift; sourceTree = "<group>"; };
 		5EF87F052F8D0EED002FE291 /* ProxyConfigEditorView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyConfigEditorView.swift; sourceTree = "<group>"; };
 		5EF87F062F8D0EED002FE291 /* ProxyManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyManagementView.swift; sourceTree = "<group>"; };
 		C1CDH0022FD1000300B26789 /* ClaudeHubView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeHubView.swift; sourceTree = "<group>"; };
@@ -357,7 +371,9 @@
 		A2B3C4F52F96001000A15674 /* SettingsView+Remote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = "SettingsView+Remote.swift"; sourceTree = "<group>"; };
 		A3F510022F97000100A15674 /* en */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = en; path = en.lproj/Localizable.strings; sourceTree = "<group>"; };
 		A3F510032F97000100A15674 /* zh_CN */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = zh_CN; path = zh_CN.lproj/Localizable.strings; sourceTree = "<group>"; };
+		A3F510052F97000100A15674 /* vi */ = {isa = PBXFileReference; lastKnownFileType = text.plist.strings; name = vi; path = vi.lproj/Localizable.strings; sourceTree = "<group>"; };
 		B1AP00002FA1000100A15674 /* APIProvider.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIProvider.swift; sourceTree = "<group>"; };
+		D2PP00A12FC0003000C33333 /* ProviderPreset.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderPreset.swift; sourceTree = "<group>"; };
 		B1AP00102FA1000100A15674 /* APIProviderStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIProviderStore.swift; sourceTree = "<group>"; };
 		B1AP00202FA1000100A15674 /* APIProviderDistributor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIProviderDistributor.swift; sourceTree = "<group>"; };
 		B1AP00302FA1000200A15674 /* APIProviderCPALinkStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = APIProviderCPALinkStore.swift; sourceTree = "<group>"; };
@@ -379,6 +395,8 @@
 		B1REFA002F97002000A15674 /* ProxyRuntimeService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyRuntimeService.swift; sourceTree = "<group>"; };
 		B1REFB002F97002000A15674 /* ProviderRefreshResult.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderRefreshResult.swift; sourceTree = "<group>"; };
 		B1TLS0002F97003000A15674 /* TLSCertificateManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TLSCertificateManager.swift; sourceTree = "<group>"; };
+		D2MS00A12FC0003000C11111 /* ModelCatalogSyncSupport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelCatalogSyncSupport.swift; sourceTree = "<group>"; };
+		D2MD00A12FC0003000C55555 /* ModelsDevPricingService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelsDevPricingService.swift; sourceTree = "<group>"; };
 		C1CDP0022FD1000100B26789 /* ClaudeDesktopProfileStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeDesktopProfileStore.swift; sourceTree = "<group>"; };
 		5E55C0000000000000000001 /* TerminalLauncher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TerminalLauncher.swift; sourceTree = "<group>"; };
 		C1CDI0022FD1000200B26789 /* ClaudeDesktopIntegrationManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ClaudeDesktopIntegrationManager.swift; sourceTree = "<group>"; };
@@ -387,6 +405,7 @@
 		C1AA000300000000000000A3 /* ProxyModelLibraryEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProxyModelLibraryEditor.swift; sourceTree = "<group>"; };
 		C1AA000500000000000000A5 /* ModelExtraParametersEditor.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ModelExtraParametersEditor.swift; sourceTree = "<group>"; };
 		C1AA000400000000000000A4 /* PublicModelPricingImport.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PublicModelPricingImport.swift; sourceTree = "<group>"; };
+		D2PP00A22FC0003000C44444 /* ProviderPresetViews.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ProviderPresetViews.swift; sourceTree = "<group>"; };
 		C1AV00022FB0004000B26789 /* OpenCodeNodeAvailabilitySection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OpenCodeNodeAvailabilitySection.swift; sourceTree = "<group>"; };
 		C1CA00012FCA005000B26789 /* CallAnalyticsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CallAnalyticsStore.swift; sourceTree = "<group>"; };
 		5E55C0000000000000000003 /* SessionCenterStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SessionCenterStore.swift; sourceTree = "<group>"; };
@@ -426,6 +445,8 @@
 		C1CPA0142FD000B000B26789 /* THIRD_PARTY_NOTICES.md */ = {isa = PBXFileReference; lastKnownFileType = text; path = THIRD_PARTY_NOTICES.md; sourceTree = SOURCE_ROOT; };
 		C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIProxyCredentialAdapter.swift; sourceTree = "<group>"; };
 		C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CLIProxyGeminiCredentialBridge.swift; sourceTree = "<group>"; };
+		C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TokenSaverSettingsView.swift; sourceTree = "<group>"; };
+		C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = GeminiCredentialBridge.swift; sourceTree = "<group>"; };
 		C1CG10002FB0001000B26789 /* CodexGlobalConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexGlobalConfig.swift; sourceTree = "<group>"; };
 		C1CX00002FB0000100B26789 /* CodexConfigManager.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexConfigManager.swift; sourceTree = "<group>"; };
 		C1CX00022FB0000200B26789 /* CodexProxyManagementView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CodexProxyManagementView.swift; sourceTree = "<group>"; };
@@ -517,6 +538,7 @@
 				C1CA00012FCA005000B26789 /* CallAnalyticsStore.swift */,
 				5E55C0000000000000000003 /* SessionCenterStore.swift */,
 				5EF87F022F8D0ED3002FE291 /* ProxyViewModel.swift */,
+				D2MS00A22FC0003000C22222 /* ModelAutoSyncCoordinator.swift */,
 				A2B3C4D32F96001000A15674 /* ProxyViewModel+LogManagement.swift */,
 				A2B3C4D52F96001000A15674 /* ProxyViewModel+ProxyServer.swift */,
 				A2B3C4D72F96001000A15674 /* ProxyViewModel+Aggregation.swift */,
@@ -571,6 +593,7 @@
 				C1NP00002F9C000100A15674 /* NodeProfile.swift */,
 				C1OE00012FB0002000B26789 /* OpenCodeNode.swift */,
 				B1AP00002FA1000100A15674 /* APIProvider.swift */,
+				D2PP00A12FC0003000C33333 /* ProviderPreset.swift */,
 				7EFAD0012F87AC7100A15674 /* AppSettings.swift */,
 				5EFAD73D2F87AC7100A15674 /* AppState.swift */,
 				A1APPST012F92000000A15674 /* AppState+ProviderGrouping.swift */,
@@ -619,6 +642,7 @@
 				C1CPA0122FD000A000B26789 /* CLIProxyManagementClient.swift */,
 				C1CPA0162FD000C000B26789 /* CLIProxyCredentialAdapter.swift */,
 				C1CPA0582FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift */,
+				C1CPA0622FD0036000B26789 /* GeminiCredentialBridge.swift */,
 				5EFAD7442F87AC7100A15674 /* APIService.swift */,
 				A5A0E1C02F9A001000A15674 /* QuotaShareService.swift */,
 				B1REFA002F97002000A15674 /* ProxyRuntimeService.swift */,
@@ -630,6 +654,8 @@
 				C1OE000D2FB0002000B26789 /* OpenCodeProxyRuntime.swift */,
 				C1OE00192FB0004000B26789 /* OpenCodeConnectivityTester.swift */,
 				B1TLS0002F97003000A15674 /* TLSCertificateManager.swift */,
+				D2MS00A12FC0003000C11111 /* ModelCatalogSyncSupport.swift */,
+				D2MD00A12FC0003000C55555 /* ModelsDevPricingService.swift */,
 				C1CDP0022FD1000100B26789 /* ClaudeDesktopProfileStore.swift */,
 				5E55C0000000000000000001 /* TerminalLauncher.swift */,
 				C1SP00002FB0000500B26789 /* SystemProxyDetector.swift */,
@@ -660,7 +686,10 @@
 				C1CPA03A2FD0025000B26789 /* SubscriptionGatewayAccountDetailSheet.swift */,
 				C1CPA01E2FD0010000B26789 /* SubscriptionGatewayConnectionsView.swift */,
 				C1CPA0202FD0011000B26789 /* SubscriptionGatewaySettingsView.swift */,
+				C1CPA0602FD0035000B26789 /* TokenSaverSettingsView.swift */,
 				C1CPA0542FD0032000B26789 /* SubscriptionGatewaySettingsRuntimePane.swift */,
+				7FAA9228FC8349BEB2F2AD3D /* PoolProtectionControls.swift */,
+				1C73CAB12A82429690ADA677 /* AgentToolsView.swift */,
 				C1CPA0562FD0033000B26789 /* SubscriptionGatewayClientKeysPane.swift */,
 				5EF87F052F8D0EED002FE291 /* ProxyConfigEditorView.swift */,
 				C1AA000100000000000000A1 /* JSONWebEditorAssets.swift */,
@@ -668,6 +697,7 @@
 				C1AA000300000000000000A3 /* ProxyModelLibraryEditor.swift */,
 				C1AA000500000000000000A5 /* ModelExtraParametersEditor.swift */,
 				C1AA000400000000000000A4 /* PublicModelPricingImport.swift */,
+				D2PP00A22FC0003000C44444 /* ProviderPresetViews.swift */,
 				5EF87F062F8D0EED002FE291 /* ProxyManagementView.swift */,
 				C1CDH0022FD1000300B26789 /* ClaudeHubView.swift */,
 				C1PM00012FB0000300B26789 /* ProxyManagementView+Toolbar.swift */,
@@ -676,6 +706,7 @@
 				C1PM00072FB0000300B26789 /* ProxyManagementView+Card.swift */,
 				F9DC4A1479C740ED996962FC /* ProxyStatsView.swift */,
 				C1CX00022FB0000200B26789 /* CodexProxyManagementView.swift */,
+				C1CL00022FD2000300B26789 /* CodexLocalManagementView.swift */,
 				C1AG00042FD2000200B26789 /* AntigravityManagementView.swift */,
 				B1GP00302F97002000A15674 /* CodexGlobalProxySection.swift */,
 				B1GP00502F97002000A15674 /* ClaudeGlobalProxySection.swift */,
@@ -871,6 +902,7 @@
 				Base,
 				"zh-Hans",
 				zh_CN,
+				vi,
 			);
 			mainGroup = 5EFAD7262F87AC3300A15674;
 			minimizedProjectReferenceProxies = 1;
@@ -932,6 +964,7 @@
 				9BEFE5B01F5DF04F8E29C1EE /* TokenSaverReleaseManager.swift in Sources */,
 				C1AG00012FD2000100B26789 /* AntigravityAccountSwitcher.swift in Sources */,
 				C1AG00032FD2000200B26789 /* AntigravityManagementView.swift in Sources */,
+				C1CL00012FD2000300B26789 /* CodexLocalManagementView.swift in Sources */,
                 C1CS00010000000000000001 /* ClaudeSubscriptionManager.swift in Sources */,
                 C1CS00020000000000000001 /* ClaudeSubscriptionConnectionView.swift in Sources */,
                 C1CS00030000000000000001 /* ClaudeSubscriptionAccountActions.swift in Sources */,
@@ -955,6 +988,8 @@
 				C1CPA0132FD000A000B26789 /* CLIProxyManagementClient.swift in Sources */,
 				C1CPA0172FD000C000B26789 /* CLIProxyCredentialAdapter.swift in Sources */,
 				C1CPA0592FD0034000B26789 /* CLIProxyGeminiCredentialBridge.swift in Sources */,
+				C1CPA0612FD0035000B26789 /* TokenSaverSettingsView.swift in Sources */,
+				C1CPA0632FD0036000B26789 /* GeminiCredentialBridge.swift in Sources */,
 				C1CPA0312FD0020000B26789 /* CLIProxyUpstreamCapability.swift in Sources */,
 				C1CPA0332FD0021000B26789 /* CLIProxyAuthImportPlanner.swift in Sources */,
 				C1CPA0352FD0022000B26789 /* CLIProxyGatewayManager+Import.swift in Sources */,
@@ -962,6 +997,8 @@
 				C1CPA0512FD0030000B26789 /* CLIProxyClientKeyModels.swift in Sources */,
 				C1CPA0532FD0031000B26789 /* CLIProxyClientKeyStore.swift in Sources */,
 				C1CPA0552FD0032000B26789 /* SubscriptionGatewaySettingsRuntimePane.swift in Sources */,
+				12EA940922F545DB83E76B34 /* PoolProtectionControls.swift in Sources */,
+				AF7813F22E494D438DF55CCB /* AgentToolsView.swift in Sources */,
 				C1CPA0572FD0033000B26789 /* SubscriptionGatewayClientKeysPane.swift in Sources */,
 				C1CPA0372FD0023000B26789 /* SubscriptionGatewayAddUpstreamSheet.swift in Sources */,
 				C1CPA0392FD0024000B26789 /* SubscriptionGatewayImportSheet.swift in Sources */,
@@ -990,6 +1027,7 @@
 				B1GP00212F97002000A15674 /* GlobalProxyManager.swift in Sources */,
 				B1GP00412F97002000A15674 /* GlobalProxyTrackAdapters.swift in Sources */,
 				B1AP00012FA1000100A15674 /* APIProvider.swift in Sources */,
+				D2PP00B12FC0003000C33333 /* ProviderPreset.swift in Sources */,
 				B1AP00112FA1000100A15674 /* APIProviderStore.swift in Sources */,
 				B1AP00212FA1000100A15674 /* APIProviderDistributor.swift in Sources */,
 				B1AP00312FA1000200A15674 /* APIProviderCPALinkStore.swift in Sources */,
@@ -997,6 +1035,8 @@
 				B1AP00412FA1000100A15674 /* APIProviderCard.swift in Sources */,
 				B1AP00512FA1000100A15674 /* APIProviderEditorView.swift in Sources */,
 				B1TLS0012F97003000A15674 /* TLSCertificateManager.swift in Sources */,
+				D2MS00B12FC0003000C11111 /* ModelCatalogSyncSupport.swift in Sources */,
+				D2MD00B12FC0003000C55555 /* ModelsDevPricingService.swift in Sources */,
 				5EFAD7752F87AFE700A15674 /* ProviderCard.swift in Sources */,
 				C0DECB000000000000000003 /* CodexResetCreditsView.swift in Sources */,
 				BABA33000000000000000001 /* NodeBalanceView.swift in Sources */,
@@ -1071,6 +1111,7 @@
 				C1AA000300000000000000B3 /* ProxyModelLibraryEditor.swift in Sources */,
 				C1AA000500000000000000B5 /* ModelExtraParametersEditor.swift in Sources */,
 				C1AA000400000000000000B4 /* PublicModelPricingImport.swift in Sources */,
+				D2PP00B22FC0003000C44444 /* ProviderPresetViews.swift in Sources */,
 				5EF87F082F8D0EED002FE291 /* ProxyManagementView.swift in Sources */,
 				C1CDH0012FD1000300B26789 /* ClaudeHubView.swift in Sources */,
 				C1PM00022FB0000300B26789 /* ProxyManagementView+Toolbar.swift in Sources */,
@@ -1116,6 +1157,7 @@
 				5EFAD78D2F87B10500A15674 /* AccountNoteEditorView.swift in Sources */,
 				5EFAD78F2F87B10600A15674 /* Utilities.swift in Sources */,
 				5EF87F042F8D0ED3002FE291 /* ProxyViewModel.swift in Sources */,
+				D2MS00B22FC0003000C22222 /* ModelAutoSyncCoordinator.swift in Sources */,
 				A2B3C4D22F96001000A15674 /* ClaudeSettingsManager.swift in Sources */,
 				A2B3C4D42F96001000A15674 /* ProxyViewModel+LogManagement.swift in Sources */,
 				A2B3C4D62F96001000A15674 /* ProxyViewModel+ProxyServer.swift in Sources */,
@@ -1170,6 +1212,7 @@
 			children = (
 				A3F510022F97000100A15674 /* en */,
 				A3F510032F97000100A15674 /* zh_CN */,
+				A3F510052F97000100A15674 /* vi */,
 			);
 			name = Localizable.strings;
 			sourceTree = "<group>";
@@ -1315,7 +1358,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.16.0;
+				MARKETING_VERSION = 0.16.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop.debug;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -1347,7 +1390,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 0.16.0;
+				MARKETING_VERSION = 0.16.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.aiusage.desktop;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

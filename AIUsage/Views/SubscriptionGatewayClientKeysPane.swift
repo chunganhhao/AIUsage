@@ -17,6 +17,14 @@ struct SubscriptionGatewayClientKeysPane: View {
     @State private var flashCopiedID: String?
 
     var body: some View {
+        if CLIProxyRuntimeController.managedRuntimeAvailable {
+            clientKeyControls
+        } else {
+            GatewayErrorBanner(message: L("CPA client key management is disabled while the runtime is paused.", "托管 CPA 暂停期间无法更改客户端密钥。"))
+        }
+    }
+
+    private var clientKeyControls: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
@@ -153,6 +161,7 @@ struct SubscriptionGatewayClientKeysPane: View {
     }
 
     private func addKey(label: String, key: String?) async {
+        guard CLIProxyRuntimeController.managedRuntimeAvailable else { return }
         isBusy = true
         actionError = nil
         defer { isBusy = false }
@@ -168,6 +177,7 @@ struct SubscriptionGatewayClientKeysPane: View {
     }
 
     private func setEnabled(_ entry: CLIProxyClientKeyEntry, enabled: Bool) async {
+        guard CLIProxyRuntimeController.managedRuntimeAvailable else { return }
         isBusy = true
         actionError = nil
         defer { isBusy = false }
@@ -182,6 +192,7 @@ struct SubscriptionGatewayClientKeysPane: View {
     }
 
     private func deleteKey(_ entry: CLIProxyClientKeyEntry) async {
+        guard CLIProxyRuntimeController.managedRuntimeAvailable else { return }
         isBusy = true
         actionError = nil
         defer {

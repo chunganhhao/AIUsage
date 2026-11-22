@@ -15,20 +15,44 @@ final class SecureAccountVault: @unchecked Sendable {
     /// Key under which the registry blob lives inside the unified vault item.
     private static let auxiliaryKey = "providerAccounts.registry"
 
-    private init() {}
+    private let credentialStore: QuotaBackend.AccountCredentialStore
+
+    init(credentialStore: QuotaBackend.AccountCredentialStore = .shared) {
+        self.credentialStore = credentialStore
+    }
 
     // MARK: - Public API
 
+    nonisolated var committedRevision: UInt64? {
+        credentialStore.committedAuxiliaryRevision(forKey: Self.auxiliaryKey)
+    }
+
     nonisolated func loadAccounts() -> [StoredProviderAccount] {
-        guard let data = AccountCredentialStore.shared.loadAuxiliaryData(forKey: Self.auxiliaryKey) else {
+        guard let data = credentialStore.loadAuxiliaryData(forKey: Self.auxiliaryKey) else {
             return []
         }
         return decodeAccounts(data)
     }
 
-    nonisolated func saveAccounts(_ accounts: [StoredProviderAccount]) throws {
+    @discardableResult
+    nonisolated func saveAccounts(
+        _ accounts: [StoredProviderAccount],
+        revision: UInt64
+    ) throws -> AccountRegistrySaveOutcome {
         let data = try JSONEncoder().encode(accounts)
-        try AccountCredentialStore.shared.saveAuxiliaryData(data, forKey: Self.auxiliaryKey)
+        switch try credentialStore.saveAuxiliaryData(
+            data,
+            forKey: Self.auxiliaryKey,
+            revision: revision
+        ) {
+        case .committed:
+            return .committed
+        case .superseded(let committedRevision, let committedData):
+            return .superseded(
+                committedRevision: committedRevision,
+                committedAccounts: committedData.map { decodeAccounts($0) }
+            )
+        }
     }
 
     // MARK: - Helpers

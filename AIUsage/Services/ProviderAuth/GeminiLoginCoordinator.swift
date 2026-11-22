@@ -357,7 +357,7 @@ final class GeminiLoginCoordinator: ObservableObject {
     }
 
     private nonisolated static func resolveOAuthConfiguration() -> OAuthConfiguration? {
-        guard let credentials = CLIProxyGeminiCredentialBridge.oauthClientCredentials() else {
+        guard let credentials = GeminiCredentialBridge.oauthClientCredentials() else {
             return nil
         }
         return OAuthConfiguration(

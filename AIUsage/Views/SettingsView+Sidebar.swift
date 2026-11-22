@@ -38,7 +38,7 @@ extension SettingsView {
         HStack(spacing: 10) {
             sidebarVisibilityIcon(item)
                 .frame(width: 20, height: 20)
-            Text(item.title)
+            Text(item.settingsTitle)
                 .font(.subheadline)
             Spacer(minLength: 12)
             Toggle("", isOn: Binding(

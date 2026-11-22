@@ -92,14 +92,50 @@ extension QuotaHTTPServer {
 
     // MARK: - Identity Loading
 
-    private func loadTLSIdentity(from path: String) throws -> (SecIdentity, [SecCertificate]) {
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
+    public static func supportsMemoryOnlyTLSIdentityImport(isMacOS15OrLater: Bool? = nil) -> Bool {
+        if let isMacOS15OrLater { return isMacOS15OrLater }
+        if #available(macOS 15.0, *) { return true }
+        return false
+    }
 
-        let password = "aiusage-proxy-tls"
+    func loadTLSIdentity(
+        from path: String,
+        requireMemoryOnlyImport: Bool = true,
+        isMacOS15OrLater: Bool? = nil
+    ) throws -> (SecIdentity, [SecCertificate]) {
+        guard Self.supportsMemoryOnlyTLSIdentityImport(isMacOS15OrLater: isMacOS15OrLater) else {
+            throw TLSSetupError.identityLoadFailed(errSecUnimplemented)
+        }
+
+        let identityURL = URL(fileURLWithPath: path).standardizedFileURL
+        try validateOwnerOnlyFile(identityURL)
+        let data = try Data(contentsOf: identityURL)
+
+        let password: String
+        if let envPassword = ProcessInfo.processInfo.environment["TLS_IDENTITY_PASSWORD"]?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !envPassword.isEmpty {
+            password = envPassword
+        } else {
+            let passwordURL = identityURL.deletingLastPathComponent().appendingPathComponent(".identity-pass")
+            try validateOwnerOnlyFile(passwordURL)
+            guard let filePassword = String(data: try Data(contentsOf: passwordURL), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespacesAndNewlines),
+                  !filePassword.isEmpty else {
+                throw TLSSetupError.identityLoadFailed(errSecAuthFailed)
+            }
+            password = filePassword
+        }
+
         var importItems: CFArray?
-        let importParams: [String: Any] = [
+        var importParams: [String: Any] = [
             kSecImportExportPassphrase as String: password
         ]
+        if #available(macOS 15.0, *) {
+            importParams[kSecImportToMemoryOnly as String] = kCFBooleanTrue
+        } else if requireMemoryOnlyImport {
+            throw TLSSetupError.identityLoadFailed(errSecUnimplemented)
+        }
         let status = SecPKCS12Import(data as CFData, importParams as CFDictionary, &importItems)
 
         guard status == errSecSuccess else {
@@ -113,20 +149,19 @@ extension QuotaHTTPServer {
 
         let chain = first[kSecImportItemCertChain as String] as? [SecCertificate] ?? []
 
-        if let identity = first[kSecImportItemIdentity as String] {
-            return (identity as! SecIdentity, chain) // swiftlint:disable:this force_cast
-        }
-
-        guard let cert = chain.first else {
+        guard let identity = first[kSecImportItemIdentity as String] else {
             throw TLSSetupError.identityLoadFailed(errSecItemNotFound)
         }
+        return (identity as! SecIdentity, chain) // swiftlint:disable:this force_cast
+    }
 
-        var identityRef: SecIdentity?
-        let matchStatus = SecIdentityCreateWithCertificate(nil, cert, &identityRef)
-        guard matchStatus == errSecSuccess, let identity = identityRef else {
-            throw TLSSetupError.identityLoadFailed(matchStatus)
+    private func validateOwnerOnlyFile(_ url: URL) throws {
+        var st = stat()
+        guard lstat(url.path, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFREG,
+              (st.st_mode & 0o077) == 0 else {
+            throw TLSSetupError.identityLoadFailed(errSecParam)
         }
-        return (identity, chain)
     }
 }
 

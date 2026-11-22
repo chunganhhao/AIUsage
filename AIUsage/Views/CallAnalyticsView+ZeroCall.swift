@@ -45,6 +45,7 @@ extension CallAnalyticsView {
                 if !rows.isEmpty {
                     Text(L("\(usedCount) used / \(rows.count) total · \(zombieCount) cleanup",
                            "已用 \(usedCount) / 共 \(rows.count) · 可清理 \(zombieCount)",
+                           "\(usedCount) đã dùng / \(rows.count) tổng · \(zombieCount) cần dọn",
                            key: "calls.zero.summary"))
                         .font(.caption2)
                         .foregroundStyle(.secondary)

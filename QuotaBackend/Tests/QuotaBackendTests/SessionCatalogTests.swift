@@ -266,6 +266,90 @@ final class SessionCatalogTests: XCTestCase {
         ])
     }
 
+    // MARK: Antigravity
+
+    func testAntigravityScansBrainAndSummariesDatabaseAndBuildsTranscript() throws {
+        let agyRoot = home + "/.gemini/antigravity"
+        let mainID = "22222222-3333-4444-8555-666666666666"
+        let subagentID = "99999999-3333-4444-8555-666666666666"
+        let mainLogs = agyRoot + "/brain/\(mainID)/.system_generated/logs"
+        let subLogs = agyRoot + "/brain/\(subagentID)/.system_generated/logs"
+        try FileManager.default.createDirectory(atPath: mainLogs, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(atPath: subLogs, withIntermediateDirectories: true)
+
+        let db = try openWritable(agyRoot + "/conversation_summaries.db")
+        defer { sqlite3_close(db) }
+        let encodedAppURI = URL(fileURLWithPath: home + "/app").absoluteString
+        try exec(db, """
+            CREATE TABLE conversation_summaries (
+              conversation_id TEXT PRIMARY KEY,
+              title TEXT,
+              preview TEXT,
+              step_count INTEGER,
+              last_modified_time TEXT,
+              workspace_uris TEXT,
+              status TEXT,
+              parent_conversation_id TEXT,
+              nesting_depth INTEGER,
+              not_fully_idle INTEGER
+            );
+            INSERT INTO conversation_summaries VALUES (
+              '\(mainID)', 'AGY session title', 'Preview text', 6,
+              '2026-11-08T08:10:00Z', '["\(encodedAppURI)"]',
+              'CASCADE_RUN_STATUS_IDLE', '', 0, 0
+            );
+            INSERT INTO conversation_summaries VALUES (
+              '\(subagentID)', 'Subagent task', 'Sub preview', 2,
+              '2026-11-08T08:10:00Z', '["\(encodedAppURI)"]',
+              'CASCADE_RUN_STATUS_IDLE', '\(mainID)', 1, 0
+            );
+            """)
+
+        let mainTranscript = """
+            {"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-08T08:00:00Z","content":"<USER_REQUEST>\\nFix Antigravity session reader\\n</USER_REQUEST>\\n<ADDITIONAL_METADATA>\\nCommand Working Directory: \(home!)/app\\n</ADDITIONAL_METADATA>\\n<USER_SETTINGS_CHANGE>\\nModel Selection changed to Claude Opus 4.6 (Thinking). No need to acknowledge.\\n</USER_SETTINGS_CHANGE>"}
+            {"step_index":1,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-08T08:01:00Z","content":"Inspecting files.","input_tokens":100,"output_tokens":50,"cache_read_tokens":250,"tool_calls":[{"name":"read_file","args":{"Path":"\(home!)/app/Sources/Main.swift"}},{"name":"edit_file","args":{"Path":"\(home!)/app/Sources/Main.swift"}},{"name":"run_command","args":{"CommandLine":"swift test"}},{"name":"call_mcp_tool","args":{"ServerName":"engram","ToolName":"mem_context"}}]}
+            {"step_index":2,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-08T08:01:01Z","content":"Read 20 lines."}
+            {"step_index":3,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-08T08:01:02Z","content":"Made 1 replacement."}
+            {"step_index":4,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-08T08:01:03Z","content":"Command exited with code 1.\\nTest suite failed"}
+            {"step_index":5,"source":"SYSTEM","type":"GENERIC","status":"DONE","created_at":"2026-11-08T08:01:04Z","content":"{}"}
+            {"step_index":6,"source":"SYSTEM","type":"CHECKPOINT","status":"DONE","created_at":"2026-11-08T08:05:00Z","content":""}
+            {"step_index":7,"source":"MODEL","type":"PLANNER_RESPONSE","status":"DONE","created_at":"2026-11-08T08:06:00Z","content":"All done."}
+
+            """
+        try mainTranscript.write(toFile: mainLogs + "/transcript.jsonl", atomically: true, encoding: .utf8)
+        try """
+            {"step_index":0,"source":"USER_EXPLICIT","type":"USER_INPUT","status":"DONE","created_at":"2026-11-08T08:00:00Z","content":"Subagent prompt"}
+            """.write(toFile: subLogs + "/transcript.jsonl", atomically: true, encoding: .utf8)
+
+        let catalog = catalog()
+        let sessions = catalog.scan()
+        XCTAssertEqual(sessions.map(\.sessionID), [mainID], "Subagent sessions must be excluded from main list")
+        let session = try XCTUnwrap(sessions.first)
+        XCTAssertEqual(session.tool, .antigravity)
+        XCTAssertEqual(session.title, "AGY session title")
+        XCTAssertEqual(session.directory, home + "/app")
+        XCTAssertEqual(session.model, "claude-opus-4.6")
+        XCTAssertEqual(session.promptCount, 1)
+        XCTAssertEqual(session.tokens, 400)
+        XCTAssertNil(session.resumeBlocker)
+        XCTAssertTrue(session.matches("fix antigravity"))
+
+        let transcript = try catalog.transcript(for: session)
+        XCTAssertEqual(transcript.items.map(\.entry), [
+            .prompt("Fix Antigravity session reader"),
+            .reply("Inspecting files."),
+            .steps([
+                step("Read", "Sources/Main.swift", .read, paths: [home + "/app/Sources/Main.swift"]),
+                step("Edit", "Sources/Main.swift", .edit, paths: [home + "/app/Sources/Main.swift"]),
+                step("Shell", "swift test", .command, failed: true, note: "Test suite failed"),
+                step("MCP", "engram · mem_context", .mcp)
+            ]),
+            .notice(.contextCompacted),
+            .reply("All done.")
+        ])
+        XCTAssertEqual(transcript.stats, TranscriptStats(prompts: 1, toolCalls: 4, failures: 1, filesChanged: 1))
+    }
+
     // MARK: Resume
 
     func testResumePlanValidatesIDsAndQuotesPaths() throws {
@@ -283,12 +367,22 @@ final class SessionCatalogTests: XCTestCase {
         XCTAssertTrue(script.contains("\n'claude' '--resume' '11111111-2222-4333-8444-555555555555'\n"))
 
         let codex = try SessionResumePlan.make(
-            for: summary(.codex, id: "019a0000-0000-7000-8000-000000000001", directory: home + "/gone"), homeDirectory: home)
+            for: summary(.codex, id: "019A0000-0000-7000-8000-000000000001", directory: home + "/gone"), homeDirectory: home)
         XCTAssertEqual(codex.directory, home, "Codex 目录不在时退回家目录")
-        XCTAssertEqual(codex.arguments, ["codex", "resume", "019a0000-0000-7000-8000-000000000001"])
+        XCTAssertEqual(codex.arguments, ["codex", "resume", "019A0000-0000-7000-8000-000000000001"])
+        XCTAssertEqual(codex.desktopDeepLinkURL, URL(string: "codex://threads/019a0000-0000-7000-8000-000000000001"))
+        XCTAssertNil(claude.desktopDeepLinkURL)
 
         let openCode = try SessionResumePlan.make(for: summary(.opencode, id: "ses_47d61c905ffesCirj", directory: home + "/app"), homeDirectory: home)
         XCTAssertEqual(openCode.arguments, ["opencode", "--session", "ses_47d61c905ffesCirj"])
+        XCTAssertNil(openCode.desktopDeepLinkURL)
+
+        let antigravity = try SessionResumePlan.make(
+            for: summary(.antigravity, id: "22222222-3333-4444-8555-666666666666", directory: home + "/app"),
+            homeDirectory: home
+        )
+        XCTAssertEqual(antigravity.arguments, ["open", "-a", "Antigravity", home + "/app"])
+        XCTAssertNil(antigravity.desktopDeepLinkURL)
 
         XCTAssertThrowsError(try SessionResumePlan.make(for: summary(.claude, id: "x; rm -rf ~", directory: home + "/app"))) {
             XCTAssertEqual($0 as? SessionResumeError, .invalidSessionID)

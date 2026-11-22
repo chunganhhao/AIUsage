@@ -86,13 +86,13 @@ final class ClaudeSubscriptionManager: ObservableObject {
             process.standardOutput = pipe
             process.standardError = FileHandle.nullDevice
             process.standardInput = FileHandle.nullDevice
+            process.terminationHandler = { _ in }
             try process.run()
             let deadline = Date().addingTimeInterval(10)
             while process.isRunning && Date() < deadline { try await Task.sleep(for: .milliseconds(50)) }
             if process.isRunning {
                 // 只清理本次诊断子进程，不终止用户的 Code / Gateway。
                 kill(process.processIdentifier, SIGKILL)
-                process.waitUntilExit()
                 throw ProviderError("cli_timeout", timeoutMessage)
             }
             return pipe.fileHandleForReading.readDataToEndOfFile()
@@ -187,10 +187,21 @@ final class ClaudeSubscriptionManager: ObservableObject {
 
     /// 回传写入快照后立即刷新卡片，不必等全局刷新周期。
     func startWatching() {
-        guard AppState.shared.settings.backendMode == "local" else { return }
+        guard AppState.shared.settings.backendMode == "local",
+              AgentVisibility.isVisible(.claude, hidden: AppSettings.shared.hiddenSidebarSections) else { return }
         let profiles = connectedProfiles
         profiles.forEach(watch)
         Task { await refreshIdentities(profiles) }
+    }
+
+    func stopWatching() {
+        pendingRefresh?.cancel()
+        pendingRefresh = nil
+        for source in watchers.values {
+            source.cancel()
+        }
+        watchers.removeAll()
+        snapshotSignatures.removeAll()
     }
 
     /// 启动时用官方 CLI 更新邮箱与套餐（如 Pro 升级到 Max），只改展示字段。

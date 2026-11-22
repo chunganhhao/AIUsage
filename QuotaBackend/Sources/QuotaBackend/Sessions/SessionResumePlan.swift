@@ -38,13 +38,19 @@ public struct SessionResumePlan: Equatable, Sendable {
             guard let existing else { throw SessionResumeError.directoryMissing }
             directory = existing
             arguments = ["opencode", "--session", summary.sessionID]
+        case .antigravity:
+            if summary.directory != nil && existing == nil {
+                throw SessionResumeError.directoryMissing
+            }
+            directory = existing ?? homeDirectory
+            arguments = ["open", "-a", "Antigravity", directory]
         }
         return SessionResumePlan(tool: summary.tool, sessionID: summary.sessionID, directory: directory, arguments: arguments)
     }
 
     static func isValidSessionID(_ id: String, tool: SessionTool) -> Bool {
         switch tool {
-        case .claude, .codex:
+        case .claude, .codex, .antigravity:
             return UUID(uuidString: id) != nil
         case .opencode:
             return id.hasPrefix("ses_") && id.count > 4 && id.dropFirst(4).allSatisfy { $0.isASCII && ($0.isLetter || $0.isNumber) }
@@ -54,6 +60,23 @@ public struct SessionResumePlan: Equatable, Sendable {
     /// 复制到剪贴板的一行命令。
     public var commandLine: String {
         "cd " + Self.quoteIfNeeded(directory) + " && " + arguments.map(Self.quoteIfNeeded).joined(separator: " ")
+    }
+
+    /// 桌面端 App 原生支持的单会话 Deep-Link（如 Codex.app 的 `codex://threads/<uuid>`）。
+    /// Antigravity.app v2.29.0 的 `antigravity://` 仅处理 customizations/teleport/open?project=...（未暴露 `/c/<cascadeId>`），
+    /// Claude.app / OpenCode.app 也不支持直接按本地 CLI sessionID 跳转，故返回 nil 并由调用方回退到打开项目目录。
+    public var desktopDeepLinkURL: URL? {
+        Self.desktopDeepLinkURL(for: tool, sessionID: sessionID)
+    }
+
+    public static func desktopDeepLinkURL(for tool: SessionTool, sessionID: String) -> URL? {
+        guard isValidSessionID(sessionID, tool: tool) else { return nil }
+        switch tool {
+        case .codex:
+            return URL(string: "codex://threads/\(sessionID.lowercased())")
+        case .claude, .opencode, .antigravity:
+            return nil
+        }
     }
 
     /// 一次性 `.command` 脚本：交互式登录 shell 运行（与用户自己的终端环境一致），

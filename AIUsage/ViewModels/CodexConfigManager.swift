@@ -158,6 +158,7 @@ final class CodexConfigManager {
         globalTOML: String? = nil,
         nodeTOML: String? = nil
     ) throws {
+        try validateManagedPathsNotInLegacyArchive()
         try migrateLegacySessionsIfNeeded()
         let previousProxyAPIKey = lastProxyAPIKey
         let persistedProxyAPIKey = CodexNoProxyFixer.managedAPIKeyIfPresent()
@@ -281,9 +282,26 @@ final class CodexConfigManager {
 
     // MARK: - Deactivation
 
+    private func validateManagedPathsNotInLegacyArchive() throws {
+        for candidate in [
+            (configPath as NSString).deletingLastPathComponent,
+            configPath,
+            backupPath,
+            authPath,
+            authBackupPath,
+            globalProxyModelCatalogPath,
+            CodexNoProxyFixer.envFilePath
+        ] {
+            if CodexCredentialPolicy.isLegacyCPAArchivePath(candidate) {
+                throw ProviderError("read_only_archive", "Legacy CPA archive credentials are read-only while managed CPA is paused.")
+            }
+        }
+    }
+
     /// 还原 config.toml：有备份则整文覆盖回原文并删除备份；无备份则剥离受管理块（必要时删文件）。
     /// 无论 config 走哪条路径，都把暂存的 ChatGPT `auth.json` 还原回去。
     func restore() throws {
+        try validateManagedPathsNotInLegacyArchive()
         try migrateLegacySessionsIfNeeded()
         let previousProxyAPIKey = lastProxyAPIKey
         let wasWatching = authDirWatch != nil

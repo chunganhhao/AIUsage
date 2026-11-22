@@ -111,6 +111,20 @@ struct AlertRow: View {
         alert.tone == "watch"    ? "exclamationmark.circle.fill" : "info.circle.fill"
     }
 
+    private var alertToneLabel: String {
+        switch (appState.language, alert.tone) {
+        case ("zh", "critical"): return "告急"
+        case ("zh", "watch"):    return "偏低"
+        case ("zh", _):          return "信息"
+        case ("vi", "critical"): return "Cảnh báo gấp"
+        case ("vi", "watch"):    return "Cần theo dõi"
+        case ("vi", _):          return "Thông tin"
+        case (_, "critical"):    return "Critical"
+        case (_, "watch"):       return "Watch"
+        default:                 return "Info"
+        }
+    }
+
     var body: some View {
         HStack(spacing: 12) {
             // 未读圆点（已读后消失）
@@ -136,7 +150,7 @@ struct AlertRow: View {
 
             // 已读标识 / 未读时显示标记已读按钮
             if isRead {
-                Label(appState.language == "zh" ? "已读" : "Read", systemImage: "checkmark.circle.fill")
+                Label(appState.language == "zh" ? "已读" : (appState.language == "vi" ? "Đã đọc" : "Read"), systemImage: "checkmark.circle.fill")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                     .labelStyle(.iconOnly)
@@ -147,12 +161,10 @@ struct AlertRow: View {
                         .font(.body)
                 }
                 .buttonStyle(.plain)
-                .help(appState.language == "zh" ? "标记为已读" : "Mark as read")
+                .help(appState.language == "zh" ? "标记为已读" : (appState.language == "vi" ? "Đánh dấu đã đọc" : "Mark as read"))
             }
 
-            Text(appState.language == "zh"
-                 ? (alert.tone == "critical" ? "告急" : alert.tone == "watch" ? "偏低" : "信息")
-                 : (alert.tone == "critical" ? "Critical" : alert.tone == "watch" ? "Watch" : "Info"))
+            Text(alertToneLabel)
                 .font(.caption2)
                 .bold()
                 .foregroundStyle(color)

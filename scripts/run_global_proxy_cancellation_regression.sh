@@ -7,7 +7,7 @@ trap 'rm -rf "$REGRESSION_DIR"' EXIT
 
 # 从正式源码提取方法原文，避免为测试搬动生产代码或复制一套实现。
 # Swift 顶层类型成员使用四空格缩进；只接受唯一的起止匹配，源码变化时明确失败。
-ruby - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionMethods.swift" "${1:-}" <<'RUBY'
+ruby -E UTF-8:UTF-8 - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionMethods.swift" "${1:-}" <<'RUBY'
 root, destination, mode = ARGV
 def extract(source, start_pattern, end_pattern)
   lines = source.lines
@@ -21,22 +21,17 @@ end
 
 runtime = File.read(File.join(root, 'AIUsage/Services/GlobalProxyRuntime.swift'))
 manager = File.read(File.join(root, 'AIUsage/ViewModels/GlobalProxyManager.swift'))
-cpa = File.read(File.join(root, 'AIUsage/ViewModels/CLIProxyGatewayManager.swift'))
 if mode == '--baseline'
   runtime = IO.popen(['git', '-C', root, 'show', 'HEAD:AIUsage/Services/GlobalProxyRuntime.swift'], &:read)
   manager = IO.popen(['git', '-C', root, 'show', 'HEAD:AIUsage/ViewModels/GlobalProxyManager.swift'], &:read)
-  # 旧版没有生命周期包装；同一个模拟分发操作直接运行在页面任务中。
-  cpa = "    func upsertManagedProvider(targets: Set<String>) async {\n        await applyManagedProvider(targets: targets)\n    }\n"
 end
 output = "import Foundation\nimport os.log\n"
 output += extract(runtime, /^enum GlobalProxyRuntimeError:/, /^}\s*$/)
 [
   ['GlobalProxyRuntime', runtime, /^    func switchUpstream\(/],
-  ['GlobalProxyManager', manager, /^    func reapplyActiveUpstream\(/],
-  ['CLIProxyGatewayManager', cpa, /^    func upsertManagedProvider\(/]
+  ['GlobalProxyManager', manager, /^    func reapplyActiveUpstream\(/]
 ].each do |type, source, signature|
   method = extract(source, signature, /^    }\s*$/)
-  method = method.sub('Set<ProxyTarget>', 'Set<String>') if type == 'CLIProxyGatewayManager'
   output += "\nextension #{type} {\n#{method}}\n"
 end
 File.write(destination, output)

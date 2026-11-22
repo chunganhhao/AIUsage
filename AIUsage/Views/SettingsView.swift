@@ -10,6 +10,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
     case menuBar
     case cardAppearance
     case proxy
+    case tokenSaver
     case notifications
     case about
 
@@ -22,6 +23,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return L("Menu Bar", "菜单栏")
         case .cardAppearance: return L("Card Appearance", "卡片外观")
         case .proxy: return L("Proxy", "代理")
+        case .tokenSaver: return L("Token Saver", "Token 节省")
         case .notifications: return L("Notifications", "通知")
         case .about: return L("About", "关于")
         }
@@ -34,6 +36,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return "menubar.rectangle"
         case .cardAppearance: return "rectangle.on.rectangle"
         case .proxy: return "server.rack"
+        case .tokenSaver: return "bolt.fill"
         case .notifications: return "bell"
         case .about: return "info.circle"
         }
@@ -47,6 +50,7 @@ enum SettingsCategory: String, CaseIterable, Identifiable {
         case .menuBar: return .indigo
         case .cardAppearance: return .teal
         case .proxy: return .orange
+        case .tokenSaver: return .purple
         case .notifications: return .red
         case .about: return .gray
         }
@@ -68,12 +72,8 @@ struct SettingsView: View {
     @State var launchHidden = UserDefaults.standard.bool(forKey: DefaultsKey.launchHidden)
     /// 关闭主窗口时最小化到托盘（issue #39）。缺省 false，与隐藏 Dock 解耦。
     @State var closeToTray = UserDefaults.standard.bool(forKey: DefaultsKey.closeToTray)
-    @State var launchAtLogin: Bool = {
-        if #available(macOS 13.0, *) {
-            return SMAppService.mainApp.status == .enabled
-        }
-        return false
-    }()
+    @State var launchAtLogin: Bool = false
+    @State var isLaunchAtLoginLoaded = false
     @State var showNotifications = UserDefaults.standard.bool(forKey: DefaultsKey.showNotifications)
     @State var lowQuotaThreshold: Double = UserDefaults.standard.double(forKey: DefaultsKey.lowQuotaThreshold)
     @State var remoteHostInput: String = ""
@@ -143,23 +143,27 @@ struct SettingsView: View {
             remoteTokenInput = QuotaShareTokenStore.load(.remote) ?? ""
             sharePortInput = "\(settings.shareQuotaPort)"
             shareAddresses = QuotaShareService.shareAddresses()
+            consumeRequestedSettingsCategory()
+        }
+        .task {
+            guard !isLaunchAtLoginLoaded else { return }
+            if #available(macOS 13.0, *) {
+                let enabled = await Task.detached(priority: .utility) {
+                    SMAppService.mainApp.status == .enabled
+                }.value
+                guard !Task.isCancelled, !isLaunchAtLoginLoaded else { return }
+                launchAtLogin = enabled
+                isLaunchAtLoginLoaded = true
+            } else {
+                isLaunchAtLoginLoaded = true
+            }
+        }
+        .onChange(of: appState.requestedSettingsCategory) { _, _ in
+            consumeRequestedSettingsCategory()
         }
         .onChange(of: hideDockIcon) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.hideDockIcon)
             updateDockIconVisibility(hidden: newValue)
-        }
-        .onChange(of: launchAtLogin) { _, newValue in
-            if #available(macOS 13.0, *) {
-                do {
-                    if newValue {
-                        try SMAppService.mainApp.register()
-                    } else {
-                        try SMAppService.mainApp.unregister()
-                    }
-                } catch {
-                    launchAtLogin = SMAppService.mainApp.status == .enabled
-                }
-            }
         }
         .onChange(of: showNotifications) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: DefaultsKey.showNotifications)
@@ -294,6 +298,8 @@ struct SettingsView: View {
                     cardAppearanceSection
                 case .proxy:
                     proxySection
+                case .tokenSaver:
+                    TokenSaverSettingsPane()
                 case .notifications:
                     notificationsSection
                 case .about:
@@ -320,11 +326,34 @@ struct SettingsView: View {
         )
     }
 
+    func consumeRequestedSettingsCategory() {
+        if let requested = appState.requestedSettingsCategory {
+            selectedCategory = requested
+            appState.requestedSettingsCategory = nil
+        }
+    }
+
     func updateDockIconVisibility(hidden: Bool) {
         if hidden {
             NSApp.setActivationPolicy(.accessory)
         } else {
             NSApp.setActivationPolicy(.regular)
+        }
+    }
+
+    func setLaunchAtLogin(_ newValue: Bool) {
+        guard isLaunchAtLoginLoaded else { return }
+        launchAtLogin = newValue
+        if #available(macOS 13.0, *) {
+            do {
+                if newValue {
+                    try SMAppService.mainApp.register()
+                } else {
+                    try SMAppService.mainApp.unregister()
+                }
+            } catch {
+                launchAtLogin = SMAppService.mainApp.status == .enabled
+            }
         }
     }
 }

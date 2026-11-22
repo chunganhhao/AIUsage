@@ -10,6 +10,15 @@ import QuotaBackend
 // 三条轨道各自观察自己的 GlobalProxyManager（codex/claude/opencode），不再只认 Codex 一条。
 // 依赖主视图的 proxyVM / openCodeStore / globalCodex / globalClaude / globalOpenCode / appState / openPanelTrack。
 
+private struct MenuBarOpenCodeObserver<Content: View>: View {
+    @ObservedObject private var store = OpenCodeNodeStore.shared
+    let content: (OpenCodeNodeStore) -> Content
+
+    var body: some View {
+        content(store)
+    }
+}
+
 extension MenuBarView {
 
     // MARK: - Chip 触发器（控制台一行三颗）
@@ -50,21 +59,23 @@ extension MenuBarView {
 
     /// OpenCode 轨道的胶囊 chip。
     func openCodeTrackSwitcher() -> some View {
-        let manager = globalOpenCode
-        let globalEnabled = manager.isEnabled
-        let globalActiveNode = globalEnabled ? manager.node(for: manager.activeNodeId) : nil
+        MenuBarOpenCodeObserver { openCodeStore in
+            let manager = globalOpenCode
+            let globalEnabled = manager.isEnabled
+            let globalActiveNode = globalEnabled ? manager.node(for: manager.activeNodeId) : nil
 
-        let activeNode = openCodeStore.activeNode
-        let isOn = activeNode != nil || globalEnabled
-        let accent = OpenCodeManagementView.brand
-        let activeLabel = globalEnabled
-            ? (globalActiveNode?.name ?? L("Global proxy", "全局代理"))
-            : (activeNode?.displayName ?? L("Off", "未启用"))
+            let activeNode = openCodeStore.activeNode
+            let isOn = activeNode != nil || globalEnabled
+            let accent = OpenCodeManagementView.brand
+            let activeLabel = globalEnabled
+                ? (globalActiveNode?.name ?? L("Global proxy", "全局代理"))
+                : (activeNode?.displayName ?? L("Off", "未启用"))
 
-        return chipButton(track: .opencode) {
-            trackSwitcherLabel(title: "OpenCode", brandAsset: "opencode", accent: accent,
-                               isOn: isOn, activeLabel: activeLabel,
-                               isGlobal: globalEnabled, isSelected: openPanelTrack == .opencode)
+            return chipButton(track: .opencode) {
+                trackSwitcherLabel(title: "OpenCode", brandAsset: "opencode", accent: accent,
+                                   isOn: isOn, activeLabel: activeLabel,
+                                   isGlobal: globalEnabled, isSelected: openPanelTrack == .opencode)
+            }
         }
     }
 
@@ -150,11 +161,15 @@ extension MenuBarView {
                         let isActive = activeId == nil
                             && ProviderActivationManager.shared.isActiveAccount(entry)
                         let viewOnly = ProviderActivationManager.shared.isRemoteViewOnly(entry)
+                        let switchingDisabled = ProviderActivationManager.shared.isSwitchingDisabled(for: entry.providerId)
                         return MenuBarTrackPanelRow(id: entry.id, name: entry.accountPrimaryLabel,
                                                     subtitle: viewOnly ? ProviderActivationManager.remoteViewOnlyLabel : nil,
-                                                    isActive: isActive, isDisabled: viewOnly) {
-                            try? ProviderActivationManager.shared.activateAccount(entry: entry)
+                                                    isActive: isActive, isDisabled: viewOnly || switchingDisabled) {
                             closePanel()
+                            Task { @MainActor in
+                                do { try await ProviderActivationManager.shared.activateAccount(entry: entry) }
+                                catch { ProviderActivationManager.shared.activationResult = .failure(SensitiveDataRedactor.redactedMessage(for: error)) }
+                            }
                         }
                     }))
             }
@@ -195,6 +210,14 @@ extension MenuBarView {
         }
 
         let preferred = manager.activeNodeId ?? activeId ?? globalNodes.first?.id
+        let picker: MenuBarModelPicker?
+        if family.isCodex {
+            picker = routeManaged
+                ? globalRouteModelPicker(manager: manager)
+                : codexNodeModelPicker(activeId: activeId)
+        } else {
+            picker = claudeCodeModelPicker(manager: manager)
+        }
         return MenuBarTrackPanel(
             title: title, brandAsset: brandAsset, accent: accent, manager: manager,
             canEnableGlobal: !globalNodes.isEmpty,
@@ -202,52 +225,151 @@ extension MenuBarView {
             onDeactivateActiveNode: onDeactivate,
             onEnableGlobal: { guard let id = preferred else { return }
                 Task { await manager.enable(activeNodeId: id) } },
-            onDisableGlobal: { Task { await manager.disable() } }
+            onDisableGlobal: { Task { await manager.disable() } },
+            modelPicker: picker
+        )
+    }
+
+    // MARK: - 模型选择（面板底部「模型」区）
+
+    /// Codex / OpenCode 全局代理：在常驻代理里热替换上游真实模型，CLI 侧入口名不变。
+    private func globalRouteModelPicker(manager: GlobalProxyManager) -> MenuBarModelPicker? {
+        guard manager.isEnabled,
+              let nodeId = manager.activeNodeId,
+              let node = manager.node(for: nodeId) else { return nil }
+        let models = manager.availableModels(for: nodeId)
+        guard models.count > 1 else { return nil }
+        return MenuBarModelPicker(
+            nodeName: node.name,
+            models: models,
+            current: manager.routedModel(for: nodeId),
+            note: L("Hot-swapped · running sessions keep working", "热切换 · 运行中的会话不受影响", "Đổi nóng · các phiên đang chạy vẫn tiếp tục hoạt động"),
+            onSelect: { _, model in
+                Task { await manager.switchRoutedModel(to: model, for: nodeId) }
+            }
+        )
+    }
+
+    /// Codex 每节点接入：改节点模型并重写 config.toml，新开的 Codex 会话生效。
+    private func codexNodeModelPicker(activeId: String?) -> MenuBarModelPicker? {
+        guard let activeId,
+              let node = proxyVM.configurations.first(where: { $0.id == activeId }) else { return nil }
+        let models = node.runtimeModelCatalog
+        guard models.count > 1 else { return nil }
+        return MenuBarModelPicker(
+            nodeName: node.name,
+            models: models,
+            current: node.modelMapping.bigModel.name,
+            note: L("Applies to new Codex sessions", "新开的 Codex 会话生效", "Áp dụng cho các phiên Codex mới"),
+            onSelect: { _, model in
+                Task { await proxyVM.switchDefaultModel(nodeID: activeId, to: model) }
+            }
+        )
+    }
+
+    /// Claude Code Gateway：按「默认 / Opus / Sonnet / Haiku」四条路由分别覆盖当前节点的模型。
+    /// 选回节点自身的默认值会移除覆盖，之后节点编辑仍会自动生效。
+    private func claudeCodeModelPicker(manager: GlobalProxyManager) -> MenuBarModelPicker? {
+        guard manager.isEnabled,
+              let nodeId = manager.activeNodeId,
+              let node = proxyVM.configurations.first(where: { $0.id == nodeId }) else { return nil }
+        let models = node.runtimeModelCatalog
+        guard models.count > 1 else { return nil }
+        let resolved = manager.config.effectiveClaudeCodeModels(for: node)
+        let routes = ClaudeAppModelRoute.allCases.map { route in
+            MenuBarModelPicker.Route(
+                id: route.rawValue,
+                title: route == .defaultModel ? L("Default", "默认", "Mặc định") : route.title,
+                current: resolved.model(for: route)
+            )
+        }
+        let hotSwitch = manager.config.effectiveClaudeCodeCatalogMode == .smartRoutes
+        return MenuBarModelPicker(
+            nodeName: node.name,
+            models: models,
+            routes: routes,
+            note: hotSwitch
+                ? L("Smart routes · applies immediately", "智能路由 · 立即生效", "Định tuyến thông minh · áp dụng ngay")
+                : L("Node catalog · restart Claude Code to apply", "节点目录 · 重启 Claude Code 后生效", "Danh mục nút · khởi động lại Claude Code để áp dụng"),
+            onSelect: { routeID, model in
+                guard let route = routeID.flatMap(ClaudeAppModelRoute.init(rawValue:)) else { return }
+                Task { await manager.updateClaudeCodeModelOverride(nodeID: nodeId, route: route, model: model) }
+            }
+        )
+    }
+
+    /// OpenCode 每节点接入：改「默认模型节点」的默认模型（即 opencode.json 顶层 model）。
+    /// 节点解析与 OpenCodeNodeStore.rewriteManagedConfig 一致：手选的默认节点优先，否则取列表中第一个激活节点。
+    private func openCodeNodeModelPicker(_ openCodeStore: OpenCodeNodeStore) -> MenuBarModelPicker? {
+        let activeIds = Set(openCodeStore.activeNodeIds)
+        let chosen = openCodeStore.openCodeDefaultNodeId.flatMap { id in
+            activeIds.contains(id) ? openCodeStore.nodes.first { $0.id == id } : nil
+        }
+        guard let node = chosen ?? openCodeStore.nodes.first(where: { activeIds.contains($0.id) }) else { return nil }
+        let models = node.models
+        guard models.count > 1 else { return nil }
+        return MenuBarModelPicker(
+            nodeName: node.displayName,
+            models: models,
+            current: node.effectiveDefaultModel,
+            note: L("Applies to new OpenCode sessions", "新开的 OpenCode 会话生效", "Áp dụng cho các phiên OpenCode mới"),
+            onSelect: { _, model in
+                guard let latest = openCodeStore.nodes.first(where: { $0.id == node.id }),
+                      latest.models.contains(model), latest.defaultModel != model else { return }
+                var updated = latest
+                updated.defaultModel = model
+                openCodeStore.upsert(updated)
+            }
         )
     }
 
     // MARK: - OpenCode 面板
 
     private func openCodePanel() -> some View {
-        let manager = globalOpenCode
-        let globalEnabled = manager.isEnabled
-        let globalNodes = manager.availableNodes()
-        let accent = OpenCodeManagementView.brand
-        let activeId = openCodeStore.activeNodeIds.last
+        MenuBarOpenCodeObserver { openCodeStore in
+            let manager = globalOpenCode
+            let globalEnabled = manager.isEnabled
+            let globalNodes = manager.availableNodes()
+            let accent = OpenCodeManagementView.brand
+            let activeId = openCodeStore.activeNodeIds.last
 
-        var sections: [MenuBarTrackPanelSection] = []
-        var onDeactivate: (() -> Void)?
+            var sections: [MenuBarTrackPanelSection] = []
+            var onDeactivate: (() -> Void)?
 
-        if globalEnabled {
-            sections = [hotSwapSection(manager: manager, nodes: globalNodes)]
-        } else {
-            let rows = openCodeStore.nodes.map { node -> MenuBarTrackPanelRow in
-                let isActive = openCodeStore.activeNodeIds.contains(node.id)
-                return MenuBarTrackPanelRow(
-                    id: node.id, name: node.displayName, isActive: isActive,
-                    isDisabled: !node.isComplete
-                ) {
-                    if isActive { try? openCodeStore.deactivate(node) }
-                    else { Task { try? await openCodeStore.activate(node) } }
-                    closePanel()
+            if globalEnabled {
+                sections = [hotSwapSection(manager: manager, nodes: globalNodes)]
+            } else {
+                let rows = openCodeStore.nodes.map { node -> MenuBarTrackPanelRow in
+                    let isActive = openCodeStore.activeNodeIds.contains(node.id)
+                    return MenuBarTrackPanelRow(
+                        id: node.id, name: node.displayName, isActive: isActive,
+                        isDisabled: !node.isComplete
+                    ) {
+                        if isActive { try? openCodeStore.deactivate(node) }
+                        else { Task { try? await openCodeStore.activate(node) } }
+                        closePanel()
+                    }
+                }
+                sections = [MenuBarTrackPanelSection(id: "nodes", rows: rows)]
+                if !openCodeStore.activeNodeIds.isEmpty {
+                    onDeactivate = { try? openCodeStore.deactivate(); closePanel() }
                 }
             }
-            sections = [MenuBarTrackPanelSection(id: "nodes", rows: rows)]
-            if !openCodeStore.activeNodeIds.isEmpty {
-                onDeactivate = { try? openCodeStore.deactivate(); closePanel() }
-            }
-        }
 
-        let preferred = manager.activeNodeId ?? activeId ?? globalNodes.first?.id
-        return MenuBarTrackPanel(
-            title: "OpenCode", brandAsset: "opencode", accent: accent, manager: manager,
-            canEnableGlobal: !globalNodes.isEmpty,
-            sections: sections,
-            onDeactivateActiveNode: onDeactivate,
-            onEnableGlobal: { guard let id = preferred else { return }
-                Task { await manager.enable(activeNodeId: id) } },
-            onDisableGlobal: { Task { await manager.disable() } }
-        )
+            let preferred = manager.activeNodeId ?? activeId ?? globalNodes.first?.id
+            return MenuBarTrackPanel(
+                title: "OpenCode", brandAsset: "opencode", accent: accent, manager: manager,
+                canEnableGlobal: !globalNodes.isEmpty,
+                sections: sections,
+                onDeactivateActiveNode: onDeactivate,
+                onEnableGlobal: { guard let id = preferred else { return }
+                    Task { await manager.enable(activeNodeId: id) } },
+                onDisableGlobal: { Task { await manager.disable() } },
+                modelPicker: globalEnabled
+                    ? globalRouteModelPicker(manager: manager)
+                    : openCodeNodeModelPicker(openCodeStore)
+            )
+        }
     }
 
     // MARK: - Section / Row 构造

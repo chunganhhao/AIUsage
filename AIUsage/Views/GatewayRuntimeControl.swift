@@ -140,12 +140,23 @@ struct GatewayRuntimeControl: View {
                 isOpen = false
                 Task { await runtime.stop() }
             }
+            if CLIProxyRuntimeController.managedRuntimeAvailable {
+                panelRow(
+                    title: L("Restart CPA", "重启 CPA"),
+                    systemImage: "arrow.clockwise"
+                ) {
+                    isOpen = false
+                    Task { await runtime.restart() }
+                }
+            }
+        } else if runtime.hasUnconfirmedListener || !CLIProxyRuntimeController.managedRuntimeAvailable {
             panelRow(
-                title: L("Restart CPA", "重启 CPA"),
-                systemImage: "arrow.clockwise"
+                title: L("Verify CPA Stopped", "验证 CPA 已停止"),
+                systemImage: "exclamationmark.shield",
+                destructive: true
             ) {
                 isOpen = false
-                Task { await runtime.restart() }
+                Task { await runtime.stop() }
             }
         } else {
             panelRow(

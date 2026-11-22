@@ -12,6 +12,7 @@ struct MenuBarProviderSection: View {
     let codexGlobalProxyManaged: Bool
     @Binding var activationMessage: String?
     @Binding var activationSuccess: Bool
+    var onRequestRestartConfirmation: ((ProviderAccountEntry) -> Void)? = nil
     @EnvironmentObject var appState: AppState
     @Environment(\.colorScheme) private var colorScheme
 
@@ -34,7 +35,8 @@ struct MenuBarProviderSection: View {
                     codexProxyActive: codexProxyActive,
                     codexGlobalProxyManaged: codexGlobalProxyManaged,
                     activationMessage: $activationMessage,
-                    activationSuccess: $activationSuccess
+                    activationSuccess: $activationSuccess,
+                    onRequestRestartConfirmation: onRequestRestartConfirmation
                 )
                 .environmentObject(appState)
             }

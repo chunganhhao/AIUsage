@@ -77,12 +77,16 @@ public enum CodexSessionProviderMigrator {
         }
     }
 
+    nonisolated(unsafe) static var afterDiscoveryHookForTesting: (() -> Void)?
+
     /// 幂等迁移默认 `~/.codex` 下的普通与已归档会话。
     @discardableResult
     public static func migrate(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) throws -> Report {
-        let paths = sessionFiles(homeDirectory: homeDirectory)
+        let discoveryArchiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+        let paths = sessionFiles(homeDirectory: homeDirectory, archiveRoots: discoveryArchiveRoots)
+        afterDiscoveryHookForTesting?()
         var candidates: [Candidate] = []
         candidates.reserveCapacity(paths.count / 8)
 
@@ -90,40 +94,48 @@ public enum CodexSessionProviderMigrator {
             candidates.append(contentsOf: try migrationCandidates(at: path))
         }
 
+        var migratedFilesCount = 0
         if !candidates.isEmpty {
-            var archive = try loadArchive(homeDirectory: homeDirectory)
-            let migratedAt = timestamp(Date())
-            var migratedAtBySession = archive.files.values.reduce(into: [String: String]()) { result, record in
-                if let existing = result[record.sessionID] {
-                    result[record.sessionID] = min(existing, record.migratedAt)
-                } else {
-                    result[record.sessionID] = record.migratedAt
+            let candidateArchiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+            candidates.removeAll { isArchiveBacked($0.path, homeDirectory: homeDirectory, archiveRoots: candidateArchiveRoots) }
+            if !candidates.isEmpty {
+                var archive = try loadArchive(homeDirectory: homeDirectory)
+                let migratedAt = timestamp(Date())
+                var migratedAtBySession = archive.files.values.reduce(into: [String: String]()) { result, record in
+                    if let existing = result[record.sessionID] {
+                        result[record.sessionID] = min(existing, record.migratedAt)
+                    } else {
+                        result[record.sessionID] = record.migratedAt
+                    }
                 }
-            }
-            for candidate in candidates {
-                let recordMigratedAt = migratedAtBySession[candidate.sessionID] ?? migratedAt
-                archive.files[archiveKey(for: candidate)] = MigrationRecord(
-                    sessionID: candidate.sessionID,
-                    originalProvider: candidate.originalProvider,
-                    migratedAt: recordMigratedAt,
-                    valueOffset: candidate.valueOffset,
-                    valueLength: candidate.originalValue.count
-                )
-                migratedAtBySession[candidate.sessionID] = recordMigratedAt
-            }
-            archive.updatedAt = migratedAt
+                for candidate in candidates {
+                    let recordMigratedAt = migratedAtBySession[candidate.sessionID] ?? migratedAt
+                    archive.files[archiveKey(for: candidate)] = MigrationRecord(
+                        sessionID: candidate.sessionID,
+                        originalProvider: candidate.originalProvider,
+                        migratedAt: recordMigratedAt,
+                        valueOffset: candidate.valueOffset,
+                        valueLength: candidate.originalValue.count
+                    )
+                    migratedAtBySession[candidate.sessionID] = recordMigratedAt
+                }
+                archive.updatedAt = migratedAt
 
-            // 迁移记录先落盘：即使随后进程退出，统计仍知道该会话迁移前的真实来源。
-            try saveArchive(archive, homeDirectory: homeDirectory)
-        }
-
-        for candidate in candidates {
-            try patchInPlace(candidate)
+                // 迁移记录先落盘：即使随后进程退出，统计仍知道该会话迁移前的真实来源。
+                try saveArchive(archive, homeDirectory: homeDirectory)
+                var patchedPaths = Set<String>()
+                for candidate in candidates {
+                    if try patchInPlace(candidate, homeDirectory: homeDirectory) {
+                        patchedPaths.insert(candidate.path)
+                    }
+                }
+                migratedFilesCount = patchedPaths.count
+            }
         }
         let migratedDatabaseRows = try migrateDatabaseProviderReferences(homeDirectory: homeDirectory)
         return Report(
             scannedFiles: paths.count,
-            migratedFiles: Set(candidates.map(\.path)).count,
+            migratedFiles: migratedFilesCount,
             migratedDatabaseRows: migratedDatabaseRows
         )
     }
@@ -151,9 +163,34 @@ public enum CodexSessionProviderMigrator {
 
     // MARK: - Discovery
 
-    private static func sessionFiles(homeDirectory: String) -> [String] {
+    private static func isArchiveBacked(
+        _ path: String,
+        homeDirectory: String,
+        archiveRoots: Set<String>
+    ) -> Bool {
+        CodexCredentialPolicy.isLegacyCPAArchivePath(
+            path,
+            homeDirectory: homeDirectory,
+            archiveRoots: archiveRoots
+        )
+    }
+
+    private static func isDatabaseArchiveBacked(
+        _ path: String,
+        homeDirectory: String,
+        archiveRoots: Set<String>
+    ) -> Bool {
+        [path, "\(path)-wal", "\(path)-shm", "\(path)-journal"].contains {
+            isArchiveBacked($0, homeDirectory: homeDirectory, archiveRoots: archiveRoots)
+        }
+    }
+
+    private static func sessionFiles(homeDirectory: String, archiveRoots: Set<String>) -> [String] {
         let codexHome = URL(fileURLWithPath: homeDirectory, isDirectory: true)
             .appendingPathComponent(".codex", isDirectory: true)
+        guard !isArchiveBacked(codexHome.path, homeDirectory: homeDirectory, archiveRoots: archiveRoots) else {
+            return []
+        }
         let roots = [
             codexHome.appendingPathComponent("sessions", isDirectory: true),
             codexHome.appendingPathComponent("archived_sessions", isDirectory: true),
@@ -161,6 +198,7 @@ public enum CodexSessionProviderMigrator {
 
         var paths: [String] = []
         for root in roots {
+            guard !isArchiveBacked(root.path, homeDirectory: homeDirectory, archiveRoots: archiveRoots) else { continue }
             guard let enumerator = FileManager.default.enumerator(
                 at: root,
                 includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -343,7 +381,15 @@ public enum CodexSessionProviderMigrator {
 
     // MARK: - In-place patch
 
-    private static func patchInPlace(_ candidate: Candidate) throws {
+    @discardableResult
+    private static func patchInPlace(
+        _ candidate: Candidate,
+        homeDirectory: String
+    ) throws -> Bool {
+        let writeArchiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+        guard !isArchiveBacked(candidate.path, homeDirectory: homeDirectory, archiveRoots: writeArchiveRoots) else {
+            return false
+        }
         let fd = open(candidate.path, O_RDWR | O_CLOEXEC | O_NOFOLLOW)
         guard fd >= 0 else {
             throw MigrationError.failedToPatch((candidate.path as NSString).lastPathComponent)
@@ -367,6 +413,7 @@ public enum CodexSessionProviderMigrator {
             _ = fsync(fd)
             throw MigrationError.failedToPatch((candidate.path as NSString).lastPathComponent)
         }
+        return true
     }
 
     private static func writeAll(_ data: Data, to fd: Int32, at offset: UInt64) -> Bool {
@@ -398,18 +445,23 @@ public enum CodexSessionProviderMigrator {
     private static func migrateDatabaseProviderReferences(homeDirectory: String) throws -> Int {
         var migrated = 0
         for target in databaseTargets(homeDirectory: homeDirectory) {
-            migrated += try updateProvider(in: target)
+            migrated += try updateProvider(in: target, homeDirectory: homeDirectory)
         }
         return migrated
     }
 
     private static func databaseTargets(homeDirectory: String) -> [DatabaseTarget] {
+        let archiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
         let codexHome = URL(fileURLWithPath: homeDirectory, isDirectory: true)
             .appendingPathComponent(".codex", isDirectory: true)
+        guard !isArchiveBacked(codexHome.path, homeDirectory: homeDirectory, archiveRoots: archiveRoots) else {
+            return []
+        }
         let roots = [codexHome, codexHome.appendingPathComponent("sqlite", isDirectory: true)]
         var targets = Set<DatabaseTarget>()
 
         for root in roots {
+            guard !isArchiveBacked(root.path, homeDirectory: homeDirectory, archiveRoots: archiveRoots) else { continue }
             guard let items = try? FileManager.default.contentsOfDirectory(
                 at: root,
                 includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
@@ -418,7 +470,8 @@ public enum CodexSessionProviderMigrator {
             for item in items {
                 guard let values = try? item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey]),
                       values.isRegularFile == true,
-                      values.isSymbolicLink != true else { continue }
+                      values.isSymbolicLink != true,
+                      !isDatabaseArchiveBacked(item.path, homeDirectory: homeDirectory, archiveRoots: archiveRoots) else { continue }
                 let name = item.lastPathComponent
                 if name.hasPrefix("state_"), item.pathExtension.lowercased() == "sqlite" {
                     targets.insert(DatabaseTarget(path: item.path, table: "threads"))
@@ -430,7 +483,11 @@ public enum CodexSessionProviderMigrator {
         return targets.sorted { lhs, rhs in lhs.path < rhs.path }
     }
 
-    private static func updateProvider(in target: DatabaseTarget) throws -> Int {
+    private static func updateProvider(in target: DatabaseTarget, homeDirectory: String) throws -> Int {
+        let writeArchiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+        guard !isDatabaseArchiveBacked(target.path, homeDirectory: homeDirectory, archiveRoots: writeArchiveRoots) else {
+            return 0
+        }
         var database: OpaquePointer?
         let flags = SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX
         guard sqlite3_open_v2(target.path, &database, flags, nil) == SQLITE_OK,
@@ -491,6 +548,11 @@ public enum CodexSessionProviderMigrator {
 
     private static func saveArchive(_ archive: MigrationArchive, homeDirectory: String) throws {
         let url = archiveURL(homeDirectory: homeDirectory)
+        let writeArchiveRoots = CodexCredentialPolicy.resolvedLegacyCPAArchiveRoots(homeDirectory: homeDirectory)
+        guard !isArchiveBacked(url.path, homeDirectory: homeDirectory, archiveRoots: writeArchiveRoots),
+              !isArchiveBacked(url.deletingLastPathComponent().path, homeDirectory: homeDirectory, archiveRoots: writeArchiveRoots) else {
+            throw MigrationError.failedToWriteArchive
+        }
         do {
             try FileManager.default.createDirectory(
                 at: url.deletingLastPathComponent(),

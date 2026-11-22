@@ -93,6 +93,7 @@ class AppState: ObservableObject {
     @Published var showSettings = false
     @Published var selectedProviderId: String?
     @Published var selectedSection: AppSection = .dashboard
+    @Published var requestedSettingsCategory: SettingsCategory?
     @Published var providerPickerMode: ProviderPickerMode?
     @Published var selectedProviderIds: Set<String> = AppState.initialState.selectedProviderIds {
         didSet { providerGroupsCacheDirty = true }
@@ -240,11 +241,19 @@ class AppState: ObservableObject {
                 await Task.yield()
                 providerPickerMode = .initialSetup
             }
+            await refreshCoordinator.hydrateFromDiskCacheIfNeeded()
             // 本地 Token 统计（Claude/Codex 日志）不依赖网络，先单独并发拉取，
             // 让热力图/费用卡尽快出现，而不必等所有网络账号刷新完成。
             refreshCoordinator.refreshLocalTokenStatsOnly()
+        } else {
+            await refreshCoordinator.hydrateFromDiskCacheIfNeeded()
         }
-        await refreshCoordinator.fetchDashboard()
+        // Off 模式下启动只还原磁盘快照与本地统计，不发远端配额请求。
+        guard AppSettings.shared.autoRefreshInterval != 0 else {
+            refreshCoordinator.markInitialLoadCompletedFromCache()
+            return
+        }
+        await refreshCoordinator.fetchDashboard(useRecentResults: true, automatic: true)
     }
 
     var providerCatalog: [ProviderCatalogItem] {
@@ -394,7 +403,10 @@ class AppState: ObservableObject {
             guard let self else { return }
             self.selectedProviderIds.insert(providerId)
             self.saveSelectedProviderIds()
-            self.refreshProvider(providerId)
+            Task { @MainActor [weak self] in
+                await self?.refreshCoordinator.syncExcludedAccountsToEngine()
+                self?.refreshProvider(providerId)
+            }
         }
     }
 
@@ -406,19 +418,95 @@ class AppState: ObservableObject {
         hideAccounts([entry])
     }
 
+    private func managedPauseContext(for entries: [ProviderAccountEntry]) -> (
+        credentialIDs: Set<String>,
+        hints: [CLIProxyGatewayManager.PauseAccountHint]
+    ) {
+        var ids = Set<String>()
+        var hints: [CLIProxyGatewayManager.PauseAccountHint] = []
+        for entry in entries {
+            if let storedID = entry.storedAccount?.credentialId?.nilIfBlank {
+                ids.insert(storedID)
+            }
+            if let liveID = entry.liveProvider?.id,
+               let extracted = AccountIdentityPolicy.extractCredentialId(from: liveID) {
+                ids.insert(extracted)
+            }
+            for credential in accountStore.matchingCredentials(for: entry) {
+                ids.insert(credential.id)
+            }
+            hints.append(CLIProxyGatewayManager.PauseAccountHint(
+                providerId: entry.providerId,
+                email: entry.accountEmail ?? entry.storedAccount?.email,
+                accountId: entry.liveProvider?.accountId ?? entry.storedAccount?.accountId
+            ))
+        }
+        return (ids, hints)
+    }
+
+    private func reportCPAPauseWarningIfNeeded(_ outcome: CLIProxyGatewayManager.ManagedPauseOutcome) {
+        var details: [String] = []
+        let unpaused = outcome.unconfirmedFiles + outcome.externalActiveFiles
+        if !unpaused.isEmpty {
+            details.append(unpaused.joined(separator: ", "))
+        }
+        if let reason = outcome.verificationError?.nilIfBlank {
+            details.append(reason)
+        }
+        guard !details.isEmpty else { return }
+        let summary = details.joined(separator: " — ")
+        refreshCoordinator.errorMessage = L(
+            "Dashboard paused, but CPA pause is not verified: \(summary)",
+            "已在面板暂停，但未能确认 CPA 暂停：\(summary)"
+        )
+    }
+
     func hideAccounts(_ entries: [ProviderAccountEntry]) {
-        // 订阅与 CPA 账号池彼此独立：隐藏/删除只影响订阅侧，不联动 disable CPA 副本。
+        let context = managedPauseContext(for: entries)
         accountStore.hideAccounts(entries) { [weak self] in
             self?.refreshCoordinator.removeLiveProviders(matching: entries)
             self?.refreshCoordinator.reapplyVisibleSortedProviders()
+            Task { @MainActor [weak self] in
+                await self?.refreshCoordinator.syncExcludedAccountsToEngine()
+                let outcome = await CLIProxyGatewayManager.shared.pauseManagedAuthFiles(
+                    forCredentialIDs: context.credentialIDs,
+                    accountHints: context.hints
+                )
+                self?.reportCPAPauseWarningIfNeeded(outcome)
+            }
         }
     }
 
     func deleteAccounts(_ entries: [ProviderAccountEntry]) {
+        let pauseContexts = entries.map { entry in
+            (entryId: entry.id, context: managedPauseContext(for: [entry]))
+        }
+        let purgeTargets = entries.map { entry in
+            refreshCoordinator.snapshotPurgeTarget(
+                for: entry,
+                matchedCredentials: accountStore.matchingCredentials(for: entry)
+            )
+        }
         accountStore.deleteAccounts(entries) { [weak self] deletedEntries in
             ClaudeSubscriptionManager.shared.releaseDeletedAccounts(deletedEntries)
             self?.refreshCoordinator.removeLiveProviders(matching: deletedEntries)
             self?.refreshCoordinator.reapplyVisibleSortedProviders()
+            let deletedIDs = Set(deletedEntries.map(\.id))
+            let deletedTargets = purgeTargets.filter { deletedIDs.contains($0.entryId) }
+            let deletedContexts = pauseContexts.filter { deletedIDs.contains($0.entryId) }
+            let deletedCredentialIDs = deletedContexts.reduce(into: Set<String>()) {
+                $0.formUnion($1.context.credentialIDs)
+            }
+            let deletedHints = deletedContexts.flatMap { $0.context.hints }
+            Task { @MainActor [weak self] in
+                await self?.refreshCoordinator.syncExcludedAccountsToEngine()
+                let outcome = await CLIProxyGatewayManager.shared.pauseManagedAuthFiles(
+                    forCredentialIDs: deletedCredentialIDs,
+                    accountHints: deletedHints
+                )
+                self?.reportCPAPauseWarningIfNeeded(outcome)
+                await self?.refreshCoordinator.purgePersistedSnapshots(targets: deletedTargets)
+            }
         }
     }
 
@@ -437,8 +525,8 @@ class AppState: ObservableObject {
         refreshCoordinator.setupClaudeCodeAutoRefresh()
     }
 
-    func refreshAllProviders() {
-        refreshCoordinator.refreshAllProviders()
+    func refreshAllProviders(automatic: Bool = false) {
+        refreshCoordinator.refreshAllProviders(automatic: automatic)
     }
 
     func refreshProvider(_ providerId: String) {
@@ -469,8 +557,9 @@ class AppState: ObservableObject {
         activationManager.canActivateProvider(providerId)
     }
 
-    func activateAccount(entry: ProviderAccountEntry) throws {
-        try activationManager.activateAccount(entry: entry)
+    @MainActor
+    func activateAccount(entry: ProviderAccountEntry) async throws {
+        try await activationManager.activateAccount(entry: entry)
     }
 
     func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool {

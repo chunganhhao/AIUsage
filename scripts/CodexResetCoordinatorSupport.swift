@@ -35,7 +35,7 @@ final class AppSettings: ObservableObject {
     }
     func fetchMultiAccountProvider(id: String) async -> [ProviderResult]? { await multi() }
     func fetchSingle(id: String) async -> ProviderResult? { await single() }
-    func fetchAll(ids: [String]) async -> DashboardSnapshot { await all() }
+    func fetchAll(ids: [String], useRecentResults: Bool = false, backgroundAutomatic: Bool = false) async -> DashboardSnapshot { await all() }
 }
 @MainActor final class APIService {
     static let shared = APIService()
@@ -48,6 +48,12 @@ final class AppSettings: ObservableObject {
 @MainActor final class ProviderRefreshCoordinator: ObservableObject {
     func credentialID(for provider: ProviderData) -> String? { nil }
     var providers: [ProviderData] = []
+    var refreshError: (message: String, providerId: String?, credentialId: String?)?
+    var errorMessage: String? {
+        get { refreshError?.message }
+        set { refreshError = newValue.map { ($0, nil, nil) } }
+    }
+    var deletedCredentialKeysThisSession: Set<String> = []
     var codexResetRefreshFence = CodexResetRefreshFence()
     let settings = AppSettings.shared
     let accountStore = AccountStore.shared
@@ -57,17 +63,23 @@ final class AppSettings: ObservableObject {
     var refreshingAccountIDs: Set<String> = []
     nonisolated func localizedDynamicText(_ text: String, _ language: String) -> String { text }
     func providerSort(_ a: ProviderData, _ b: ProviderData) -> Bool { a.id < b.id }
-    func isProviderHidden(_ provider: ProviderData) -> Bool { false }
     func currentProviderMatchingRefresh(_ provider: ProviderData) -> ProviderData? { providers.first { $0.id == provider.id } }
     func accountRefreshKey(providerId: String, credentialId: String) -> String { "\(providerId):\(credentialId)" }
     func completeAccountRefresh(refreshKey: String, result: ProviderRefreshResult) {}
     // 不扫描真实账号；fixture 每个原生身份只提供一个候选结果。
     func syncUnifiedManagedAccounts(for providerIds: [String]) async {}
-    func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil) -> [ProviderData] { incoming }
-    func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers }
+    func syncExcludedAccountsToEngine() async {}
+    func stabilizedBulkRefreshProviders(_ incoming: [ProviderData], preservingExistingFor: String? = nil, includingExistingFor: Set<String> = []) -> [ProviderData] { incoming }
+    func visibleProviders(from providers: [ProviderData]) -> [ProviderData] { providers.filter { !isProviderHidden($0) } }
     func timestampableProviders(for providers: [ProviderData]) -> [ProviderData] { providers }
     func selectedProviderIDList() -> [String] { ["codex"] }
     func sendErrorNotification(_ message: String) {}
+    func isCredentialStillRegistered(providerId: String, credentialId: String) -> Bool { true }
+    func resolvedFetchedDate(for provider: ProviderData) -> Date? { provider.fetchedAt.flatMap { SharedFormatters.parseISO8601($0) } }
+    func isLastKnownErrorPreservable(_ provider: ProviderData) -> Bool { provider.status != .error && !provider.windows.isEmpty }
+    func isTerminalStopFailure(_ provider: ProviderData) -> Bool { provider.status == .error && ["tos_violation", "account_disabled", "unsupported_client", "not_logged_in"].contains(provider.errorCode ?? "") }
+    func recordAccountCheckError(for provider: ProviderData, credentialId: String? = nil, message: String, errorCode: String?) {}
+    func clearAccountCheckError(for provider: ProviderData, credentialId: String? = nil) {}
 }
 @MainActor var fixtureLanguage = "en"
-@MainActor func L(_ english: String, _ chinese: String) -> String { fixtureLanguage == "zh" ? chinese : english }
+@MainActor func L(_ english: String, _ chinese: String, _ vietnamese: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String { fixtureLanguage == "zh" ? chinese : (fixtureLanguage == "vi" ? (vietnamese ?? english) : english) }

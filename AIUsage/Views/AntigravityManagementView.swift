@@ -55,9 +55,6 @@ struct AntigravityManagementView: View {
     @StateObject private var tokenSaver = TokenSaverSettingsController()
     @State private var envSummary = AntigravityEnvironmentSummary.empty
     @State private var environmentRefreshTask: Task<Void, Never>?
-    @State private var poolProtectionEnabled = false
-    @State private var poolProtectionResidual = false
-    @State private var poolProtectionError: String?
 
     @State private var showingAddAccount = false
     @State private var editingConfigFile: AntigravityEditableFile?
@@ -88,22 +85,15 @@ struct AntigravityManagementView: View {
                 }
                 summaryStrip
                 poolProtectionCard
+                GatewayCard { AgentConfigToolsView(platform: .antigravity) }
                 tokenSaverCard
                 AntigravitySubscriptionSection(
                     entries: antigravityEntries,
                     isAppInstalled: envSummary.isAppInstalled,
+                    isRestarting: isRestartingAGY || activation.isAntigravityRestarting || activation.isAntigravitySwitching,
                     storageDisplayPath: envSummary.activeStoragePath,
                     onAddAccount: { showingAddAccount = true },
-                    onRestartApp: { restartAntigravity() },
-                    onAccountSwitched: {
-                        refreshEnvironment()
-                    },
-                    onShowStatus: { message, isError in
-                        withAnimation(.easeInOut(duration: 0.2)) {
-                            statusBannerMessage = message
-                            statusBannerIsError = isError
-                        }
-                    }
+                    onRestartApp: { restartAntigravity() }
                 )
             }
             .padding(20)
@@ -145,13 +135,6 @@ struct AntigravityManagementView: View {
             tokenSaver.selectHarness(.antigravity)
         }
         refreshEnvironment()
-        poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
-        do {
-            poolProtectionResidual = try AntigravityPoolProtectionSettings.hasResidualProtection()
-            poolProtectionError = nil
-        } catch {
-            poolProtectionError = error.localizedDescription
-        }
     }
 
     // MARK: - Action Bar
@@ -226,23 +209,29 @@ struct AntigravityManagementView: View {
             icon: isRestartingAGY ? nil : "arrow.clockwise.circle.fill",
             role: .secondary,
             help: L(
-                "Gracefully quit and reopen Antigravity.app to load the newly switched account.",
-                "平滑退出并重新打开 Antigravity.app 以加载新切换的账号。"
+                "Gracefully quit and reopen Antigravity.app (does not modify Keychain or switch accounts).",
+                "平滑退出并重新打开 Antigravity.app（不会修改钥匙串或切换账号）。"
             )
         ) {
             restartAntigravity()
         }
-        .disabled(isRestartingAGY || !envSummary.isAppInstalled)
+        .disabled(isRestartingAGY || activation.isAntigravityRestarting || activation.isAntigravitySwitching || !envSummary.isAppInstalled)
     }
 
     private var refreshQuotasButton: some View {
         let refreshing = refreshCoordinator.isProviderRefreshInFlight("antigravity")
         return actionBarButton(
-            title: refreshing ? L("Refreshing…", "刷新中…") : L("Refresh Quotas", "刷新配额"),
-            icon: refreshing ? nil : "arrow.triangle.2.circlepath",
+            title: refreshing
+                ? L("Refreshing…", "刷新中…")
+                : L("Open Antigravity", "打开 Antigravity"),
+            icon: refreshing ? nil : "arrow.up.forward.app.fill",
             role: .secondary,
-            help: L("Refresh quota windows for all Antigravity accounts.", "刷新所有 Antigravity 账号的配额窗口。")
+            help: L(
+                "Snapshot-only mode: opens the official Antigravity app for fresh quota and reloads saved local snapshots (0 active quota RPC or remote Google API calls).",
+                "仅快照模式：打开官方 Antigravity 应用查看最新配额并重载本地缓存快照（0 次主动配额 RPC 或 Google 远端请求）。"
+            )
         ) {
+            AntigravityAccountSwitcher.openAntigravityApp()
             refreshCoordinator.refreshProvider("antigravity")
             refreshCoordinator.refreshProvider("antigravity-cost")
         }
@@ -254,23 +243,25 @@ struct AntigravityManagementView: View {
             title: L("Add Account", "添加账号"),
             icon: "plus.circle.fill",
             role: .primary,
-            help: L("Connect a Google Antigravity account via OAuth, IDE session, or auth file.", "通过 Google OAuth、IDE 会话或认证文件添加 Antigravity 账号。")
+            help: L("Add an Antigravity account from the running IDE session or a local auth file.", "通过正在运行的本地 IDE 会话或本地认证文件添加 Antigravity 账号。")
         ) {
             showingAddAccount = true
         }
     }
 
     private func restartAntigravity() {
-        guard !isRestartingAGY else { return }
+        guard !isRestartingAGY, !activation.isAntigravityRestarting else { return }
         isRestartingAGY = true
+        activation.isAntigravityRestarting = true
         Task { @MainActor in
-            let ok = await AntigravityAccountSwitcher.restartAntigravityApp()
+            let ok = await AntigravityAccountSwitcher.restartAntigravityApp(reapplyBeforeRelaunch: nil)
             isRestartingAGY = false
+            activation.isAntigravityRestarting = false
             refreshEnvironment()
             withAnimation(.easeInOut(duration: 0.2)) {
                 statusBannerIsError = !ok
                 statusBannerMessage = ok
-                    ? L("Antigravity.app restarted with the active account.", "Antigravity.app 已使用当前激活账号重启。")
+                    ? L("Antigravity.app restarted.", "Antigravity.app 已重新启动。")
                     : L("Could not restart Antigravity.app automatically. Please reopen it manually.", "无法自动重启 Antigravity.app，请手动重新打开。")
             }
         }
@@ -342,13 +333,6 @@ struct AntigravityManagementView: View {
                 .font(.caption.weight(.medium))
                 .foregroundStyle(.primary)
             Spacer()
-            if !isError && envSummary.isAppInstalled {
-                Button(L("Restart AGY Now", "立即重启 AGY")) {
-                    restartAntigravity()
-                }
-                .buttonStyle(.bordered)
-                .controlSize(.mini)
-            }
             Button {
                 withAnimation(.easeInOut(duration: 0.15)) {
                     statusBannerMessage = nil
@@ -434,7 +418,11 @@ struct AntigravityManagementView: View {
             }
             return "—"
         }
-        let values = windows.compactMap(\.remainingPercent)
+        let coreWindows = windows.filter {
+            !$0.label.localizedCaseInsensitiveContains("argon")
+                && !$0.label.localizedCaseInsensitiveContains("carbon")
+        }
+        let values = (coreWindows.isEmpty ? windows : coreWindows).compactMap(\.remainingPercent)
         guard let minVal = values.min() else { return "—" }
         return "\(Int(minVal.rounded()))%"
     }
@@ -490,71 +478,76 @@ struct AntigravityManagementView: View {
     private var poolProtectionCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 10) {
-                Image(systemName: "shield.lefthalf.filled.badge.checkmark")
+                Image(systemName: "checkmark.shield.fill")
                     .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.purple)
+                    .foregroundStyle(.teal)
 
                 VStack(alignment: .leading, spacing: 2) {
                     HStack(spacing: 8) {
-                        Text(L("Smart Pool Protection & TOS Safety", "智能分池保护与账号安全策略"))
+                        Text(L("Snapshot-Only Quota Policy", "仅快照配额策略"))
                             .font(.subheadline.weight(.semibold))
-                        poolProtectionBadge
-                        tosSafeBadge
+                        TokenSaverStatusBadge(
+                            text: L("Snapshot Only (0 active RPC)", "仅本地快照（0 主动请求）"),
+                            tone: .active,
+                            id: "agy-tos-safe-badge"
+                        )
                     }
                     Text(L(
-                        "Isolates depleted Claude, Gemini Pro/Flash or Argon pools without locking the whole account. TOS-safe defaults keep project-switching and credit flags disabled.",
-                        "当 Claude、Gemini Pro/Flash 或 Argon 单个模型池耗尽时仅隔离该池，不停用整号；默认关闭跨项目切换与积分实验标志以保护账号安全。"
+                        "Displays last-known saved quota snapshots and local token stats. Direct third-party Google consumer API checks, private IDE quota RPC, browser OAuth, and background remote polling are disabled — open the official Antigravity app for live quota.",
+                        "仅展示已保存的本地配额快照与本地 Token 统计；已禁用第三方 Google 消费者接口检查、私有 IDE 配额 RPC、浏览器 OAuth 与后台远程轮询——请打开官方 Antigravity 应用查看实时配额。"
                     ))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
                 }
 
                 Spacer()
-
-                Toggle("", isOn: Binding(
-                    get: { poolProtectionEnabled },
-                    set: { enabled in
-                        do {
-                            try AntigravityPoolProtectionSettings.setEnabled(enabled)
-                            reloadState()
-                        } catch {
-                            poolProtectionEnabled = AntigravityPoolProtectionSettings.isEnabled()
-                            poolProtectionResidual = (try? AntigravityPoolProtectionSettings.hasResidualProtection()) ?? poolProtectionResidual
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(.switch)
-                .controlSize(.small)
-                .tint(.purple)
             }
 
-            if !poolProtectionEnabled && poolProtectionResidual {
+            Divider()
+
+            ScrollView(.horizontal, showsIndicators: false) {
                 HStack(spacing: 8) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.caption)
-                        .foregroundStyle(.orange)
-                    Text(L("Previous pool protection exclusions remain on disk.", "磁盘上仍保留有之前的分池排除规则。"))
-                        .font(.caption2)
-                        .foregroundStyle(.orange)
-                    Button(L("Restore Exclusions", "清理残留规则")) {
-                        do {
-                            try AntigravityPoolProtectionSettings.restorePreviousExclusions()
-                            reloadState()
-                        } catch {
-                            poolProtectionError = error.localizedDescription
-                        }
-                    }
-                    .buttonStyle(.bordered)
-                    .controlSize(.mini)
+                    metricTag(
+                        icon: "cpu",
+                        label: L("Model", "模型"),
+                        value: envSummary.activeModel ?? "—",
+                        tint: Self.brand
+                    )
+                    metricTag(
+                        icon: "brain",
+                        label: L("Thinking", "推理强度"),
+                        value: envSummary.thinkingEffort?.uppercased() ?? "—",
+                        tint: .purple
+                    )
+                    metricTag(
+                        icon: "terminal",
+                        label: L("Execution", "命令执行"),
+                        value: envSummary.executionPolicy ?? "—",
+                        tint: envSummary.executionPolicy == nil
+                            ? .secondary
+                            : (envSummary.executionPolicy == "always-proceed" ? .orange : .green)
+                    )
+                    metricTag(
+                        icon: "doc.badge.gearshape",
+                        label: L("Artifact Review", "产物审核"),
+                        value: envSummary.artifactReviewPolicy ?? "—",
+                        tint: .teal
+                    )
+                    metricTag(
+                        icon: "lock.shield",
+                        label: L("Security", "安全模式"),
+                        value: envSummary.securityMode ?? "—",
+                        tint: envSummary.securityMode == nil
+                            ? .secondary
+                            : (envSummary.securityMode == "secure-sandbox" ? .green : .blue)
+                    )
+                    metricTag(
+                        icon: "folder.badge.gearshape",
+                        label: L("Workspaces", "活跃项目"),
+                        value: "\(envSummary.workspaceCount)",
+                        tint: .indigo
+                    )
                 }
-            }
-
-            if let poolProtectionError {
-                Text(poolProtectionError)
-                    .font(.caption2)
-                    .foregroundStyle(.red)
             }
         }
         .padding(.horizontal, 16)
@@ -569,25 +562,22 @@ struct AntigravityManagementView: View {
         )
     }
 
-    @ViewBuilder
-    private var poolProtectionBadge: some View {
-        if poolProtectionError != nil {
-            TokenSaverStatusBadge(text: L("Issue", "异常"), tone: .danger, id: "agy-pool-protection-badge")
-        } else if poolProtectionEnabled {
-            TokenSaverStatusBadge(text: L("Pool Breaker ON", "分池保护已开启"), tone: .active, id: "agy-pool-protection-badge")
-        } else if poolProtectionResidual {
-            TokenSaverStatusBadge(text: L("Off · Residual", "已关 · 有残留"), tone: .warning, id: "agy-pool-protection-badge")
-        } else {
-            TokenSaverStatusBadge(text: L("Pool Breaker OFF", "分池保护关闭"), tone: .neutral, id: "agy-pool-protection-badge")
+    private func metricTag(icon: String, label: String, value: String, tint: Color) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: icon)
+                .font(.system(size: 9.5, weight: .semibold))
+                .foregroundStyle(tint)
+            Text("\(label):")
+                .font(.system(size: 10, weight: .medium))
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.system(size: 10, weight: .bold, design: .rounded))
+                .foregroundStyle(tint)
         }
-    }
-
-    private var tosSafeBadge: some View {
-        TokenSaverStatusBadge(
-            text: L("TOS-Safe Defaults", "防封安全策略已锁"),
-            tone: .active,
-            id: "agy-tos-safe-badge"
-        )
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3.5)
+        .background(Capsule().fill(tint.opacity(0.11)))
+        .overlay(Capsule().stroke(tint.opacity(0.24), lineWidth: 0.5))
     }
 
     // MARK: - Token Saver & AGY Customization Card
@@ -608,7 +598,7 @@ struct AntigravityManagementView: View {
                             .font(.subheadline.weight(.semibold))
                         TokenSaverStatusBadge(
                             text: enabledCount > 0
-                                ? L("Enabled \(enabledCount)/3", "已启用 \(enabledCount)/3")
+                                ? L("Enabled \(enabledCount)/3", "已启用 \(enabledCount)/3", "Đã bật \(enabledCount)/3")
                                 : L("Off", "已关闭"),
                             tone: enabledCount > 0 ? .active : .neutral,
                             id: "agy-token-saver-badge"
@@ -624,12 +614,21 @@ struct AntigravityManagementView: View {
 
                 Spacer()
 
+                if tokenSaver.lastSaveSucceeded, tokenSaver.error == nil {
+                    TokenSaverStatusBadge(
+                        text: L("Saved — new session required", "已保存 — 需开启新会话"),
+                        tone: .active,
+                        id: "agy-token-saver-saved-badge"
+                    )
+                }
+
                 Button(L("Reapply Rules", "重新写入规则")) {
                     tokenSaver.reapply()
                     refreshEnvironment()
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.small)
+                .accessibilityIdentifier("agy-token-saver-reapply")
             }
 
             Divider()
@@ -639,7 +638,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.rtkEnabled },
                     set: { val in tokenSaver.mutate { $0.rtkEnabled = val } }
                 )) {
-                    Text("RTK CLI")
+                    Text("RTK — CLI Wrapper")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)
@@ -649,7 +648,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.cavemanEnabled },
                     set: { val in tokenSaver.mutate { $0.cavemanEnabled = val } }
                 )) {
-                    Text("Caveman")
+                    Text("Caveman — Concise Replies")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)
@@ -671,7 +670,7 @@ struct AntigravityManagementView: View {
                     get: { tokenSaver.settings.ponytailEnabled },
                     set: { val in tokenSaver.mutate { $0.ponytailEnabled = val } }
                 )) {
-                    Text("Ponytail")
+                    Text("Ponytail — Minimal Code")
                         .font(.caption.weight(.semibold))
                 }
                 .toggleStyle(.switch)
@@ -687,11 +686,11 @@ struct AntigravityManagementView: View {
                 )
                 envPill(
                     icon: "server.rack",
-                    text: L("MCP Servers: \(envSummary.mcpServerCount)", "MCP 服务: \(envSummary.mcpServerCount)")
+                    text: L("MCP Servers: \(envSummary.mcpServerCount)", "MCP 服务: \(envSummary.mcpServerCount)", "MCP Server: \(envSummary.mcpServerCount)")
                 )
                 envPill(
                     icon: "sparkles.rectangle.stack",
-                    text: L("Skills: \(envSummary.skillCount)", "技能数: \(envSummary.skillCount)")
+                    text: L("Skills: \(envSummary.skillCount)", "技能数: \(envSummary.skillCount)", "Skills: \(envSummary.skillCount)")
                 )
                 envPill(
                     icon: "macwindow",
@@ -700,6 +699,21 @@ struct AntigravityManagementView: View {
                         : L("Antigravity.app Not Found", "未检测到 Antigravity.app")
                 )
                 Spacer()
+            }
+
+            if let notice = tokenSaver.notice {
+                Text(notice)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .accessibilityIdentifier("agy-token-saver-notice")
+            }
+
+            if let error = tokenSaver.localizedError {
+                Text(error)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+                    .accessibilityIdentifier("agy-token-saver-error")
             }
         }
         .padding(.horizontal, 16)
@@ -739,16 +753,15 @@ struct AntigravityManagementView: View {
     }
 }
 
-// MARK: - Antigravity Account List Section (Unified Switcher)
+// MARK: - Antigravity Account List Section (Monitor-Only Anti-Ban)
 
 struct AntigravitySubscriptionSection: View {
     let entries: [ProviderAccountEntry]
     let isAppInstalled: Bool
+    let isRestarting: Bool
     let storageDisplayPath: String
     let onAddAccount: () -> Void
     let onRestartApp: () -> Void
-    let onAccountSwitched: () -> Void
-    let onShowStatus: (String, Bool) -> Void
 
     @EnvironmentObject private var appState: AppState
     @EnvironmentObject private var refreshCoordinator: ProviderRefreshCoordinator
@@ -784,6 +797,22 @@ struct AntigravitySubscriptionSection: View {
                         .padding(.horizontal, 6)
                         .padding(.vertical, 2)
                         .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
+                if ordered.count >= 2,
+                   let bestNext = ordered.bestNextQuotaCandidate(isActive: { activation.isActiveAccount($0) }) {
+                    Label(
+                        L(
+                            "Best next: \(bestNext.label) · \(Int(bestNext.remainingPercent.rounded()))%",
+                            "推荐备用: \(bestNext.label) · \(Int(bestNext.remainingPercent.rounded()))%"
+                        ),
+                        systemImage: "sparkles"
+                    )
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.teal)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(Capsule().fill(Color.teal.opacity(0.12)))
+                    .help(L("Read-only suggestion from cached snapshots (no auto-switch or network call).", "基于本地缓存快照的只读建议（不会自动切号，也不发起网络请求）。"))
                 }
                 Spacer()
                 Text(storageDisplayPath)
@@ -860,7 +889,8 @@ struct AntigravitySubscriptionSection: View {
         } message: { entry in
             Text(L(
                 "Remove \"\(entry.accountPrimaryLabel)\" from AIUsage? Local Antigravity IDE sessions will not be deleted.",
-                "从 AIUsage 移除“\(entry.accountPrimaryLabel)”？不会删除本地 Antigravity IDE 会话。"
+                "从 AIUsage 移除“\(entry.accountPrimaryLabel)”？不会删除本地 Antigravity IDE 会话。",
+                "Gỡ \"\(entry.accountPrimaryLabel)\" khỏi AIUsage? Các phiên Antigravity IDE cục bộ sẽ không bị xóa."
             ))
         }
     }
@@ -873,8 +903,8 @@ struct AntigravitySubscriptionSection: View {
             Text(L("No Antigravity accounts connected yet", "尚未连接 Antigravity 账号"))
                 .font(.subheadline.weight(.semibold))
             Text(L(
-                "Add multiple Google Antigravity accounts here to monitor 5-hour / weekly model pools and switch accounts in 1 click without signing in through the browser again.",
-                "在此添加多个 Google Antigravity 账号，即可监控 5 小时/每周模型池配额，并一键切换账号，无需再次打开浏览器登录。"
+                "Add Google Antigravity accounts here to view 5-hour / weekly quotas locally or reload saved snapshots (IDE account switching is disabled; remote consumer API checks carry TOS restriction risk).",
+                "在此添加 Google Antigravity 账号，可在本地查看 5 小时/每周配额或重新加载已保存的快照（已禁用自动切号；远程消费者接口请求存在 TOS 限制风险）。"
             ))
             .font(.caption)
             .foregroundStyle(.secondary)
@@ -1084,7 +1114,7 @@ struct AntigravitySubscriptionSection: View {
                             .background(Capsule().fill(Self.antigravityBrand.opacity(0.14)))
                     }
                     if partialTripped {
-                        Text(trippedPool.map { L("Pool Protected: \($0)", "池保护: \($0)") } ?? L("Pool Protected", "分池保护中"))
+                        Text(trippedPool.map { L("Pool Protected: \($0)", "池保护: \($0)", "Đang bảo vệ pool: \($0)") } ?? L("Pool Protected", "分池保护中"))
                             .font(.system(size: 9, weight: .semibold))
                             .foregroundStyle(.orange)
                             .padding(.horizontal, 6)
@@ -1093,6 +1123,37 @@ struct AntigravitySubscriptionSection: View {
                     }
                 }
                 noteRow(entry)
+                if let live = entry.liveProvider {
+                    if live.status != .error,
+                       let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                        for: QuotaResetFormatter.snapshotHealth(for: live),
+                        language: appState.language
+                       ) {
+                        Text(healthBanner)
+                            .font(.caption2.weight(.medium))
+                            .foregroundStyle(.orange)
+                    }
+                    if let checkError = refreshCoordinator.lastCheckError(for: live) {
+                        Text(L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"))
+                            .font(.caption2)
+                            .foregroundStyle(.orange)
+                            .lineLimit(1)
+                    }
+                    if let fetchedAt = refreshCoordinator.accountRefreshDate(for: live) {
+                        HStack(spacing: 4) {
+                            Text(L("Last known ·", "上次已知 ·"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                            RefreshableTimeView(
+                                date: fetchedAt,
+                                language: appState.language,
+                                font: .caption2,
+                                foregroundStyle: .secondary,
+                                style: .relativeOnly
+                            )
+                        }
+                    }
+                }
                 usageWindowPills(entry)
             }
 
@@ -1101,34 +1162,14 @@ struct AntigravitySubscriptionSection: View {
             if activation.isRemoteViewOnly(entry) {
                 GatewayQuietBadge(text: ProviderActivationManager.remoteViewOnlyLabel)
             } else {
-                Toggle("", isOn: Binding(
-                    get: { isActive },
-                    set: { newValue in
-                        if newValue {
-                            do {
-                                try activation.activateAccount(entry: entry)
-                                onAccountSwitched()
-                                onShowStatus(
-                                    L(
-                                        "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                        "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。"
-                                    ),
-                                    false
-                                )
-                            } catch {
-                                onShowStatus(error.localizedDescription, true)
-                            }
-                        } else {
-                            activation.deactivateAccount(entry: entry)
-                            onAccountSwitched()
-                        }
-                    }
-                ))
-                .labelsHidden()
-                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.antigravityBrand, isBusy: false))
+                GatewayQuietBadge(
+                    text: isActive
+                        ? L("IDE Active", "当前活跃")
+                        : L("Monitor Only", "仅监控 · 防封")
+                )
                 .help(L(
-                    "Switch Antigravity account in Keychain / state.vscdb without signing in via browser.",
-                    "直接写入 Keychain / state.vscdb 切换 Antigravity 账号，无需再次打开浏览器登录。"
+                    "Antigravity Keychain / state.vscdb switching is disabled to protect Google accounts. Switch inside Antigravity IDE directly.",
+                    "已禁用 Keychain / state.vscdb 自动切号以防 Google 账号封禁，请在 Antigravity IDE 内手动切换。"
                 ))
             }
         }
@@ -1143,46 +1184,17 @@ struct AntigravitySubscriptionSection: View {
                 .stroke(isActive ? Self.antigravityBrand.opacity(0.50) : Color.primary.opacity(0.06), lineWidth: 1)
         )
         .contextMenu {
-            if !activation.isRemoteViewOnly(entry) {
-                Button {
-                    do {
-                        try activation.activateAccount(entry: entry)
-                        onAccountSwitched()
-                        onShowStatus(
-                            L(
-                                "Switched to \(entry.accountPrimaryLabel). Quit & reopen Antigravity.app to use this account.",
-                                "已切换到 \(entry.accountPrimaryLabel)。退出并重新打开 Antigravity.app 即可生效。"
-                            ),
-                            false
-                        )
-                    } catch {
-                        onShowStatus(error.localizedDescription, true)
-                    }
-                } label: {
-                    Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
-                }
-
-                if isAppInstalled {
-                    Button {
-                        do {
-                            try activation.activateAccount(entry: entry)
-                            onAccountSwitched()
-                            onRestartApp()
-                        } catch {
-                            onShowStatus(error.localizedDescription, true)
-                        }
-                    } label: {
-                        Label(L("Switch & Restart Antigravity", "切换并重启 Antigravity"), systemImage: "arrow.clockwise.circle")
-                    }
-                }
-                Divider()
+            Button {
+                AntigravityAccountSwitcher.openAntigravityApp()
+            } label: {
+                Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
             }
 
             if let provider = entry.liveProvider {
                 Button {
                     Task { await refreshCoordinator.refreshProviderCardNow(provider) }
                 } label: {
-                    Label(L("Refresh Quota", "刷新配额"), systemImage: "arrow.clockwise")
+                    Label(L("Reload Saved Snapshot", "重载已存快照"), systemImage: "arrow.clockwise")
                 }
             }
 

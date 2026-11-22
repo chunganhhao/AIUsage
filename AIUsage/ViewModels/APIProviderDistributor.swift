@@ -20,6 +20,55 @@ final class APIProviderDistributor {
     private var cpaLinks: APIProviderCPALinkStore { APIProviderCPALinkStore.shared }
     private var gateway: CLIProxyGatewayManager { CLIProxyGatewayManager.shared }
 
+    private var lockedProviderIds: Set<String> = []
+    private var providerWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
+    private var containmentFencedProviderIds: Set<String> = []
+    private var providerWriteGeneration: [String: UInt64] = [:]
+
+    func beginContainment(for providerId: String) {
+        containmentFencedProviderIds.insert(providerId)
+        providerWriteGeneration[providerId, default: 0] &+= 1
+    }
+
+    func endContainment(for providerId: String) {
+        containmentFencedProviderIds.remove(providerId)
+    }
+
+    func isContainmentActive(for providerId: String) -> Bool {
+        containmentFencedProviderIds.contains(providerId)
+    }
+
+    private func isWriteAuthorized(for providerId: String, generation: UInt64) -> Bool {
+        !Task.isCancelled
+            && !containmentFencedProviderIds.contains(providerId)
+            && providerWriteGeneration[providerId, default: 0] == generation
+    }
+
+    private func withProviderSerialization<T>(
+        for providerId: String,
+        _ operation: () async -> T
+    ) async -> T {
+        while lockedProviderIds.contains(providerId) {
+            await withCheckedContinuation { continuation in
+                providerWaiters[providerId, default: []].append(continuation)
+            }
+        }
+        lockedProviderIds.insert(providerId)
+        defer {
+            lockedProviderIds.remove(providerId)
+            if var waiters = providerWaiters[providerId], !waiters.isEmpty {
+                let next = waiters.removeFirst()
+                if waiters.isEmpty {
+                    providerWaiters.removeValue(forKey: providerId)
+                } else {
+                    providerWaiters[providerId] = waiters
+                }
+                next.resume()
+            }
+        }
+        return await operation()
+    }
+
     // MARK: - Distribution State
 
     /// 该主配置当前已在哪些目标生成了链接。
@@ -48,6 +97,14 @@ final class APIProviderDistributor {
         return true
     }
 
+    struct DistributionRemovalVerification: Equatable, Sendable {
+        let unconfirmedTargets: [String]
+        let remainingTargets: Set<ProxyTarget>
+        var isConfirmedDisabled: Bool {
+            unconfirmedTargets.isEmpty && remainingTargets.isEmpty
+        }
+    }
+
     // MARK: - Reconcile (distribute / undistribute)
 
     /// 把主配置的分发集合对齐到 `targets`：被选中且兼容的目标 upsert 链接节点（已存在则同步），
@@ -55,51 +112,236 @@ final class APIProviderDistributor {
     /// 主配置内容变更后，把变更同步到所有已存在的链接；返回失败原因（成功为 nil）。
     @discardableResult
     func syncFromMaster(_ provider: APIProvider) async -> String? {
-        gateway.lastError = nil
-        for target in currentTargets(for: provider.id) {
-            if target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
-                gateway.lastError = reason
-                await removeChild(for: provider.id, target: .cpa)
-                continue
+        guard !containmentFencedProviderIds.contains(provider.id) else { return nil }
+        let writeGeneration = providerWriteGeneration[provider.id, default: 0]
+        return await withProviderSerialization(for: provider.id) {
+            guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
+            gateway.lastError = nil
+            var errors: [String] = []
+            let activeTargets = ProxyTarget.allCases.filter { currentTargets(for: provider.id).contains($0) }
+            for target in activeTargets {
+                guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
+                if target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
+                    let removeErr = await removeChild(
+                        for: provider.id,
+                        target: .cpa,
+                        deactivateActiveConsumers: false
+                    )
+                    guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
+                    if let removeErr {
+                        errors.append("\(target.displayName): \(reason) (\(removeErr))")
+                    } else {
+                        errors.append("\(target.displayName): \(reason)")
+                    }
+                    continue
+                }
+                gateway.lastError = nil
+                await upsertChild(provider, target: target, writeGeneration: writeGeneration)
+                guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
+                if let err = gateway.lastError {
+                    errors.append("\(target.displayName): \(err)")
+                }
             }
-            await upsertChild(provider, target: target)
+            guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
+            let combined = errors.isEmpty ? nil : errors.joined(separator: "; ")
+            gateway.lastError = combined
+            return combined
         }
-        return gateway.lastError
+    }
+
+    private func reconcileDistribution(
+        _ provider: APIProvider,
+        targets: Set<ProxyTarget>
+    ) async -> [ProxyTarget: String] {
+        if !targets.isEmpty, containmentFencedProviderIds.contains(provider.id) {
+            return [:]
+        }
+        let writeGeneration = providerWriteGeneration[provider.id, default: 0]
+        return await withProviderSerialization(for: provider.id) {
+            if !targets.isEmpty, !isWriteAuthorized(for: provider.id, generation: writeGeneration) {
+                return [:]
+            }
+            var targetErrors: [ProxyTarget: String] = [:]
+            if targets.isEmpty || isWriteAuthorized(for: provider.id, generation: writeGeneration) {
+                gateway.lastError = nil
+            }
+            for target in ProxyTarget.allCases {
+                var want = targets.contains(target) && target.supports(provider.format)
+                if want, target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
+                    targetErrors[.cpa] = reason
+                    want = false
+                }
+                if want {
+                    guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return [:] }
+                    gateway.lastError = nil
+                    await upsertChild(provider, target: target, writeGeneration: writeGeneration)
+                    guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return [:] }
+                    if let err = gateway.lastError {
+                        targetErrors[target] = err
+                    }
+                } else if let err = await removeChild(
+                    for: provider.id,
+                    target: target,
+                    deactivateActiveConsumers: false
+                ) {
+                    targetErrors[target] = err
+                }
+            }
+            guard targets.isEmpty || isWriteAuthorized(for: provider.id, generation: writeGeneration) else {
+                return [:]
+            }
+            let formatted = ProxyTarget.allCases
+                .compactMap { target in targetErrors[target].map { "\(target.displayName): \($0)" } }
+            gateway.lastError = formatted.isEmpty ? nil : formatted.joined(separator: "; ")
+            return targetErrors
+        }
     }
 
     /// 对齐分发集合；返回失败原因（成功为 nil）。
     @discardableResult
     func setDistribution(_ provider: APIProvider, targets: Set<ProxyTarget>) async -> String? {
-        gateway.lastError = nil
-        for target in ProxyTarget.allCases {
-            var want = targets.contains(target) && target.supports(provider.format)
-            if want, target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
-                gateway.lastError = reason
-                want = false
-            }
-            if want {
-                await upsertChild(provider, target: target)
-            } else {
-                await removeChild(for: provider.id, target: target)
-            }
-        }
+        guard targets.isEmpty || !containmentFencedProviderIds.contains(provider.id) else { return nil }
+        _ = await reconcileDistribution(provider, targets: targets)
+        guard !containmentFencedProviderIds.contains(provider.id) else { return nil }
         return gateway.lastError
+    }
+
+    /// Containment teardown: close admission immediately, drain any serialized in-flight
+    /// writes for this provider, safely deactivate active AIUsage-managed consumers without
+    /// overwriting unrelated config, delete children even if the master provider record is
+    /// absent, and verify per-target postconditions.
+    func removeAllDistributionForContainment(providerId: String) async -> DistributionRemovalVerification {
+        beginContainment(for: providerId)
+        return await withProviderSerialization(for: providerId) {
+            var targetErrors: [ProxyTarget: String] = [:]
+            for target in ProxyTarget.allCases {
+                if let err = await removeChild(
+                    for: providerId,
+                    target: target,
+                    deactivateActiveConsumers: true
+                ) {
+                    targetErrors[target] = err
+                }
+            }
+            let formatted = ProxyTarget.allCases
+                .compactMap { target in targetErrors[target].map { "\(target.displayName): \($0)" } }
+            if !formatted.isEmpty, (gateway.lastError?.isEmpty ?? true) {
+                gateway.lastError = formatted.joined(separator: "; ")
+            }
+
+            let remaining = currentTargets(for: providerId)
+            var unconfirmed: [String] = []
+            for target in ProxyTarget.allCases {
+                if let err = targetErrors[target] {
+                    unconfirmed.append("\(target.displayName): \(err)")
+                } else if remaining.contains(target) {
+                    unconfirmed.append(
+                        "\(target.displayName): \(AppSettings.shared.t("route remains active", "路由仍处于激活状态"))"
+                    )
+                }
+            }
+            return DistributionRemovalVerification(
+                unconfirmedTargets: unconfirmed,
+                remainingTargets: remaining
+            )
+        }
+    }
+
+    func removeAllDistributionForContainment(_ provider: APIProvider) async -> DistributionRemovalVerification {
+        await removeAllDistributionForContainment(providerId: provider.id)
     }
 
     /// 删除主配置：要么级联删除所有链接节点，要么解除链接（保留为独立节点）。
     func handleProviderDeletion(_ provider: APIProvider, deleteChildren: Bool) async {
-        for target in ProxyTarget.allCases {
-            if deleteChildren {
-                await removeChild(for: provider.id, target: target)
-            } else {
-                unlinkChild(for: provider.id, target: target)
+        await withProviderSerialization(for: provider.id) {
+            var errors: [String] = []
+            for target in ProxyTarget.allCases {
+                if deleteChildren {
+                    if let err = await removeChild(
+                        for: provider.id,
+                        target: target,
+                        deactivateActiveConsumers: false
+                    ) {
+                        errors.append("\(target.displayName): \(err)")
+                    }
+                } else {
+                    unlinkChild(for: provider.id, target: target)
+                }
+            }
+            gateway.lastError = errors.isEmpty ? nil : errors.joined(separator: "; ")
+        }
+    }
+
+    // MARK: - Background catalog propagation
+
+    /// 后台模型 / 价格同步专用：把主配置的模型目录推到链接节点，但不重建 Claude / Codex 运行时
+    /// （`syncFromMaster` 会走 `updateProfile` 停启节点，正在进行的请求会被打断）。
+    /// - Claude / Codex：只替换模型列表，节点本地费用规则与 1M 声明按原规则保留；
+    /// - OpenCode：模型与价格条目跟随主配置（保留本地 modalities），需要重写 opencode.json；
+    /// - CPA：仅在模型名单变化时更新上游池。
+    /// 已局部覆盖模型字段的链接节点不受影响。
+    func propagateCatalog(from provider: APIProvider, modelNamesChanged: Bool) async {
+        guard !containmentFencedProviderIds.contains(provider.id) else { return }
+        let writeGeneration = providerWriteGeneration[provider.id, default: 0]
+        await withProviderSerialization(for: provider.id) {
+            guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return }
+            let providerNames = ProxyConfiguration.ModelCatalog(mappedModels: provider.models).models
+            let nameSet = Set(providerNames)
+
+            for child in [codexChild(for: provider.id), claudeChild(for: provider.id)].compactMap({ $0 }) {
+                guard !(child.metadata.overriddenKeys?.contains(APIProviderSharedKey.models) ?? false) else { continue }
+                let local = child.metadata.proxy.modelCatalog
+                let updated = ProxyConfiguration.ModelCatalog(
+                    models: providerNames,
+                    pricingOverrides: local.pricingOverrides.filter { nameSet.contains($0.key) },
+                    supports1MModels: local.supports1MModels.filter(nameSet.contains)
+                )
+                if updated != local {
+                    proxyVM.applyModelCatalogUpdate(nodeID: child.id, catalog: updated)
+                }
+            }
+
+            if let child = openCodeChild(for: provider.id),
+               !(child.overriddenKeys?.contains(APIProviderSharedKey.models) ?? false) {
+                let previousByID = Dictionary(child.modelEntries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+                var updated = child
+                updated.modelEntries = Self.openCodeEntries(from: provider.models).map { entry in
+                    var merged = entry
+                    if let previous = previousByID[entry.id] {
+                        merged.inputModalities = previous.inputModalities
+                        merged.outputModalities = previous.outputModalities
+                    }
+                    return merged
+                }
+                updated.pricingCurrency = updated.modelEntries.contains { $0.hasPricing } ? .usd : child.pricingCurrency
+                if updated != child {
+                    openCodeStore.upsert(updated)
+                }
+            }
+
+            if modelNamesChanged, cpaLinks.hasLink(for: provider.id),
+               isWriteAuthorized(for: provider.id, generation: writeGeneration),
+               APIProviderCPALoopGuard.blockReason(for: provider) == nil {
+                await upsertCPAChild(provider, writeGeneration: writeGeneration)
             }
         }
     }
 
     // MARK: - Per-target upsert
 
-    private func upsertChild(_ provider: APIProvider, target: ProxyTarget) async {
+    private func canProceedWrite(for providerId: String, writeGeneration: UInt64?) -> Bool {
+        if let writeGeneration {
+            return isWriteAuthorized(for: providerId, generation: writeGeneration)
+        }
+        return !Task.isCancelled && !containmentFencedProviderIds.contains(providerId)
+    }
+
+    private func upsertChild(
+        _ provider: APIProvider,
+        target: ProxyTarget,
+        writeGeneration: UInt64? = nil
+    ) async {
+        guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
         switch target {
         case .codex:
             let existing = codexChild(for: provider.id)
@@ -111,34 +353,41 @@ final class APIProviderDistributor {
             if existing != nil { await proxyVM.updateProfile(profile) } else { proxyVM.addProfile(profile) }
             // CPA→Claude 从 convert 切到 Anthropic 透传后，正在跑的 Science/Claude 全局代理
             // 需热推上游，否则仍停在旧 convert 进程配置上。
-            if provider.id == CLIProxyGatewayManager.managedProviderID {
+            if provider.id == CLIProxyGatewayManager.managedProviderID,
+               canProceedWrite(for: provider.id, writeGeneration: writeGeneration) {
                 await reapplyRunningClaudeTracks(for: profile.metadata.id)
             }
         case .openCode:
             let existing = openCodeChild(for: provider.id)
             let node = makeOpenCodeNode(provider, existing: existing)
             openCodeStore.upsert(node)
-            if provider.id == CLIProxyGatewayManager.managedProviderID {
+            if provider.id == CLIProxyGatewayManager.managedProviderID,
+               canProceedWrite(for: provider.id, writeGeneration: writeGeneration) {
                 await reapplyRunningOpenCodeTrack(for: node.id)
             }
         case .cpa:
             if let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
-                gateway.lastError = reason
+                if canProceedWrite(for: provider.id, writeGeneration: writeGeneration) {
+                    gateway.lastError = reason
+                }
                 return
             }
-            await upsertCPAChild(provider)
+            await upsertCPAChild(provider, writeGeneration: writeGeneration)
         }
     }
 
-    private func upsertCPAChild(_ provider: APIProvider) async {
+    private func upsertCPAChild(_ provider: APIProvider, writeGeneration: UInt64? = nil) async {
+        guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
         let existingName = cpaLinks.cpaName(for: provider.id)
         do {
             let name = try await gateway.upsertOpenAICompatibleProvider(
                 fromAPIProvider: provider,
                 existingCPAName: existingName
             )
+            guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
             cpaLinks.setLink(providerId: provider.id, cpaName: name)
         } catch {
+            guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
             gateway.lastError = error.localizedDescription
         }
     }
@@ -162,30 +411,156 @@ final class APIProviderDistributor {
         }
     }
 
-    private func removeChild(for providerId: String, target: ProxyTarget) async {
-        switch target {
-        case .codex:
-            if let child = codexChild(for: providerId) { await proxyVM.deleteConfiguration(child.id) }
-        case .claude:
-            if let child = claudeChild(for: providerId) { await proxyVM.deleteConfiguration(child.id) }
-        case .openCode:
-            if let child = openCodeChild(for: providerId) {
-                do {
-                    try openCodeStore.delete(child)
-                } catch {
-                    gateway.lastError = error.localizedDescription
-                }
-            }
-        case .cpa:
-            if let name = cpaLinks.cpaName(for: providerId) {
-                do {
-                    try await gateway.deleteOpenAICompatibleProviderLinked(cpaName: name)
-                } catch {
-                    gateway.lastError = error.localizedDescription
-                }
-                cpaLinks.removeLink(providerId: providerId)
+    private func releaseManagedConsumers(forNodeID nodeId: String) async -> [String] {
+        var failures: [String] = []
+        let codex = GlobalProxyManager.codex
+        if codex.isRuntimeEnabled, codex.activeNodeId == nodeId {
+            codex.operationError = nil
+            await codex.disable()
+            if codex.isRuntimeEnabled || codex.operationError != nil {
+                failures.append(
+                    "Codex Global Proxy (\(codex.operationError ?? AppSettings.shared.t("still active", "仍处于激活状态")))"
+                )
             }
         }
+        let claude = GlobalProxyManager.claude
+        if claude.activeNodeId == nodeId, claude.config.effectiveClaudeCodeEnabled {
+            claude.operationError = nil
+            await claude.disable()
+            if claude.config.effectiveClaudeCodeEnabled || claude.operationError != nil {
+                failures.append(
+                    "Claude Code Gateway (\(claude.operationError ?? AppSettings.shared.t("still active", "仍处于激活状态")))"
+                )
+            }
+        }
+        let desktop = GlobalProxyManager.desktop
+        if desktop.isEnabled, desktop.activeNodeId == nodeId {
+            await ClaudeDesktopIntegrationManager.shared.disconnect(quitDesktop: false)
+            switch ClaudeDesktopIntegrationManager.shared.state {
+            case .conflict(let msg), .failed(let msg):
+                failures.append("Claude Desktop (\(msg))")
+            default:
+                if desktop.isEnabled {
+                    failures.append(
+                        "Claude Desktop (\(desktop.operationError ?? AppSettings.shared.t("still active", "仍处于激活状态")))"
+                    )
+                }
+            }
+        }
+        let science = ScienceProxyManager.shared
+        if science.isEnabled, science.activeNodeId == nodeId {
+            science.operationError = nil
+            await science.stop()
+            if science.isEnabled || science.operationError != nil {
+                failures.append(
+                    "Claude Science (\(science.operationError ?? AppSettings.shared.t("still active", "仍处于激活状态")))"
+                )
+            }
+        }
+        let openCode = GlobalProxyManager.opencode
+        if openCode.isRuntimeEnabled, openCode.activeNodeId == nodeId {
+            openCode.operationError = nil
+            await openCode.disable()
+            if openCode.isRuntimeEnabled || openCode.operationError != nil {
+                failures.append(
+                    "OpenCode Global Proxy (\(openCode.operationError ?? AppSettings.shared.t("still active", "仍处于激活状态")))"
+                )
+            }
+        }
+        return failures
+    }
+
+    private func removeChild(
+        for providerId: String,
+        target: ProxyTarget,
+        deactivateActiveConsumers: Bool
+    ) async -> String? {
+        switch target {
+        case .codex:
+            return await removeProxyChild(
+                codexChild(for: providerId),
+                providerId: providerId,
+                remainingCheck: { self.codexChild(for: $0) != nil },
+                fallbackMessage: AppSettings.shared.t("Linked Codex route remains active.", "链接的 Codex 路由仍处于激活状态。"),
+                deactivateActiveConsumers: deactivateActiveConsumers
+            )
+        case .claude:
+            return await removeProxyChild(
+                claudeChild(for: providerId),
+                providerId: providerId,
+                remainingCheck: { self.claudeChild(for: $0) != nil },
+                fallbackMessage: AppSettings.shared.t("Linked Claude route remains active.", "链接的 Claude 路由仍处于激活状态。"),
+                deactivateActiveConsumers: deactivateActiveConsumers
+            )
+        case .openCode:
+            guard let child = openCodeChild(for: providerId) else { return nil }
+            let openCode = GlobalProxyManager.opencode
+            if openCode.isRuntimeEnabled, openCode.activeNodeId == child.id {
+                if deactivateActiveConsumers {
+                    openCode.operationError = nil
+                    await openCode.disable()
+                    if openCode.isRuntimeEnabled || openCode.operationError != nil {
+                        return openCode.operationError
+                            ?? AppSettings.shared.t("Global OpenCode proxy remains active.", "OpenCode 全局代理仍处于激活状态。")
+                    }
+                } else {
+                    return AppSettings.shared.t(
+                        "Disconnect OpenCode before removing this node.",
+                        "请先断开 OpenCode，再移除此节点。"
+                    )
+                }
+            }
+            do {
+                try openCodeStore.delete(child)
+            } catch {
+                return error.localizedDescription
+            }
+            if openCodeChild(for: providerId) != nil || openCodeStore.activeNodeIds.contains(child.id) {
+                return AppSettings.shared.t("Linked OpenCode route remains active.", "链接的 OpenCode 路由仍处于激活状态。")
+            }
+            return nil
+        case .cpa:
+            guard let name = cpaLinks.cpaName(for: providerId) else { return nil }
+            do {
+                try await gateway.deleteOpenAICompatibleProviderLinked(cpaName: name)
+                cpaLinks.removeLink(providerId: providerId)
+            } catch {
+                return error.localizedDescription
+            }
+            if cpaLinks.hasLink(for: providerId) {
+                return AppSettings.shared.t("Linked CPA upstream route remains present.", "链接的 CPA 上游路由仍然存在。")
+            }
+            return nil
+        }
+    }
+
+    private func removeProxyChild(
+        _ child: NodeProfile?,
+        providerId: String,
+        remainingCheck: (String) -> Bool,
+        fallbackMessage: String,
+        deactivateActiveConsumers: Bool
+    ) async -> String? {
+        guard let child else { return nil }
+        let consumerFailures = deactivateActiveConsumers
+            ? await releaseManagedConsumers(forNodeID: child.id)
+            : []
+        proxyVM.operationErrorMessage = nil
+        await proxyVM.deleteConfiguration(child.id)
+        let childStillExists = remainingCheck(providerId)
+        let nodeStillActive = proxyVM.isNodeActivated(child.id)
+        guard consumerFailures.isEmpty && !childStillExists && !nodeStillActive else {
+            var reasons = consumerFailures
+            if let opError = proxyVM.operationErrorMessage, !opError.isEmpty {
+                reasons.append(opError)
+            } else if let blockReason = proxyVM.managedRuntimeDeletionBlockReason(for: child.id) {
+                reasons.append(blockReason)
+            } else if childStillExists || nodeStillActive {
+                reasons.append(fallbackMessage)
+            }
+            return reasons.joined(separator: "; ")
+        }
+        return nil
     }
 
     private func unlinkChild(for providerId: String, target: ProxyTarget) {
@@ -194,13 +569,19 @@ final class APIProviderDistributor {
             guard var child = codexChild(for: providerId) else { return }
             child.metadata.linkedProviderId = nil
             child.metadata.overriddenKeys = nil
-            profileStore.save(child)
+            guard profileStore.save(child) else {
+                gateway.lastError = profileStore.lastIOError
+                return
+            }
             proxyVM.loadConfigurations()
         case .claude:
             guard var child = claudeChild(for: providerId) else { return }
             child.metadata.linkedProviderId = nil
             child.metadata.overriddenKeys = nil
-            profileStore.save(child)
+            guard profileStore.save(child) else {
+                gateway.lastError = profileStore.lastIOError
+                return
+            }
             proxyVM.loadConfigurations()
         case .openCode:
             guard var child = openCodeChild(for: providerId) else { return }

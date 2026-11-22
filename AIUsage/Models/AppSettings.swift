@@ -11,7 +11,7 @@ enum AppSection: String, Hashable {
     case sessions
     /// 订阅账号：监控登录类账号（Claude / Codex / Cursor 等）的订阅额度与用量。
     case providerAccounts
-    /// CPA 网关：管理官方 CLIProxyAPI sidecar、版本更新与多订阅账号池。
+    /// CPA 网关：管理官方 CLIProxyAPI sidecar、版本更新与多订阅账号池（仅 Codex Go/Free）。
     case subscriptionGateway
     /// API 提供商：统一上游配置，分发到三套代理。
     case apiProviders
@@ -20,6 +20,7 @@ enum AppSection: String, Hashable {
     case proxyManagement
     case codexProxyManagement
     case opencodeManagement
+    case codexLocalManagement
     case antigravityManagement
     /// Claude Science 代理：免订阅启动 Science（隔离沙箱 + 本地虚拟登录），推理走第三方模型。
     case scienceProxyManagement
@@ -155,12 +156,21 @@ enum DefaultsKey {
     static let sessionResumeTerminal = "sessionResumeTerminal"
     /// 菜单栏「最近会话」是否展开。缺省=true。
     static let menuBarRecentSessionsExpanded = "menuBarRecentSessionsExpanded"
+    /// 菜单栏「费用」「用量」区块是否展开。缺省=true。
+    static let menuBarCostExpanded = "menuBarCostExpanded"
+    static let menuBarUsageExpanded = "menuBarUsageExpanded"
+    /// 后台自动同步各节点的上游模型与 models.dev 公开价格。缺省=true。
+    static let modelAutoSyncEnabled = "modelAutoSyncEnabled"
+    /// 侧边栏左下角的合作服务商推荐位。缺省=false，可在设置里按需开启。
+    static let showSponsorSpot = "showSponsorSpot"
     /// 会话中心全文搜索：在本机缓存目录建正文索引，搜索也覆盖回复与工具调用。缺省=false（用户确认后开启）。
     static let sessionFullTextSearch = "sessionFullTextSearch"
     /// 主机端：是否把本机额度快照只读共享给远程模式的其它 AIUsage。缺省=false。
     static let shareQuotaEnabled = "shareQuotaEnabled"
     static let shareQuotaPort = "shareQuotaPort"
     static let showNotifications = "showNotifications"
+    /// 侧边栏「本地」分组的展开/收起状态。缺省=true（展开）。
+    static let sidebarLocalGroupExpanded = "sidebarLocalGroupExpanded"
     /// 侧边栏「代理」分组的展开/收起状态。缺省=true（展开）。
     static let sidebarProxiesGroupExpanded = "sidebarProxiesGroupExpanded"
     static let themeMode = "themeMode"
@@ -272,10 +282,25 @@ final class AppSettings: ObservableObject {
     }
 
     static func remoteBaseURL(host rawHost: String, port: Int) -> String {
-        var host = parseRemoteAddress(rawHost).host
+        let trimmed = rawHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let scheme = trimmed.lowercased().hasPrefix("https://") ? "https" : "http"
+        var host = parseRemoteAddress(trimmed).host
         if host.isEmpty { host = "127.0.0.1" }
         let formattedHost = host.contains(":") ? "[\(host)]" : host
-        return "http://\(formattedHost):\(port)"
+        return "\(scheme)://\(formattedHost):\(port)"
+    }
+
+    static func resolveRemoteSettingsAddress(
+        _ input: String, savedHost: String, savedPort: Int, portInput: String
+    ) -> (host: String, port: Int) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesHTTPS = trimmed.lowercased().hasPrefix("https://")
+        let parsed = parseRemoteAddress(trimmed)
+        let enteredPort = Int(portInput.trimmingCharacters(in: .whitespaces))
+        let shouldDefaultHTTPSPort = usesHTTPS && trimmed != savedHost && (enteredPort == nil || enteredPort == savedPort)
+        let port = parsed.port ?? (shouldDefaultHTTPSPort ? 443 : enteredPort) ?? (usesHTTPS ? 443 : 4318)
+        let host = parsed.host.isEmpty ? "127.0.0.1" : (usesHTTPS ? "https://\(parsed.host)" : parsed.host)
+        return (host, port)
     }
 
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。
@@ -304,19 +329,41 @@ final class AppSettings: ObservableObject {
 
     @Published var proxyAutoRestoreOnLaunch: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.proxyAutoRestoreOnLaunch)
 
+    static let personalLeanDefaultHiddenSections: Set<String> = [
+        AppSection.sessions.rawValue,
+        AppSection.callAnalytics.rawValue,
+        AppSection.proxyManagement.rawValue,
+        AppSection.opencodeManagement.rawValue,
+    ]
+    private static let personalLeanSidebarMigrationKey = "hiddenSidebarSectionsMigration.personalLean.v1"
+
     /// 侧边栏中被用户隐藏的导航分区（存 `AppSection.rawValue`）。常驻分区即使被写入也不会真正隐藏。
     @Published var hiddenSidebarSections: Set<String> = {
         let defaults = UserDefaults.standard
         var stored = Set(defaults.stringArray(forKey: DefaultsKey.hiddenSidebarSections) ?? [])
+        var changed = false
         // 迁移：旧版「服务商」(providers) 已拆成「订阅账号」+「API 提供商」两个入口。
         // 曾隐藏旧入口的用户，两个新入口都继承隐藏；同时清除不再有效的孤儿键并落盘。
         if stored.remove(AppSection.legacyProvidersRawValue) != nil {
             stored.insert(AppSection.providerAccounts.rawValue)
             stored.insert(AppSection.apiProviders.rawValue)
+            changed = true
+        }
+        // One-shot migration for personal lean mode: hide Sessions, Call Analytics, Claude, and OpenCode once.
+        if !defaults.bool(forKey: AppSettings.personalLeanSidebarMigrationKey) {
+            stored.formUnion(AppSettings.personalLeanDefaultHiddenSections)
+            defaults.set(true, forKey: AppSettings.personalLeanSidebarMigrationKey)
+            changed = true
+        }
+        if changed {
             defaults.set(Array(stored), forKey: DefaultsKey.hiddenSidebarSections)
         }
         return stored
     }()
+
+    /// 侧边栏「本地」分组是否展开；默认展开。
+    @Published var sidebarLocalGroupExpanded: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.sidebarLocalGroupExpanded) as? Bool ?? true
 
     /// 侧边栏「代理」分组是否展开；默认展开，保持与折叠前的可见性一致。
     @Published var sidebarProxiesGroupExpanded: Bool =
@@ -328,6 +375,21 @@ final class AppSettings: ObservableObject {
 
     @Published var menuBarRecentSessionsExpanded: Bool =
         UserDefaults.standard.object(forKey: DefaultsKey.menuBarRecentSessionsExpanded) as? Bool ?? true
+
+    @Published var menuBarCostExpanded: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.menuBarCostExpanded) as? Bool ?? true
+
+    @Published var menuBarUsageExpanded: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.menuBarUsageExpanded) as? Bool ?? true
+
+    /// 后台自动同步模型与公开价格（见 ModelAutoSyncCoordinator）。只追加上游新上架的模型、
+    /// 只填空白价格或刷新来源为 models.dev 的价格；手动价格与已删除的模型不受影响。
+    @Published var modelAutoSyncEnabled: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.modelAutoSyncEnabled) as? Bool ?? true
+
+    /// 侧边栏合作服务商推荐位（见 SidebarSponsorSpot）。
+    @Published var showSponsorSpot: Bool =
+        UserDefaults.standard.object(forKey: DefaultsKey.showSponsorSpot) as? Bool ?? false
 
     /// 会话中心全文搜索；关闭时删除索引（见 SessionCenterStore）。
     @Published var sessionFullTextSearch: Bool =
@@ -420,9 +482,14 @@ final class AppSettings: ObservableObject {
         $shareQuotaPort.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.shareQuotaPort) }.store(in: &cancellables)
         $proxyAutoRestoreOnLaunch.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.proxyAutoRestoreOnLaunch) }.store(in: &cancellables)
         $hiddenSidebarSections.dropFirst().sink { defaults.set(Array($0), forKey: DefaultsKey.hiddenSidebarSections) }.store(in: &cancellables)
+        $sidebarLocalGroupExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sidebarLocalGroupExpanded) }.store(in: &cancellables)
         $sidebarProxiesGroupExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sidebarProxiesGroupExpanded) }.store(in: &cancellables)
         $sessionResumeTerminal.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sessionResumeTerminal) }.store(in: &cancellables)
         $menuBarRecentSessionsExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarRecentSessionsExpanded) }.store(in: &cancellables)
+        $menuBarCostExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarCostExpanded) }.store(in: &cancellables)
+        $menuBarUsageExpanded.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.menuBarUsageExpanded) }.store(in: &cancellables)
+        $modelAutoSyncEnabled.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.modelAutoSyncEnabled) }.store(in: &cancellables)
+        $showSponsorSpot.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.showSponsorSpot) }.store(in: &cancellables)
         $sessionFullTextSearch.dropFirst().sink { defaults.set($0, forKey: DefaultsKey.sessionFullTextSearch) }.store(in: &cancellables)
     }
 
@@ -455,12 +522,42 @@ final class AppSettings: ObservableObject {
     /// Called when remote backend URL changes. Wired in AppState init.
     var onRemoteSettingsChanged: ((String) -> Void)?
 
-    func t(_ en: String, _ zh: String) -> String {
-        language == "zh" ? zh : en
+    func t(_ en: String, _ zh: String, _ vi: String? = nil) -> String {
+        switch language {
+        case "zh": return zh
+        case "vi": return vi ?? LocalizationBundleCache.lookup(en, fallback: en, lproj: "vi")
+        default: return en
+        }
     }
 
-    static func localized(_ en: String, _ zh: String) -> String {
-        AppSettings.shared.language == "zh" ? zh : en
+    static func localized(_ en: String, _ zh: String, _ vi: String? = nil) -> String {
+        AppSettings.shared.t(en, zh, vi)
+    }
+}
+
+private enum LocalizationBundleCache {
+    private static let lock = NSLock()
+    nonisolated(unsafe) private static var cache: [String: Bundle?] = [:]
+
+    static func bundle(for lproj: String) -> Bundle? {
+        lock.lock()
+        if let existing = cache[lproj] {
+            lock.unlock()
+            return existing
+        }
+        lock.unlock()
+
+        let resolved: Bundle? = Bundle.main.path(forResource: lproj, ofType: "lproj").flatMap(Bundle.init(path:))
+        lock.lock()
+        cache[lproj] = resolved
+        lock.unlock()
+        return resolved
+    }
+
+    static func lookup(_ key: String, fallback: String, lproj: String) -> String {
+        guard let bundle = bundle(for: lproj) else { return fallback }
+        let value = bundle.localizedString(forKey: key, value: nil, table: "Localizable")
+        return value != key ? value : fallback
     }
 }
 
@@ -468,12 +565,23 @@ final class AppSettings: ObservableObject {
 /// stable `.strings` keys. Prefer passing `key:` for new static UI copy so generated
 /// `Localizable.strings` entries are no longer tied to call-site file paths.
 /// Strategy note: `docs/LOCALIZATION_STRATEGY.md`.
-func L(_ en: String, _ zh: String, key: String? = nil, file: StaticString = #fileID) -> String {
-    let fallback = AppSettings.localized(en, zh)
-    let language = AppSettings.shared.language == "zh" ? "zh_CN" : "en"
+func L(_ en: String, _ zh: String, _ vi: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String {
+    let lang = AppSettings.shared.language
+    let fallback: String
+    let lproj: String
+    switch lang {
+    case "zh":
+        fallback = zh
+        lproj = "zh_CN"
+    case "vi":
+        fallback = vi ?? en
+        lproj = "vi"
+    default:
+        fallback = en
+        lproj = "en"
+    }
 
-    guard let path = Bundle.main.path(forResource: language, ofType: "lproj"),
-          let bundle = Bundle(path: path) else {
+    guard let bundle = LocalizationBundleCache.bundle(for: lproj) else {
         return fallback
     }
 
@@ -489,4 +597,31 @@ func L(_ en: String, _ zh: String, key: String? = nil, file: StaticString = #fil
     }
 
     return fallback
+}
+
+extension ProviderCatalogItem {
+    func title(for language: String) -> String {
+        localizedCatalogText(en: titleEn, zh: titleZh, language: language)
+    }
+
+    func summary(for language: String) -> String {
+        localizedCatalogText(en: summaryEn, zh: summaryZh, language: language)
+    }
+
+    func restriction(for language: String) -> String? {
+        guard let restrictionEn else { return nil }
+        return localizedCatalogText(en: restrictionEn, zh: restrictionZh ?? restrictionEn, language: language)
+    }
+
+    private func localizedCatalogText(en: String, zh: String, language: String) -> String {
+        switch language {
+        case "zh":
+            return zh
+        case "vi":
+            return LocalizationBundleCache.bundle(for: "vi")?
+                .localizedString(forKey: en, value: en, table: "Localizable") ?? en
+        default:
+            return en
+        }
+    }
 }

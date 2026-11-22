@@ -39,8 +39,8 @@ extension SettingsView {
             return L("1 hour", "1 小时")
         default:
             return interval >= 60
-                ? L("\(interval / 60) minutes", "\(interval / 60) 分钟")
-                : L("\(interval) seconds", "\(interval) 秒")
+                ? L("\(interval / 60) minutes", "\(interval / 60) 分钟", "\(interval / 60) phút")
+                : L("\(interval) seconds", "\(interval) 秒", "\(interval) giây")
         }
     }
 
@@ -62,8 +62,8 @@ extension SettingsView {
             return L("10 minutes", "10 分钟")
         default:
             return interval >= 60
-                ? L("\(interval / 60) minutes", "\(interval / 60) 分钟")
-                : L("\(interval) seconds", "\(interval) 秒")
+                ? L("\(interval / 60) minutes", "\(interval / 60) 分钟", "\(interval / 60) phút")
+                : L("\(interval) seconds", "\(interval) 秒", "\(interval) giây")
         }
     }
 

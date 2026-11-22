@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SQLite3
 #if canImport(AppKit)
 import AppKit
@@ -52,6 +53,29 @@ struct AntigravityIDECandidatePayload: Equatable {
     let accessToken: String
     let refreshToken: String?
     let databasePath: String
+    let expiryDate: Date?
+    let idToken: String?
+    let projectId: String?
+
+    init(
+        email: String?,
+        name: String?,
+        accessToken: String,
+        refreshToken: String?,
+        databasePath: String,
+        expiryDate: Date? = nil,
+        idToken: String? = nil,
+        projectId: String? = nil
+    ) {
+        self.email = email
+        self.name = name
+        self.accessToken = accessToken
+        self.refreshToken = refreshToken
+        self.databasePath = databasePath
+        self.expiryDate = expiryDate
+        self.idToken = idToken
+        self.projectId = projectId
+    }
 }
 
 struct AntigravitySwitchedIdentity: Equatable {
@@ -78,6 +102,48 @@ struct AntigravityEnvironmentSummary: Equatable {
     let mcpConfigPath: String
     let activeAccountEmail: String?
     let activeStoragePath: String
+    let activeModel: String?
+    let thinkingEffort: String?
+    let executionPolicy: String?
+    let artifactReviewPolicy: String?
+    let securityMode: String?
+    let workspaceCount: Int
+
+    init(
+        isAppInstalled: Bool,
+        isAppRunning: Bool,
+        appVersion: String?,
+        mcpServerCount: Int,
+        skillCount: Int,
+        brainSessionCount: Int,
+        geminiRulesPath: String,
+        mcpConfigPath: String,
+        activeAccountEmail: String?,
+        activeStoragePath: String,
+        activeModel: String? = nil,
+        thinkingEffort: String? = nil,
+        executionPolicy: String? = nil,
+        artifactReviewPolicy: String? = nil,
+        securityMode: String? = nil,
+        workspaceCount: Int = 0
+    ) {
+        self.isAppInstalled = isAppInstalled
+        self.isAppRunning = isAppRunning
+        self.appVersion = appVersion
+        self.mcpServerCount = mcpServerCount
+        self.skillCount = skillCount
+        self.brainSessionCount = brainSessionCount
+        self.geminiRulesPath = geminiRulesPath
+        self.mcpConfigPath = mcpConfigPath
+        self.activeAccountEmail = activeAccountEmail
+        self.activeStoragePath = activeStoragePath
+        self.activeModel = activeModel
+        self.thinkingEffort = thinkingEffort
+        self.executionPolicy = executionPolicy
+        self.artifactReviewPolicy = artifactReviewPolicy
+        self.securityMode = securityMode
+        self.workspaceCount = workspaceCount
+    }
 
     static let empty = AntigravityEnvironmentSummary(
         isAppInstalled: false,
@@ -129,6 +195,35 @@ enum AntigravityAccountSwitcher {
 
     static func appStoragePath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
         "\(homeDirectory)/Library/Application Support/Antigravity/app_storage.json"
+    }
+
+    static func credentialUserScopePath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
+        "\(homeDirectory)/Library/Application Support/Antigravity/credential-user-scope"
+    }
+
+    static func computeUserScope(fromIDToken idToken: String?) -> String? {
+        guard let idToken = idToken?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !idToken.isEmpty else {
+            return nil
+        }
+        let segments = idToken.split(separator: ".", omittingEmptySubsequences: false)
+        guard segments.count >= 2 else { return nil }
+        var b64 = String(segments[1])
+            .replacingOccurrences(of: "-", with: "+")
+            .replacingOccurrences(of: "_", with: "/")
+        let remainder = b64.count % 4
+        if remainder > 0 {
+            b64 += String(repeating: "=", count: 4 - remainder)
+        }
+        guard let payloadData = Data(base64Encoded: b64),
+              let claims = (try? JSONSerialization.jsonObject(with: payloadData)) as? [String: Any],
+              let sub = (claims["sub"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !sub.isEmpty else {
+            return nil
+        }
+        let digest = SHA256.hash(data: Data(sub.utf8))
+        let hex16 = digest.prefix(8).map { String(format: "%02x", $0) }.joined()
+        return "u" + hex16
     }
 
     static func standaloneTokenPath(homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path) -> String {
@@ -227,12 +322,12 @@ enum AntigravityAccountSwitcher {
             .replacingOccurrences(of: "=", with: "")
     }
 
-    private static func runSecurityCommand(
+    static func runSecurityCommand(
         arguments: [String],
         stdinString: String? = nil,
-        timeoutSeconds: TimeInterval = 2.0
+        timeoutSeconds: TimeInterval = 60.0,
+        securityPath: String = "/usr/bin/security"
     ) -> (exitCode: Int32, stdout: String)? {
-        let securityPath = "/usr/bin/security"
         guard FileManager.default.isExecutableFile(atPath: securityPath) else { return nil }
 
         let process = Process()
@@ -382,6 +477,9 @@ enum AntigravityAccountSwitcher {
         let priority: Int
         let displayPath: String
         let sourcePath: String
+        let expiryDate: Date?
+        let idToken: String?
+        let projectId: String?
     }
 
     // Authoritative storage resolution shared across detection, IDE import, and default refresh extraction:
@@ -403,7 +501,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: keyring.modifiedAt ?? .distantPast,
                 priority: 3,
                 displayPath: "Keychain (gemini/antigravity)",
-                sourcePath: "Keychain (gemini/antigravity)"
+                sourcePath: "Keychain (gemini/antigravity)",
+                expiryDate: keyring.expiryDate,
+                idToken: keyring.idToken,
+                projectId: keyring.projectId
             ))
         }
 
@@ -418,7 +519,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: mtime,
                 priority: 2,
                 displayPath: "~/.gemini/jetski-standalone-oauth-token",
-                sourcePath: standalonePath
+                sourcePath: standalonePath,
+                expiryDate: standalone.expiryDate,
+                idToken: standalone.idToken,
+                projectId: standalone.projectId
             ))
         }
 
@@ -434,7 +538,10 @@ enum AntigravityAccountSwitcher {
                 modifiedAt: mtime,
                 priority: 1,
                 displayPath: "~/Library/Application Support/Antigravity/.../state.vscdb",
-                sourcePath: dbPath
+                sourcePath: dbPath,
+                expiryDate: nil,
+                idToken: nil,
+                projectId: nil
             ))
         }
 
@@ -473,9 +580,16 @@ enum AntigravityAccountSwitcher {
         }
     }
 
-    private static func parseStoredTokenJSON(
-        _ data: Data
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, expiryDate: Date?)? {
+    private struct ParsedStoredToken {
+        let account: AntigravityDetectedAccount
+        let accessToken: String
+        let refreshToken: String
+        let expiryDate: Date?
+        let idToken: String?
+        let projectId: String?
+    }
+
+    private static func parseStoredTokenJSON(_ data: Data) -> ParsedStoredToken? {
         guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return nil
         }
@@ -501,6 +615,10 @@ enum AntigravityAccountSwitcher {
 
         let expiryStr = (token["expiry"] as? String) ?? (token["expired"] as? String)
         let expiryDate = expiryStr.flatMap { parseISO8601($0) }
+        let rawIdToken = ((json["id_token"] as? String) ?? (token["id_token"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let rawProjectId = ((json["project_id"] as? String) ?? (token["project_id"] as? String))?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
         let name = email.components(separatedBy: "@").first ?? email
         let detected = AntigravityDetectedAccount(
             email: email,
@@ -508,29 +626,36 @@ enum AntigravityAccountSwitcher {
             hasAccessToken: hasAccess,
             hasRefreshToken: hasRefresh
         )
-        return (detected, access, refresh, expiryDate)
+        return ParsedStoredToken(
+            account: detected,
+            accessToken: access,
+            refreshToken: refresh,
+            expiryDate: expiryDate,
+            idToken: rawIdToken?.isEmpty == false ? rawIdToken : nil,
+            projectId: rawProjectId?.isEmpty == false ? rawProjectId : nil
+        )
     }
 
     private static func detectAccountFromKeyring(
         homeDirectory: String
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, modifiedAt: Date?)? {
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, modifiedAt: Date?, expiryDate: Date?, idToken: String?, projectId: String?)? {
         guard let entry = readKeyringRawEntry(homeDirectory: homeDirectory),
               let jsonData = decodeKeyringSecret(entry.secret),
               let parsed = parseStoredTokenJSON(jsonData) else {
             return nil
         }
         let effectiveDate = entry.modifiedAt ?? parsed.expiryDate?.addingTimeInterval(-3600)
-        return (parsed.account, parsed.accessToken, parsed.refreshToken, effectiveDate)
+        return (parsed.account, parsed.accessToken, parsed.refreshToken, effectiveDate, parsed.expiryDate, parsed.idToken, parsed.projectId)
     }
 
     private static func detectAccountFromStandaloneFile(
         at path: String
-    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String)? {
+    ) -> (account: AntigravityDetectedAccount, accessToken: String, refreshToken: String, expiryDate: Date?, idToken: String?, projectId: String?)? {
         guard let data = FileManager.default.contents(atPath: path),
               let parsed = parseStoredTokenJSON(data) else {
             return nil
         }
-        return (parsed.account, parsed.accessToken, parsed.refreshToken)
+        return (parsed.account, parsed.accessToken, parsed.refreshToken, parsed.expiryDate, parsed.idToken, parsed.projectId)
     }
 
     static func extractRefreshToken(
@@ -623,7 +748,10 @@ enum AntigravityAccountSwitcher {
             name: active.account.name,
             accessToken: active.accessToken,
             refreshToken: refreshToken,
-            databasePath: active.sourcePath
+            databasePath: active.sourcePath,
+            expiryDate: active.expiryDate,
+            idToken: active.idToken,
+            projectId: active.projectId
         )
     }
 
@@ -812,6 +940,9 @@ enum AntigravityAccountSwitcher {
             if ts > 1_000_000_000 {
                 expirySeconds = ts
             }
+        } else if let expiryDateVal = int64Value(tokenDict["expiry_date"]) ?? int64Value(root["expiry_date"]),
+                  expiryDateVal > 1_000_000_000 {
+            expirySeconds = expiryDateVal > 10_000_000_000 ? (expiryDateVal / 1000) : expiryDateVal
         } else if let timestampMs = int64Value(root["timestamp"]),
                   let expiresIn = int64Value(root["expires_in"]) {
             expirySeconds = (timestampMs / 1000) + expiresIn
@@ -837,13 +968,19 @@ enum AntigravityAccountSwitcher {
         )
     }
 
+    private static let switchMutationLock = NSRecursiveLock()
+
     @discardableResult
     static func switchAccount(
         authFileURL: URL,
         fallbackEmail: String? = nil,
         fallbackName: String? = nil,
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        managedAuthPaths: [String] = []
     ) throws -> AntigravitySwitchedIdentity {
+        switchMutationLock.lock()
+        defer { switchMutationLock.unlock() }
+
         var parsed = try parseCredentialFile(at: authFileURL, fallbackEmail: fallbackEmail, fallbackName: fallbackName)
 
         let existingDBPaths = candidateDBPaths(homeDirectory: homeDirectory).filter {
@@ -858,6 +995,16 @@ enum AntigravityAccountSwitcher {
 
         guard !existingDBPaths.isEmpty || hasAppStorage || hasStandaloneToken || hasKeyringToken else {
             throw AntigravitySwitchError.databaseNotFound(primaryDBPath(homeDirectory: homeDirectory))
+        }
+
+        // Capture the outgoing IDE rotation before replacing any live store.
+        if let existingKeyringEntry {
+            try flushLiveKeyringToManagedCopies(
+                secret: existingKeyringEntry.secret,
+                managedAuthPaths: managedAuthPaths,
+                homeDirectory: homeDirectory
+            )
+            parsed = try parseCredentialFile(at: authFileURL, fallbackEmail: fallbackEmail, fallbackName: fallbackName)
         }
 
         // If the stored auth file came from IDE import without a refresh_token, try recovering
@@ -916,7 +1063,8 @@ enum AntigravityAccountSwitcher {
         var fileBackups: [(path: String, data: Data?)] = []
         var candidateRollbackPaths: [String] = [
             "\(homeDirectory)/.gemini/jetski-standalone-oauth-token",
-            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
+            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token",
+            credentialUserScopePath(homeDirectory: homeDirectory)
         ]
         for dbPath in existingDBPaths {
             candidateRollbackPaths.append(dbPath)
@@ -952,7 +1100,7 @@ enum AntigravityAccountSwitcher {
                 updatedAnyAuthStore = true
                 let backupDBPath = dbPath + ".backup"
                 if FileManager.default.fileExists(atPath: backupDBPath) {
-                    try? injectCredentialIntoDatabase(
+                    try injectCredentialIntoDatabase(
                         at: backupDBPath,
                         credential: parsed,
                         homeDirectory: homeDirectory,
@@ -966,7 +1114,10 @@ enum AntigravityAccountSwitcher {
                 updatedAnyAuthStore = true
             }
 
-            // 3. Commit authoritative Antigravity 2.0 KeyringTokenStorage last so a SQLite/fallback failure
+            // 3. Sync Antigravity 2.0 credential-user-scope (u<sha256(sub)[:16]>) or clear stale scope when sub is absent.
+            try syncCredentialUserScopeFile(idToken: parsed.idToken, homeDirectory: homeDirectory)
+
+            // 4. Commit authoritative Antigravity 2.0 KeyringTokenStorage last so a SQLite/fallback failure
             // never leaves Keyring holding the new account while local stores fail.
             if let preflightKeyringSecret {
                 try writeKeyringRawSecret(preflightKeyringSecret, homeDirectory: homeDirectory)
@@ -1004,6 +1155,52 @@ enum AntigravityAccountSwitcher {
             name: parsed.name,
             sourceFilePath: authFileURL.path
         )
+    }
+
+    static func flushLiveKeyringToManagedCopies(
+        secret: String,
+        managedAuthPaths: [String],
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) throws {
+        guard let liveData = decodeKeyringSecret(secret),
+              let live = parseStoredTokenJSON(liveData),
+              let liveEmail = normalizeEmail(live.account.email),
+              !live.accessToken.isEmpty else { return }
+        let sharedPaths = Set([
+            standaloneTokenPath(homeDirectory: homeDirectory),
+            "\(homeDirectory)/.gemini/antigravity-cli/antigravity-oauth-token"
+        ].map { URL(fileURLWithPath: $0).standardizedFileURL.path })
+        for path in Set(managedAuthPaths.map { NSString(string: $0).expandingTildeInPath }) {
+            let url = URL(fileURLWithPath: path).standardizedFileURL
+            guard !sharedPaths.contains(url.path),
+                  let original = FileManager.default.contents(atPath: url.path),
+                  var root = (try? JSONSerialization.jsonObject(with: original)) as? [String: Any],
+                  let managed = try? parseCredentialFile(at: url, fallbackEmail: nil, fallbackName: nil),
+                  normalizeEmail(managed.email) == liveEmail else { continue }
+            let recoveredRefresh = managed.refreshToken.isEmpty && !live.refreshToken.isEmpty
+            let newerAccess = live.expiryDate.map { Int64($0.timeIntervalSince1970) > managed.expirySeconds } ?? false
+            guard recoveredRefresh || newerAccess else { continue }
+            let nestedKey = root["token"] is [String: Any] ? "token" : root["tokens"] is [String: Any] ? "tokens" : nil
+            var token = nestedKey.flatMap { root[$0] as? [String: Any] } ?? root
+            if newerAccess {
+                token["access_token"] = live.accessToken
+                if let expiry = live.expiryDate {
+                    let iso = ISO8601DateFormatter().string(from: expiry)
+                    token["expiry"] = iso
+                    token["expired"] = iso
+                    token["expiry_date"] = Int64(expiry.timeIntervalSince1970 * 1000)
+                }
+            }
+            if !live.refreshToken.isEmpty { token["refresh_token"] = live.refreshToken }
+            if let nestedKey { root[nestedKey] = token } else { root = token }
+            if let idToken = live.idToken, !idToken.isEmpty { root["id_token"] = idToken }
+            let updated = try JSONSerialization.data(withJSONObject: root, options: [.prettyPrinted, .sortedKeys])
+            // Do not overwrite a provider refresh that raced our read.
+            guard FileManager.default.contents(atPath: url.path) == original else {
+                throw AntigravitySwitchError.databaseWriteFailed("Managed Antigravity credentials changed during outgoing token backfill. Retry the switch.")
+            }
+            try updated.write(to: url, options: .atomic)
+        }
     }
 
     private static func backfillRefreshTokenInAuthFile(at url: URL, refreshToken: String) {
@@ -1123,7 +1320,8 @@ enum AntigravityAccountSwitcher {
     private static func buildStoredTokenPayload(
         credential: ParsedCredential,
         writerID: String,
-        includeExtendedFields: Bool
+        includeExtendedFields: Bool,
+        includeIDToken: Bool = true
     ) -> [String: Any] {
         let expiryISO = ISO8601DateFormatter().string(
             from: Date(timeIntervalSince1970: TimeInterval(credential.expirySeconds))
@@ -1144,9 +1342,9 @@ enum AntigravityAccountSwitcher {
         }
         if includeExtendedFields {
             payload["email"] = credential.email
-            if let idToken = credential.idToken {
-                payload["id_token"] = idToken
-            }
+        }
+        if (includeExtendedFields || includeIDToken), let idToken = credential.idToken {
+            payload["id_token"] = idToken
         }
         return payload
     }
@@ -1155,22 +1353,26 @@ enum AntigravityAccountSwitcher {
         credential: ParsedCredential,
         writerID: String
     ) throws -> String {
-        // Keychain StoredToken JSON must be compact (no .prettyPrinted and no raw id_token JWT)
-        // so the go-keyring `security -i` command remains well below 4096 bytes.
-        let payload = buildStoredTokenPayload(
-            credential: credential,
-            writerID: writerID,
-            includeExtendedFields: false
-        )
-        guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
-            throw AntigravitySwitchError.databaseWriteFailed("Could not encode Keychain StoredToken JSON.")
+        // Prefer retaining compact id_token in Keychain (~2.3 KB with go-keyring-base64:),
+        // dropping it automatically if an unusually large JWT would exceed the 3800-byte security -i budget.
+        let candidates: [Bool] = credential.idToken != nil ? [true, false] : [false]
+        for includeIDToken in candidates {
+            let payload = buildStoredTokenPayload(
+                credential: credential,
+                writerID: writerID,
+                includeExtendedFields: false,
+                includeIDToken: includeIDToken
+            )
+            guard let jsonData = try? JSONSerialization.data(withJSONObject: payload, options: [.sortedKeys]) else {
+                throw AntigravitySwitchError.databaseWriteFailed("Could not encode Keychain StoredToken JSON.")
+            }
+            let encodedSecret = encodeKeyringSecret(jsonData).trimmingCharacters(in: .whitespacesAndNewlines)
+            if !encodedSecret.isEmpty, encodedSecret.utf8.count <= 3800,
+               !encodedSecret.contains("\"") && !encodedSecret.contains("\n") && !encodedSecret.contains("\r") {
+                return encodedSecret
+            }
         }
-        let encodedSecret = encodeKeyringSecret(jsonData).trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !encodedSecret.isEmpty, encodedSecret.utf8.count <= 3800,
-              !encodedSecret.contains("\"") && !encodedSecret.contains("\n") && !encodedSecret.contains("\r") else {
-            throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
-        }
-        return encodedSecret
+        throw AntigravitySwitchError.databaseWriteFailed("Encoded Keychain StoredToken exceeds safe go-keyring command size.")
     }
 
     static func syncAppStorageFile(email: String, homeDirectory: String) {
@@ -1193,6 +1395,31 @@ enum AntigravityAccountSwitcher {
             return
         }
         try? encoded.write(to: URL(fileURLWithPath: path), options: .atomic)
+    }
+
+    private static func syncCredentialUserScopeFile(idToken: String?, homeDirectory: String) throws {
+        let scopePath = credentialUserScopePath(homeDirectory: homeDirectory)
+        let parentDir = URL(fileURLWithPath: scopePath).deletingLastPathComponent().path
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: parentDir) else { return }
+
+        if let scope = computeUserScope(fromIDToken: idToken) {
+            let url = URL(fileURLWithPath: scopePath)
+            do {
+                try Data(scope.utf8).write(to: url, options: .atomic)
+                try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: scopePath)
+            } catch {
+                throw AntigravitySwitchError.databaseWriteFailed("Could not update credential-user-scope at \(scopePath).")
+            }
+        } else if fm.fileExists(atPath: scopePath) {
+            do {
+                try fm.removeItem(atPath: scopePath)
+            } catch {
+                if fm.fileExists(atPath: scopePath) {
+                    throw AntigravitySwitchError.databaseWriteFailed("Could not remove stale credential-user-scope at \(scopePath).")
+                }
+            }
+        }
     }
 
     @discardableResult
@@ -1621,7 +1848,8 @@ enum AntigravityAccountSwitcher {
     // MARK: - App & Environment Inspection
 
     static func inspectEnvironment(
-        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
+        isRunningOverride: Bool? = nil
     ) -> AntigravityEnvironmentSummary {
         let fm = FileManager.default
         let appCandidates = [
@@ -1632,13 +1860,18 @@ enum AntigravityAccountSwitcher {
         let appVersion = installedAppPath
             .flatMap { Bundle(path: $0)?.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String }
 
-        #if canImport(AppKit)
-        let isRunning = NSWorkspace.shared.runningApplications.contains {
-            $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+        let isRunning: Bool
+        if let isRunningOverride {
+            isRunning = isRunningOverride
+        } else {
+            #if canImport(AppKit)
+            isRunning = NSWorkspace.shared.runningApplications.contains {
+                $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+            }
+            #else
+            isRunning = false
+            #endif
         }
-        #else
-        let isRunning = false
-        #endif
 
         // Count MCP servers from ~/.gemini/antigravity/mcp_config.json or ~/.gemini/config/mcp_config.json
         let mcpCandidates = [
@@ -1692,6 +1925,8 @@ enum AntigravityAccountSwitcher {
                 ? "Keychain (gemini/antigravity)"
                 : "~/Library/Application Support/Antigravity/.../state.vscdb")
 
+        let runtime = inspectRuntimeAndWorkspaces(homeDirectory: homeDirectory)
+
         return AntigravityEnvironmentSummary(
             isAppInstalled: installedAppPath != nil,
             isAppRunning: isRunning,
@@ -1702,16 +1937,402 @@ enum AntigravityAccountSwitcher {
             geminiRulesPath: "\(homeDirectory)/.gemini/GEMINI.md",
             mcpConfigPath: mcpConfigPath,
             activeAccountEmail: activeAccountEmail,
-            activeStoragePath: activeStoragePath
+            activeStoragePath: activeStoragePath,
+            activeModel: runtime.model,
+            thinkingEffort: runtime.thinkingEffort,
+            executionPolicy: runtime.executionPolicy,
+            artifactReviewPolicy: runtime.artifactReviewPolicy,
+            securityMode: runtime.securityMode,
+            workspaceCount: runtime.workspaceCount
         )
     }
 
     static func inspectEnvironmentAsync(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
     ) async -> AntigravityEnvironmentSummary {
-        await Task.detached(priority: .userInitiated) {
-            inspectEnvironment(homeDirectory: homeDirectory)
+        #if canImport(AppKit)
+        let isRunning = await MainActor.run {
+            NSWorkspace.shared.runningApplications.contains {
+                $0.bundleIdentifier == bundleIdentifier || $0.localizedName == "Antigravity"
+            }
+        }
+        #else
+        let isRunning = false
+        #endif
+        return await Task.detached(priority: .userInitiated) {
+            inspectEnvironment(homeDirectory: homeDirectory, isRunningOverride: isRunning)
         }.value
+    }
+
+    private struct RuntimeTelemetry {
+        var model: String?
+        var thinkingEffort: String?
+        var executionPolicy: String?
+        var artifactReviewPolicy: String?
+        var securityMode: String?
+        var workspaceCount: Int = 0
+    }
+
+    private static func inspectRuntimeAndWorkspaces(homeDirectory: String) -> RuntimeTelemetry {
+        var result = RuntimeTelemetry()
+        let fm = FileManager.default
+
+        // 1. Read agentPreferences and recent paths from state.vscdb (strictly read-only)
+        let dbPath = primaryDBPath(homeDirectory: homeDirectory)
+        var workspaces = Set<String>()
+        if fm.fileExists(atPath: dbPath), let db = openReadOnlySQLiteWithImmutableFallback(at: dbPath) {
+            defer { sqlite3_close(db) }
+            if let prefsB64 = queryItemValue(db: db, key: "antigravityUnifiedStateSync.agentPreferences") {
+                let prefs = parseAgentPreferencesProto(prefsB64)
+                result.executionPolicy = prefs.executionPolicy
+                result.artifactReviewPolicy = prefs.artifactReviewPolicy
+                result.securityMode = prefs.securityMode
+            }
+            if let historyJSON = queryItemValue(db: db, key: "history.recentlyOpenedPathsList"),
+               let data = historyJSON.data(using: .utf8),
+               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let entries = obj["entries"] as? [[String: Any]] {
+                for entry in entries {
+                    if let uri = (entry["folderUri"] as? String) ?? (entry["workspace"] as? [String: Any])?["configPath"] as? String {
+                        let normalized = normalizeWorkspaceEntry(uri)
+                        if !normalized.isEmpty { workspaces.insert(normalized) }
+                    }
+                }
+            }
+        }
+
+        // 2. Read unique workspace URIs & recent top-level conversation IDs from conversation_summaries.db (strictly read-only)
+        let summariesDBPath = "\(homeDirectory)/.gemini/antigravity/conversation_summaries.db"
+        var recentConversationIDs: [String] = []
+        if fm.fileExists(atPath: summariesDBPath), let db = openReadOnlySQLiteWithImmutableFallback(at: summariesDBPath) {
+            defer { sqlite3_close(db) }
+            var wsStmt: OpaquePointer?
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT workspace_uris FROM conversation_summaries WHERE workspace_uris != '' AND workspace_uris != '[]'",
+                -1,
+                &wsStmt,
+                nil
+            ) == SQLITE_OK {
+                defer { sqlite3_finalize(wsStmt) }
+                while sqlite3_step(wsStmt) == SQLITE_ROW {
+                    guard let cStr = sqlite3_column_text(wsStmt, 0) else { continue }
+                    let raw = String(cString: cStr)
+                    if let data = raw.data(using: .utf8),
+                       let arr = try? JSONSerialization.jsonObject(with: data) as? [String] {
+                        for uri in arr {
+                            let normalized = normalizeWorkspaceEntry(uri)
+                            if !normalized.isEmpty { workspaces.insert(normalized) }
+                        }
+                    }
+                }
+            }
+
+            var recentStmt: OpaquePointer?
+            if sqlite3_prepare_v2(
+                db,
+                "SELECT conversation_id FROM conversation_summaries WHERE nesting_depth = 0 ORDER BY last_modified_time DESC LIMIT 8",
+                -1,
+                &recentStmt,
+                nil
+            ) == SQLITE_OK {
+                defer { sqlite3_finalize(recentStmt) }
+                while sqlite3_step(recentStmt) == SQLITE_ROW {
+                    if let cStr = sqlite3_column_text(recentStmt, 0) {
+                        let id = String(cString: cStr).trimmingCharacters(in: .whitespacesAndNewlines)
+                        if !id.isEmpty { recentConversationIDs.append(id) }
+                    }
+                }
+            }
+        }
+
+        // Fallback workspace count from app_storage.json projectsOrder if needed
+        if workspaces.isEmpty,
+           let data = fm.contents(atPath: appStoragePath(homeDirectory: homeDirectory)),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let projectsOrderRaw = obj["projectsOrder"] as? String,
+           let orderData = projectsOrderRaw.data(using: .utf8),
+           let orderArr = try? JSONSerialization.jsonObject(with: orderData) as? [String] {
+            for item in orderArr where !item.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                workspaces.insert(item)
+            }
+        }
+        result.workspaceCount = workspaces.count
+
+        // 3. Extract active model and thinking effort from recent conversation transcripts
+        let brainDir = "\(homeDirectory)/.gemini/antigravity/brain"
+        if recentConversationIDs.isEmpty, let items = try? fm.contentsOfDirectory(atPath: brainDir) {
+            let sorted = items
+                .filter { !$0.hasPrefix(".") }
+                .compactMap { id -> (String, Date)? in
+                    let logPath = "\(brainDir)/\(id)/.system_generated/logs/transcript.jsonl"
+                    guard let attrs = try? fm.attributesOfItem(atPath: logPath),
+                          let mod = attrs[.modificationDate] as? Date else { return nil }
+                    return (id, mod)
+                }
+                .sorted { $0.1 > $1.1 }
+                .prefix(6)
+                .map(\.0)
+            recentConversationIDs = Array(sorted)
+        }
+
+        for id in recentConversationIDs {
+            let logCandidates = [
+                "\(brainDir)/\(id)/.system_generated/logs/transcript.jsonl",
+                "\(brainDir)/\(id)/.system_generated/logs/transcript_full.jsonl"
+            ]
+            guard let logPath = logCandidates.first(where: { fm.fileExists(atPath: $0) }) else { continue }
+            if let (model, effort) = extractLatestModelAndEffort(fromTranscriptAt: logPath) {
+                result.model = model
+                result.thinkingEffort = effort
+                break
+            }
+        }
+
+        return result
+    }
+
+    private static func openReadOnlySQLiteWithImmutableFallback(at path: String) -> OpaquePointer? {
+        if let db = openSQLite(at: path, readonly: true) {
+            var stmt: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master LIMIT 1", -1, &stmt, nil) == SQLITE_OK {
+                sqlite3_finalize(stmt)
+                return db
+            }
+            sqlite3_close(db)
+        }
+        var components = URLComponents()
+        components.scheme = "file"
+        components.path = path
+        components.queryItems = [
+            URLQueryItem(name: "mode", value: "ro"),
+            URLQueryItem(name: "immutable", value: "1")
+        ]
+        guard let uri = components.string else { return nil }
+        var db: OpaquePointer?
+        let flags = SQLITE_OPEN_READONLY | SQLITE_OPEN_URI | SQLITE_OPEN_NOMUTEX
+        guard sqlite3_open_v2(uri, &db, flags, nil) == SQLITE_OK else {
+            if let db { sqlite3_close(db) }
+            return nil
+        }
+        return db
+    }
+
+    private static func normalizeWorkspaceEntry(_ raw: String) -> String {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return "" }
+        if let url = URL(string: trimmed), url.isFileURL {
+            return url.standardizedFileURL.path
+        }
+        return (trimmed as NSString).standardizingPath
+    }
+
+    static func extractLatestModelAndEffort(fromTranscriptAt path: String) -> (model: String, effort: String?)? {
+        guard let handle = FileHandle(forReadingAtPath: path) else { return nil }
+        defer { try? handle.close() }
+        let maxTailBytes: UInt64 = 256 * 1024
+        let fileSize = (try? handle.seekToEnd()) ?? 0
+        let startOffset = fileSize > maxTailBytes ? (fileSize - maxTailBytes) : 0
+        try? handle.seek(toOffset: startOffset)
+        guard let data = try? handle.readToEnd(), !data.isEmpty else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
+        var latestModel: String?
+        var latestEffort: String?
+        for line in text.split(separator: "\n", omittingEmptySubsequences: true) {
+            guard line.contains("<USER_SETTINGS_CHANGE>") else { continue }
+            guard let lineData = String(line).data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: lineData) as? [String: Any],
+                  let content = obj["content"] as? String else { continue }
+            if let parsed = parseModelSelection(from: content) {
+                latestModel = parsed.model
+                latestEffort = parsed.effort
+            }
+        }
+        if let latestModel {
+            return (latestModel, latestEffort)
+        }
+        return nil
+    }
+
+    static func parseModelSelection(from content: String) -> (model: String, effort: String?)? {
+        guard content.contains("<USER_SETTINGS_CHANGE>") else { return nil }
+        let markers = ["changed setting `Model Selection`", "`Model Selection`", "Model Selection changed"]
+        guard let markerRange = markers
+            .compactMap({ content.range(of: $0, options: .backwards) })
+            .max(by: { $0.upperBound < $1.upperBound }) else { return nil }
+        let tail = content[markerRange.upperBound...]
+        guard let toRange = tail.range(of: " to ") else { return nil }
+        let afterTo = tail[toRange.upperBound...]
+        let delimiters: [(pattern: String, options: String.CompareOptions)] = [
+            (". No need", .caseInsensitive),
+            ("\\n", []),
+            ("\n", []),
+            ("\r", []),
+            ("</USER_SETTINGS_CHANGE>", []),
+            ("<", [])
+        ]
+        var endIndex = afterTo.endIndex
+        for (pattern, options) in delimiters {
+            if let range = afterTo.range(of: pattern, options: options),
+               range.lowerBound < endIndex {
+                endIndex = range.lowerBound
+            }
+        }
+        var rawTarget = String(afterTo[..<endIndex]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        guard !rawTarget.isEmpty, rawTarget.lowercased() != "none" else { return nil }
+        if rawTarget.contains("\"") || rawTarget.contains("'") || rawTarget.contains("`")
+            || rawTarget.contains("\\") || rawTarget.contains(":") || rawTarget.contains("{")
+            || rawTarget.contains("}") || rawTarget.contains("[") || rawTarget.contains("]")
+            || rawTarget.split(whereSeparator: \.isWhitespace).count > 5 {
+            return nil
+        }
+
+        var effort: String?
+        if rawTarget.hasSuffix(")"),
+           let openParen = rawTarget.lastIndex(of: "("),
+           let closeParen = rawTarget.lastIndex(of: ")"),
+           openParen < closeParen {
+            let inside = rawTarget[rawTarget.index(after: openParen)..<closeParen]
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            let allowedEffortChars = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_ "))
+            guard !inside.isEmpty,
+                  inside.unicodeScalars.allSatisfy({ allowedEffortChars.contains($0) }) else {
+                return nil
+            }
+            effort = inside.uppercased()
+            rawTarget = String(rawTarget[..<openParen]).trimmingCharacters(in: CharacterSet(charactersIn: ". \t\r\n"))
+        }
+        guard !rawTarget.contains("("), !rawTarget.contains(")") else { return nil }
+        let normalizedModel: String
+        let lowerTarget = rawTarget.lowercased()
+        if lowerTarget.contains("orchestrator") {
+            if effort == "CARBON" || lowerTarget.contains("carbon") { normalizedModel = "gemini-4-carbon" }
+            else if effort == "HYDROGEN" || lowerTarget.contains("hydrogen") { normalizedModel = "gemini-4-hydrogen" }
+            else if effort == "FLASH" || lowerTarget.contains("flash") { normalizedModel = "gemini-3.8-flash" }
+            else { normalizedModel = "gemini-4-argon" }
+        } else if lowerTarget.contains("gemini 3.5 flash") || lowerTarget.contains("gemini-3.5-flash") {
+            normalizedModel = "gemini-3.5-flash-lite"
+        } else if lowerTarget.contains("gpt-oss") {
+            normalizedModel = "gpt-oss-120b"
+        } else {
+            normalizedModel = lowerTarget
+                .components(separatedBy: CharacterSet.alphanumerics.union(CharacterSet(charactersIn: ".-")).inverted)
+                .filter { !$0.isEmpty }
+                .joined(separator: "-")
+                .trimmingCharacters(in: CharacterSet(charactersIn: ".-"))
+        }
+        let knownPrefixes = ["gemini-", "claude-", "gpt-", "o1", "o3", "o4"]
+        guard !normalizedModel.isEmpty,
+              normalizedModel != "unknown-model",
+              !normalizedModel.hasPrefix("model-placeholder"),
+              knownPrefixes.contains(where: { normalizedModel.hasPrefix($0) }) else { return nil }
+        return (normalizedModel, effort)
+    }
+
+    static func parseAgentPreferencesProto(_ base64String: String) -> (
+        executionPolicy: String?,
+        artifactReviewPolicy: String?,
+        securityMode: String?
+    ) {
+        let cleaned = base64String.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let outerData = Data(base64Encoded: cleaned) else {
+            return (nil, nil, nil)
+        }
+        var executionPolicy: String?
+        var artifactReviewPolicy: String?
+        var securityMode: String?
+
+        var offset = 0
+        while offset < outerData.count {
+            guard let (fieldNum, wireType, afterTag) = ProtobufCodec.decodeTag(outerData, offset: offset) else { break }
+            if fieldNum == 1, wireType == 2,
+               let range = ProtobufCodec.readLengthDelimitedRange(outerData, offset: afterTag) {
+                let entryData = outerData.subdata(in: range)
+                if let (key, innerVal) = parseSentinelEntry(entryData) {
+                    switch key {
+                    case "terminalAutoExecutionPolicySentinelKey":
+                        switch innerVal {
+                        case 1: executionPolicy = "always-proceed"
+                        case 2: executionPolicy = "request-review"
+                        case 3: executionPolicy = "strict"
+                        case 4: executionPolicy = "sandbox"
+                        default: break
+                        }
+                    case "artifactReviewPolicySentinelKey":
+                        switch innerVal {
+                        case 1: artifactReviewPolicy = "always-proceed"
+                        case 2: artifactReviewPolicy = "agent-decides"
+                        case 3: artifactReviewPolicy = "ask-review"
+                        default: break
+                        }
+                    case "secureModeSentinelKey":
+                        securityMode = (innerVal == 1) ? "secure-sandbox" : "standard"
+                    default:
+                        break
+                    }
+                }
+                offset = range.upperBound
+            } else if let next = ProtobufCodec.skipField(outerData, offset: afterTag, wireType: wireType) {
+                offset = next
+            } else {
+                break
+            }
+        }
+        return (executionPolicy, artifactReviewPolicy, securityMode)
+    }
+
+    private static func parseSentinelEntry(_ entryData: Data) -> (String, UInt64)? {
+        var offset = 0
+        var key: String?
+        var innerB64: String?
+        while offset < entryData.count {
+            guard let (fieldNum, wireType, afterTag) = ProtobufCodec.decodeTag(entryData, offset: offset) else { break }
+            if wireType == 2, let range = ProtobufCodec.readLengthDelimitedRange(entryData, offset: afterTag) {
+                let sub = entryData.subdata(in: range)
+                if fieldNum == 1 {
+                    key = String(data: sub, encoding: .utf8)
+                } else if fieldNum == 2 {
+                    // Field 2 is a nested message whose field 1 is the base64 sentinel payload
+                    var innerOffset = 0
+                    while innerOffset < sub.count {
+                        guard let (fNum, wType, aTag) = ProtobufCodec.decodeTag(sub, offset: innerOffset) else { break }
+                        if fNum == 1, wType == 2,
+                           let innerRange = ProtobufCodec.readLengthDelimitedRange(sub, offset: aTag) {
+                            innerB64 = String(data: sub.subdata(in: innerRange), encoding: .utf8)?
+                                .trimmingCharacters(in: .whitespacesAndNewlines)
+                            break
+                        } else if let next = ProtobufCodec.skipField(sub, offset: aTag, wireType: wType) {
+                            innerOffset = next
+                        } else {
+                            break
+                        }
+                    }
+                }
+                offset = range.upperBound
+            } else if let next = ProtobufCodec.skipField(entryData, offset: afterTag, wireType: wireType) {
+                offset = next
+            } else {
+                break
+            }
+        }
+        guard let resolvedKey = key,
+              let b64 = innerB64,
+              let valData = Data(base64Encoded: b64) else {
+            return nil
+        }
+        if valData.isEmpty { return (resolvedKey, 0) }
+        var valOffset = 0
+        while valOffset < valData.count {
+            guard let (_, wType, aTag) = ProtobufCodec.decodeTag(valData, offset: valOffset) else { break }
+            if wType == 0, let (num, _) = ProtobufCodec.readVarint(valData, offset: aTag) {
+                return (resolvedKey, num)
+            } else if let next = ProtobufCodec.skipField(valData, offset: aTag, wireType: wType) {
+                valOffset = next
+            } else {
+                break
+            }
+        }
+        return (resolvedKey, 0)
     }
 
     #if canImport(AppKit)
@@ -1733,6 +2354,86 @@ enum AntigravityAccountSwitcher {
         return true
     }
 
+    private static func isAntigravityLanguageServerRunning() -> Bool {
+        let pgrepPath = "/usr/bin/pgrep"
+        guard FileManager.default.isExecutableFile(atPath: pgrepPath) else { return false }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pgrepPath)
+        process.arguments = ["-f", "/Antigravity.app/Contents/Resources/bin/language_server"]
+        process.terminationHandler = { _ in }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        do {
+            try process.run()
+        } catch {
+            return false
+        }
+        let deadline = Date().addingTimeInterval(0.5)
+        while process.isRunning && Date() < deadline {
+            Darwin.usleep(5_000)
+        }
+        if process.isRunning {
+            process.terminate()
+            return false
+        }
+        return process.terminationStatus == 0
+    }
+
+    /// Detects an external standalone Antigravity CLI daemon (`agy --hub ... antigravity`)
+    /// so we refuse to race Keychain/SQLite mutations behind it.
+    static func hasExternalHubProcess() -> Bool {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/bin/ps")
+        process.arguments = ["-axo", "args="]
+        process.terminationHandler = { _ in }
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        guard (try? process.run()) != nil else { return false }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        return hasExternalHubProcess(inProcessListOutput: String(decoding: data, as: UTF8.self))
+    }
+
+    static func hasExternalHubProcess(inProcessListOutput output: String) -> Bool {
+        output.split(separator: "\n").contains { rawLine in
+            let line = String(rawLine)
+            guard !line.contains("/Antigravity.app/") else { return false }
+            let tokens = line.split(whereSeparator: \.isWhitespace).map(String.init)
+            let hasHubBinary = tokens.contains {
+                let name = URL(fileURLWithPath: $0).lastPathComponent
+                return name == "agy" || name.hasPrefix("agy-")
+            }
+            let hasHubFlag = tokens.contains("--hub")
+            let targetsAntigravity = tokens.contains {
+                $0 == "antigravity" || $0.localizedCaseInsensitiveContains("antigravity")
+            }
+            return hasHubBinary && hasHubFlag && targetsAntigravity
+        }
+    }
+
+    private static func terminateOrphanedLanguageServer() {
+        let pkillPath = "/usr/bin/pkill"
+        guard FileManager.default.isExecutableFile(atPath: pkillPath) else { return }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: pkillPath)
+        process.arguments = ["-TERM", "-f", "/Antigravity.app/Contents/Resources/bin/language_server"]
+        process.terminationHandler = { _ in }
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.standardInput = FileHandle.nullDevice
+        try? process.run()
+        let deadline = Date().addingTimeInterval(0.5)
+        while process.isRunning && Date() < deadline {
+            Darwin.usleep(5_000)
+        }
+        if process.isRunning {
+            process.terminate()
+        }
+    }
+
     @MainActor
     private static func defaultRelaunchAntigravity(at appURL: URL) async -> Bool {
         let config = NSWorkspace.OpenConfiguration()
@@ -1745,7 +2446,119 @@ enum AntigravityAccountSwitcher {
         }
     }
 
+    struct RestartTargetCandidate: Equatable, Sendable {
+        let activeKey: String?
+        let authFileURL: URL
+        let email: String?
+        let displayName: String?
+
+        init(activeKey: String? = nil, authFileURL: URL, email: String?, displayName: String?) {
+            self.activeKey = activeKey
+            self.authFileURL = authFileURL
+            self.email = email
+            self.displayName = displayName
+        }
+    }
+
+    /// Selects the authoritative account target to reapply after Antigravity shuts down.
+    /// Prefers `lastActivated` whenever it matches `currentActiveKey` (or when `currentActiveKey`
+    /// is unset) so an account switch performed while awaiting shutdown is never overwritten
+    /// by a stale pre-await `fallback` entry.
+    static func selectRestartTarget(
+        lastActivated: RestartTargetCandidate?,
+        currentActiveKey: String?,
+        fallback: RestartTargetCandidate?,
+        fileExists: (String) -> Bool = { FileManager.default.fileExists(atPath: $0) }
+    ) -> RestartTargetCandidate? {
+        let normalizedCurrentKey = currentActiveKey?
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .lowercased()
+        let hasCurrentKey = normalizedCurrentKey?.isEmpty == false
+
+        if let lastActivated, fileExists(lastActivated.authFileURL.path) {
+            let lastKey = lastActivated.activeKey?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let lastEmail = lastActivated.email?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !hasCurrentKey
+                || (lastKey?.isEmpty == false && lastKey == normalizedCurrentKey)
+                || (lastEmail?.isEmpty == false && lastEmail == normalizedCurrentKey) {
+                return lastActivated
+            }
+        }
+
+        if let fallback, fileExists(fallback.authFileURL.path) {
+            let fallbackKey = fallback.activeKey?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            let fallbackEmail = fallback.email?
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+                .lowercased()
+            if !hasCurrentKey
+                || (fallbackKey?.isEmpty == false && fallbackKey == normalizedCurrentKey)
+                || (fallbackEmail?.isEmpty == false && fallbackEmail == normalizedCurrentKey)
+                || lastActivated == nil {
+                return fallback
+            }
+        }
+
+        if let lastActivated, fileExists(lastActivated.authFileURL.path) {
+            return lastActivated
+        }
+        return nil
+    }
+
+    /// Re-applies the authoritative Antigravity account target before relaunch, retrying if a
+    /// newer account selection (`generation`) occurred while the detached credential write was in flight.
+    static func reapplyAuthoritativeRestartTarget(
+        maxAttempts: Int = 3,
+        resolveCurrentTarget: () async -> (generation: UInt64, target: RestartTargetCandidate?),
+        currentGeneration: () async -> UInt64,
+        applyTarget: @Sendable @escaping (RestartTargetCandidate) throws -> AntigravitySwitchedIdentity = { candidate in
+            try switchAccount(
+                authFileURL: candidate.authFileURL,
+                fallbackEmail: candidate.email,
+                fallbackName: candidate.displayName
+            )
+        },
+        commitAppliedTarget: (UInt64, RestartTargetCandidate, AntigravitySwitchedIdentity) async -> Void
+    ) async throws {
+        for _ in 0..<max(1, maxAttempts) {
+            let (genBefore, selected) = await resolveCurrentTarget()
+            guard let selected else { return }
+
+            let switched = try await Task.detached(priority: .userInitiated) {
+                try applyTarget(selected)
+            }.value
+
+            let genAfter = await currentGeneration()
+            if genAfter == genBefore {
+                await commitAppliedTarget(genBefore, selected, switched)
+                return
+            }
+        }
+    }
+
     @MainActor
+    static func openAntigravityApp(
+        homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path
+    ) {
+        if let appURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleIdentifier) {
+            NSWorkspace.shared.openApplication(at: appURL, configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        for path in ["/Applications/Antigravity.app", "\(homeDirectory)/Applications/Antigravity.app"]
+        where FileManager.default.fileExists(atPath: path) {
+            NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: path), configuration: NSWorkspace.OpenConfiguration())
+            return
+        }
+        if let docsURL = URL(string: "https://antigravity.google/docs/faq") {
+            NSWorkspace.shared.open(docsURL)
+        }
+    }
+
     static func restartAntigravityApp(
         homeDirectory: String = FileManager.default.homeDirectoryForCurrentUser.path,
         timeoutSeconds: TimeInterval = 6.0,
@@ -1753,7 +2566,10 @@ enum AntigravityAccountSwitcher {
         appExists: ((String) -> Bool)? = nil,
         isTargetRunning: (() -> Bool)? = nil,
         requestTerminate: (() -> Bool)? = nil,
-        relaunchApp: ((URL) async -> Bool)? = nil
+        isLanguageServerRunning: (@Sendable () -> Bool)? = nil,
+        terminateLanguageServer: (@Sendable () -> Void)? = nil,
+        relaunchApp: ((URL) async -> Bool)? = nil,
+        reapplyBeforeRelaunch: (() async throws -> Void)? = nil
     ) async -> Bool {
         let checkAppExists = appExists ?? { FileManager.default.fileExists(atPath: $0) }
         let checkRunning = isTargetRunning ?? { defaultIsAntigravityRunning() }
@@ -1782,11 +2598,50 @@ enum AntigravityAccountSwitcher {
             }
         }
 
-        // Re-sync app_storage.json after the old Electron process has exited and before relaunching,
-        // so quit-time windowState writes cannot clobber agy.onboarding.lastLoginUsername.
-        if let activeEmail = detectActiveAccount(homeDirectory: homeDirectory)?.email {
-            syncAppStorageFile(email: activeEmail, homeDirectory: homeDirectory)
+        let shouldCheckLanguageServer = isLanguageServerRunning != nil
+            || (isTargetRunning == nil && isRealUserHomeDirectory(homeDirectory))
+        if shouldCheckLanguageServer {
+            let checkLS = isLanguageServerRunning ?? { isAntigravityLanguageServerRunning() }
+            let terminateLS = terminateLanguageServer ?? { terminateOrphanedLanguageServer() }
+            let pollNs = UInt64(max(10, pollIntervalMilliseconds)) * 1_000_000
+            let waitTimeout = isLanguageServerRunning != nil ? min(timeoutSeconds, 0.2) : 1.5
+            let postTermTimeout = isLanguageServerRunning != nil ? min(timeoutSeconds, 0.2) : 1.0
+            let lsExited = await Task.detached(priority: .userInitiated) { () -> Bool in
+                let lsDeadline = Date().addingTimeInterval(waitTimeout)
+                while Date() < lsDeadline && checkLS() {
+                    try? await Task.sleep(nanoseconds: pollNs)
+                }
+                if checkLS() {
+                    terminateLS()
+                    let postTermDeadline = Date().addingTimeInterval(postTermTimeout)
+                    while Date() < postTermDeadline && checkLS() {
+                        try? await Task.sleep(nanoseconds: pollNs)
+                    }
+                }
+                return !checkLS()
+            }.value
+            // Abort before reapply/relaunch if the language server is still alive and could flush old credentials.
+            guard lsExited else {
+                return false
+            }
         }
+
+        // Re-apply the active account credentials after the old Electron & language_server processes have
+        // completely exited and before relaunching, so quit-time Keyring/app_storage.json/SQLite flushes
+        // from the old process can never revert the newly switched account.
+        if let reapplyBeforeRelaunch {
+            do {
+                try await reapplyBeforeRelaunch()
+            } catch {
+                return false
+            }
+        }
+
+        await Task.detached(priority: .userInitiated) {
+            if let activeEmail = detectActiveAccount(homeDirectory: homeDirectory)?.email {
+                syncAppStorageFile(email: activeEmail, homeDirectory: homeDirectory)
+            }
+        }.value
 
         return await relaunch(URL(fileURLWithPath: appPath))
     }

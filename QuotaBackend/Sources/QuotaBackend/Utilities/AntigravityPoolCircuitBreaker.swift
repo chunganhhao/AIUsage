@@ -8,16 +8,30 @@ enum AntigravityPoolCircuitBreaker {
 
         static func model(_ id: String) -> Pool? {
             let id = id.lowercased()
-            if id.hasPrefix("gemini-4-argon") { return .argon }
-            if id.hasPrefix("gemini-") { return .gemini }
-            if id.hasPrefix("claude-") || id.hasPrefix("gpt-") { return .claude }
+            if id.hasPrefix("gemini-4-argon") || id.hasPrefix("gemini-4-carbon")
+                || id.contains("argon") || id.contains("carbon") {
+                return .argon
+            }
+            if id.hasPrefix("gemini-") || id.contains("hydrogen") {
+                return .gemini
+            }
+            if id.hasPrefix("claude-") || id.hasPrefix("gpt-") {
+                return .claude
+            }
             return nil
         }
 
         static func quota(_ model: AntigravityProvider.ModelQuota) -> Pool? {
-            if model.isAuxiliary { return .argon }
-            if model.id.hasPrefix("3p-") || model.label.hasPrefix("Claude + GPT") { return .claude }
-            if model.label.hasPrefix("Gemini ·") { return .gemini }
+            let labelLower = model.label.lowercased()
+            if model.isAuxiliary || labelLower.contains("argon") || labelLower.contains("carbon") {
+                return .argon
+            }
+            if model.id.hasPrefix("3p-") || model.label.hasPrefix("Claude + GPT") {
+                return .claude
+            }
+            if model.label.hasPrefix("Gemini ·") || labelLower.contains("hydrogen") || labelLower.contains("flash") || labelLower == "pro" {
+                return .gemini
+            }
             return Self.model(model.id)
         }
     }
@@ -74,6 +88,19 @@ enum AntigravityPoolCircuitBreaker {
         }
     }
 
+    static func removeDeselectedPools(runtime: URL, enabledPools: Set<String>) throws {
+        let directory = runtime.appendingPathComponent("auth")
+        guard FileManager.default.fileExists(atPath: directory.path) else { return }
+        for url in try FileManager.default.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey]) where url.pathExtension == "json" {
+            guard try url.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink != true else { continue }
+            try AntigravityCredentialFile.update(url) { json in
+                guard json["type"] as? String == "antigravity", json[stateKey] != nil else { return nil }
+                let config = try String(contentsOf: runtime.appendingPathComponent("config.yaml"), encoding: .utf8)
+                return try updatedCredential(json, models: [], global: globalExclusions(config), enabledPools: enabledPools)
+            }
+        }
+    }
+
     static func sync(targets: [URL], models: [AntigravityProvider.ModelQuota], runtime: URL) throws -> Outcome? {
         try AntigravityCredentialFile.withLock {
             // Recheck under the same lock as disabling/cleanup: an in-flight fetch
@@ -86,7 +113,7 @@ enum AntigravityPoolCircuitBreaker {
             var applied = false
             for target in targets {
                 guard let updated = try AntigravityCredentialFile.update(target, transform: { json in
-                    try updatedCredential(json, models: models, global: global)
+                    try updatedCredential(json, models: models, global: global, enabledPools: AntigravityPoolProtectionSettings.enabledPools(runtime: runtime))
                 }) else { continue }
                 applied = true
                 let state = updated[stateKey] as? [String: Any]
@@ -101,7 +128,7 @@ enum AntigravityPoolCircuitBreaker {
     }
 
     /// Pure transform also used by offline tests. nil means a manually paused account.
-    static func updatedCredential(_ original: [String: Any], models: [AntigravityProvider.ModelQuota], global: [String]) throws -> [String: Any]? {
+    static func updatedCredential(_ original: [String: Any], models: [AntigravityProvider.ModelQuota], global: [String], enabledPools: Set<String> = ["gemini", "claude", "argon"]) throws -> [String: Any]? {
         var json = original
         guard json["type"] as? String == "antigravity" else {
             throw Failure.unsafe("Pool protection can only modify Antigravity credentials.")
@@ -134,10 +161,10 @@ enum AntigravityPoolCircuitBreaker {
         }
         let baseline = oldState?["original_excluded_models"] ?? json["excluded_models"] ?? NSNull()
         let userExclusions = try exclusionList(baseline)
-        var windows = oldState?["blocked_windows"] as? [String: String] ?? [:]
-        var observed = false
+        var windows = (oldState?["blocked_windows"] as? [String: String] ?? [:]).filter { enabledPools.contains($0.value) }
+        var observed = oldState != nil
         for model in models {
-            guard let pool = Pool.quota(model), model.remainingPercent.isFinite else { continue }
+            guard let pool = Pool.quota(model), enabledPools.contains(pool.rawValue), model.remainingPercent.isFinite else { continue }
             observed = true
             if model.remainingPercent <= (isWeekly(model) ? 3.0 : 5.0) {
                 windows[model.id] = pool.rawValue

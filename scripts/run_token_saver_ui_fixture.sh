@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Compile/render actual RuntimePane with isolated runtime stubs, never production AIUsage.
+# Compile/render real Token Saver UI components with isolated stubs, never production AIUsage.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 FIXTURE="${TOKEN_SAVER_FIXTURE_DIR:-$(mktemp -d "${TMPDIR:-/tmp}/aiusage-token-ui.XXXXXX")}"
@@ -11,69 +11,58 @@ python3 - "$ROOT" "$FIXTURE" <<'PYCODE'
 from pathlib import Path
 import sys
 root, fixture = map(Path, sys.argv[1:])
-s = (root/'AIUsage/Views/SubscriptionGatewaySettingsView.swift').read_text()
-categories = s.split('// MARK: - Settings View', 1)[0].replace('private enum GatewaySettingsCategory', 'enum GatewaySettingsCategory')
-consume_fn = '    func consumeSettingsDestination()' + s.split('    private func consumeSettingsDestination()', 1)[1].split('\n    }\n', 1)[0] + '\n    }\n'
-tail = s.split('// MARK: - Token Saver updates section', 1)[1]
-comp = (root/'AIUsage/Views/SubscriptionGatewayComponents.swift').read_text().split('struct GatewayCard<Content: View>: View {', 1)[0]
+
+settings_src = (root/'AIUsage/Views/SettingsView.swift').read_text()
+categories = settings_src.split('enum SettingsCategory', 1)[1].split('// MARK: - Settings View', 1)[0]
+categories = 'enum SettingsCategory' + categories
+consume_fn = '    func consumeRequestedSettingsCategory()' + settings_src.split('    func consumeRequestedSettingsCategory()', 1)[1].split('\n    func updateDockIconVisibility', 1)[0]
+
 mb = (root/'AIUsage/Views/MenuBarView.swift').read_text()
-open_fn = '    func openTokenSaverSettings()' + mb.split('    private func openTokenSaverSettings()', 1)[1].split('\n    }\n', 1)[0] + '\n    }\n'
+open_fn = '    func openTokenSaverSettings()' + mb.split('    private func openTokenSaverSettings()', 1)[1].split('\n    private func openMainWindow', 1)[0]
 mb_section = mb.split('// MARK: - Token Saver Menu Bar Quick Controls', 1)[1].split('// MARK: - Overall Health Status', 1)[0]
-routing_harness = f'''
-enum AppSection {{ case subscriptionGateway }}
+
+routing_harness = f'''import SwiftUI
+
+enum AppSection {{ case settings }}
+
+@MainActor final class ProductionAppStateRoutingStub {{
+    var requestedSettingsCategory: SettingsCategory?
+    var presentedSection: AppSection?
+    func presentMainWindow(section: AppSection) {{ presentedSection = section }}
+}}
+
 @MainActor final class ProductionMenuBarRouting {{
-    var revealedSection: AppSection?
-    private func openMainWindow(section: AppSection) {{ revealedSection = section }}
+    let appState: ProductionAppStateRoutingStub
+    var revealedSection: AppSection? {{ appState.presentedSection }}
+    init(appState: ProductionAppStateRoutingStub) {{ self.appState = appState }}
+    private func openMainWindow(section: AppSection) {{ appState.presentMainWindow(section: section) }}
 {open_fn}
 }}
-@MainActor final class ProductionGatewaySettingsRouting {{
-    let navigation = CLIProxyGatewayNavigation.shared
-    var selectedCategory: GatewaySettingsCategory = .runtime
+
+@MainActor final class ProductionSettingsRouting {{
+    let appState: ProductionAppStateRoutingStub
+    var selectedCategory: SettingsCategory = .general
+    init(appState: ProductionAppStateRoutingStub) {{ self.appState = appState }}
 {consume_fn}
 }}
 '''
-(fixture/'Updates.swift').write_text(comp + '\n' + categories + '\n' + routing_harness + '\n' + tail)
+(fixture/'Routing.swift').write_text(categories + '\n' + routing_harness)
 (fixture/'MenuBarTokenSaver.swift').write_text('import SwiftUI\nimport Combine\nimport QuotaBackend\n' + mb_section)
-# Compile the exact parent updater too: the Token Saver child alone cannot detect
-# misplaced references in the sibling CPA updater. Stubs never launch CPA.
-parent = s.split('    private var updatesSection: some View {', 1)[1].split('    @ViewBuilder\n    private var updateStatusPill', 1)[0]
-(fixture/'ParentUpdates.swift').write_text('''import SwiftUI
-import Combine
-
-@MainActor
-final class FixtureCPAUpdater: ObservableObject {
-    struct Release { var version: String }
-    struct Operation { var isBusy = false }
-    @Published var latestRelease: Release?
-    @Published var lastCheckedAt: Date?
-    let currentVersion: String? = "8.0.47"
-    let operation = Operation()
-    let isInstalled = true
-    var hasUpdate: Bool { latestRelease != nil }
-    func checkForUpdates(force: Bool) async {
-        latestRelease = Release(version: "8.0.99-fixture")
-        lastCheckedAt = Date()
-    }
-    func installOrUpdateLatest() async { }
-}
-
-struct FixtureCPAUpdatesSection: View {
-    @StateObject private var manager = FixtureCPAUpdater()
-    var body: some View { updatesSection }
-    private var updateStatusPill: some View { Text("Offline CPA fixture") }
-    private var operationLabel: String { "Working…" }
-    private var primaryUpdateActionTitle: String { "Update CPA (stub)" }
-    private func sectionHeader<Content: View>(title: String, @ViewBuilder trailing: () -> Content) -> some View {
-        HStack { Text(title).font(.title3); Spacer(); trailing().font(.caption) }
-    }
-    private func versionChip(title: String, value: String) -> some View { Text("\\(title): \\(value)") }
-    private var updatesSection: some View {
-''' + parent + '}\n')
-
 PYCODE
+
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$FIXTURE/objects.txt"
 swiftc -parse-as-library -swift-version 5 -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$FIXTURE/objects.txt" -lsqlite3 \
-  "$ROOT/AIUsage/Views/SubscriptionGatewaySettingsRuntimePane.swift" "$ROOT/scripts/token_saver_ui_stubs.swift" "$FIXTURE/ParentUpdates.swift" "$FIXTURE/Updates.swift" "$FIXTURE/MenuBarTokenSaver.swift" "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" -o "$FIXTURE/TokenSaverUIFixture"
+  "$ROOT/AIUsage/Views/AppSurfaceTokens.swift" \
+  "$ROOT/AIUsage/Views/GatewayChrome.swift" \
+  "$ROOT/AIUsage/Views/AgentToolsView.swift" \
+  "$ROOT/AIUsage/Views/PoolProtectionControls.swift" \
+  "$ROOT/AIUsage/Views/TokenSaverSettingsView.swift" \
+  "$ROOT/AIUsage/Services/TokenSaverReleaseManager.swift" \
+  "$FIXTURE/Routing.swift" \
+  "$FIXTURE/MenuBarTokenSaver.swift" \
+  "$ROOT/scripts/token_saver_ui_stubs.swift" \
+  -o "$FIXTURE/TokenSaverUIFixture"
+
 mkdir -p "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS"
 cp "$FIXTURE/TokenSaverUIFixture" "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS/TokenSaverUIFixture"
 cat > "$FIXTURE/TokenSaverUIFixture.app/Contents/Info.plist" <<'PLIST'
@@ -89,23 +78,6 @@ data=plistlib.loads(p.read_bytes())
 data['CFBundleIdentifier']='local.aiusage.token-saver-fixture.'+hashlib.sha256(str(root).encode()).hexdigest()[:12]
 p.write_bytes(plistlib.dumps(data))
 PYCODE
-if [[ "${TOKEN_SAVER_FIXTURE_WITH_LEGACY:-0}" == "1" ]]; then
-  python3 - "$FIXTURE/home" <<'PYCODE'
-from pathlib import Path
-import json,sys
-home=Path(sys.argv[1])
-runtime=home/'Library/Application Support/AIUsage/CLIProxyAPI'
-(runtime/'auth').mkdir(parents=True,exist_ok=True)
-(runtime/'versions/v8.0.43').mkdir(parents=True,exist_ok=True)
-(runtime/'current').symlink_to('versions/v8.0.43')
-(runtime/'config.yaml').write_text('oauth-excluded-models: {}\n')
-record={'type':'antigravity','access_token':'fixture-only-token','disabled':True,
- 'excluded_models':['user-*','claude-old'],
- 'aiusage_pool_breaker':{'original_excluded_models':['user-*'],'last_excluded_models':['user-*','claude-old'],'blocked_windows':{'claude-weekly':'claude'}}}
-(runtime/'auth/legacy.json').write_text(json.dumps(record,sort_keys=True))
-(runtime/'legacy-before.json').write_text(json.dumps(record,sort_keys=True))
-PYCODE
-fi
 printf 'Fixture path: %s\n' "$FIXTURE"
 if [[ "${1:-}" == "--run" ]]; then
   TOKEN_SAVER_FIXTURE_HOME="$FIXTURE" "$FIXTURE/TokenSaverUIFixture.app/Contents/MacOS/TokenSaverUIFixture"

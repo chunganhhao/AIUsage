@@ -294,6 +294,7 @@ struct CallEventAccumulator {
         var success = 0
         var durationSamples = 0
         var durationMsTotal = 0.0
+        var reclassifiedBuiltins = 0
     }
 
     private var counts: [Key: Agg] = [:]
@@ -307,7 +308,8 @@ struct CallEventAccumulator {
         dayKey: String,
         agent: String? = nil,
         success: Bool? = nil,
-        durationMs: Double? = nil
+        durationMs: Double? = nil,
+        reclassifiedBuiltin: Bool = false
     ) {
         let key = Key(source: source, kind: kind, name: name, server: server, agent: agent, dayKey: dayKey)
         var agg = counts[key] ?? Agg()
@@ -319,6 +321,9 @@ struct CallEventAccumulator {
         if let durationMs, durationMs >= 0 {
             agg.durationSamples += 1
             agg.durationMsTotal += durationMs
+        }
+        if reclassifiedBuiltin {
+            agg.reclassifiedBuiltins += 1
         }
         counts[key] = agg
         eventCount += 1
@@ -337,7 +342,8 @@ struct CallEventAccumulator {
                 outcomeKnownCount: agg.outcomeKnown,
                 successCount: agg.success,
                 durationSampleCount: agg.durationSamples,
-                durationMsTotal: agg.durationMsTotal
+                durationMsTotal: agg.durationMsTotal,
+                reclassifiedBuiltinCount: agg.reclassifiedBuiltins
             )
         }
     }

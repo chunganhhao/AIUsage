@@ -20,21 +20,25 @@ final class TLSCertificateManager {
     private let serverKeyPath: URL
     private let serverCertPath: URL
     private let identityPath: URL
+    private let passwordPath: URL
     private let versionPath: URL
+    private let allowSystemTrustInstall: Bool
 
-    private static let identityPassword = "aiusage-proxy-tls"
-    private static let currentVersion = "ca-v5"
+    private nonisolated static let currentVersion = "ca-v6"
     private let log = Logger(subsystem: "com.aiusage.desktop", category: "TLS")
 
-    init() {
-        let home = FileManager.default.homeDirectoryForCurrentUser
-        let dir = home.appendingPathComponent(".config/aiusage/tls")
-        tlsDirectory = dir
+    init(tlsDirectory: URL? = nil, allowSystemTrustInstall: Bool = false) {
+        let dir = (tlsDirectory
+            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".config/aiusage/tls"))
+            .standardizedFileURL
+        self.tlsDirectory = dir
+        self.allowSystemTrustInstall = allowSystemTrustInstall
         caKeyPath = dir.appendingPathComponent("ca-key.pem")
         caCertPath = dir.appendingPathComponent("ca-cert.pem")
         serverKeyPath = dir.appendingPathComponent("server-key.pem")
         serverCertPath = dir.appendingPathComponent("server-cert.pem")
         identityPath = dir.appendingPathComponent("identity.p12")
+        passwordPath = dir.appendingPathComponent(".identity-pass")
         versionPath = dir.appendingPathComponent(".version")
     }
 
@@ -42,19 +46,47 @@ final class TLSCertificateManager {
     var certFilePath: String { caCertPath.path }
 
     private var hasValidCertificate: Bool {
-        guard FileManager.default.fileExists(atPath: identityPath.path) else { return false }
-        guard let version = try? String(contentsOf: versionPath, encoding: .utf8) else { return false }
-        return version.trimmingCharacters(in: .whitespacesAndNewlines) == Self.currentVersion
+        guard FileManager.default.fileExists(atPath: identityPath.path),
+              FileManager.default.fileExists(atPath: passwordPath.path),
+              let version = try? String(contentsOf: versionPath, encoding: .utf8),
+              version.trimmingCharacters(in: .whitespacesAndNewlines) == Self.currentVersion else {
+            return false
+        }
+        do {
+            try Self.validateDirectoryAndSecretPermissions(
+                directory: tlsDirectory,
+                secretFiles: [caKeyPath, serverKeyPath, identityPath, passwordPath]
+            )
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    nonisolated static func supportsMemoryOnlyTLSIdentityImport(isMacOS15OrLater: Bool? = nil) -> Bool {
+        if let isMacOS15OrLater { return isMacOS15OrLater }
+        if #available(macOS 15.0, *) { return true }
+        return false
+    }
+
+    nonisolated static func requireMemoryOnlyTLSRuntimeSupport(isMacOS15OrLater: Bool? = nil) throws {
+        guard supportsMemoryOnlyTLSIdentityImport(isMacOS15OrLater: isMacOS15OrLater) else {
+            throw TLSCertificateError.generationFailed(
+                "Native local HTTPS requires macOS 15.0 or later for memory-only PKCS#12 identity loading without importing keys into the default Keychain."
+            )
+        }
     }
 
     func ensureCertificate() async throws {
+        try Self.requireMemoryOnlyTLSRuntimeSupport()
         if hasValidCertificate { return }
         log.info("Certificate missing or outdated, regenerating...")
         try await regenerateCertificate()
     }
 
     func regenerateCertificate() async throws {
-        for path in [caKeyPath, caCertPath, serverKeyPath, serverCertPath, identityPath] {
+        try Self.requireMemoryOnlyTLSRuntimeSupport()
+        for path in [caKeyPath, caCertPath, serverKeyPath, serverCertPath, identityPath, passwordPath] {
             try? FileManager.default.removeItem(at: path)
         }
         try await generateCertificateChain()
@@ -63,8 +95,16 @@ final class TLSCertificateManager {
     // MARK: - Certificate Chain Generation
 
     private func generateCertificateChain() async throws {
+        try Self.rejectSymlinkIfPresent(at: tlsDirectory)
         try FileManager.default.createDirectory(
-            at: tlsDirectory, withIntermediateDirectories: true
+            at: tlsDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o700]
+        )
+        try Self.enforcePermissions(
+            directory: tlsDirectory,
+            secretFiles: [caKeyPath, serverKeyPath, identityPath, passwordPath],
+            createMissingSecrets: true
         )
 
         let dir = tlsDirectory
@@ -73,7 +113,14 @@ final class TLSCertificateManager {
         let serverKey = serverKeyPath
         let serverCert = serverCertPath
         let identity = identityPath
-        let password = Self.identityPassword
+        let passwordFile = passwordPath
+        let password = try Self.generateRandomPassphrase()
+        try Data(password.utf8).write(to: passwordFile, options: .atomic)
+        try Self.enforcePermissions(
+            directory: dir,
+            secretFiles: [caKey, serverKey, identity, passwordFile],
+            createMissingSecrets: false
+        )
 
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -83,6 +130,11 @@ final class TLSCertificateManager {
                                                 serverKey: serverKey, serverCert: serverCert)
                     try Self.exportPKCS12(identity: identity, serverKey: serverKey,
                                          serverCert: serverCert, caCert: caCert, password: password)
+                    try Self.enforcePermissions(
+                        directory: dir,
+                        secretFiles: [caKey, serverKey, identity, passwordFile],
+                        createMissingSecrets: false
+                    )
                     continuation.resume()
                 } catch {
                     continuation.resume(throwing: error)
@@ -90,16 +142,79 @@ final class TLSCertificateManager {
             }
         }
 
+        try Self.rejectSymlinkIfPresent(at: versionPath)
         try Self.currentVersion.write(to: versionPath, atomically: true, encoding: .utf8)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: versionPath.path)
 
         await installCATrust()
 
         log.info("Certificate chain generated at \(self.tlsDirectory.path, privacy: .public)")
     }
 
+    nonisolated static func rejectSymlinkIfPresent(at url: URL) throws {
+        var st = stat()
+        if lstat(url.path, &st) == 0, (st.st_mode & S_IFMT) == S_IFLNK {
+            throw TLSCertificateError.generationFailed("Refusing symlink at TLS path: \(url.lastPathComponent)")
+        }
+    }
+
+    nonisolated static func enforcePermissions(
+        directory: URL,
+        secretFiles: [URL],
+        createMissingSecrets: Bool
+    ) throws {
+        try rejectSymlinkIfPresent(at: directory)
+        try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
+        for file in secretFiles {
+            try rejectSymlinkIfPresent(at: file)
+            if createMissingSecrets && !FileManager.default.fileExists(atPath: file.path) {
+                FileManager.default.createFile(
+                    atPath: file.path,
+                    contents: Data(),
+                    attributes: [.posixPermissions: 0o600]
+                )
+            }
+            if FileManager.default.fileExists(atPath: file.path) {
+                try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+            }
+        }
+    }
+
+    nonisolated static func validateDirectoryAndSecretPermissions(
+        directory: URL,
+        secretFiles: [URL]
+    ) throws {
+        try rejectSymlinkIfPresent(at: directory)
+        let dirAttrs = try FileManager.default.attributesOfItem(atPath: directory.path)
+        let dirMode = (dirAttrs[.posixPermissions] as? NSNumber)?.intValue ?? -1
+        guard (dirMode & 0o077) == 0 else {
+            throw TLSCertificateError.generationFailed("Insecure permissions on TLS directory")
+        }
+        for file in secretFiles {
+            try rejectSymlinkIfPresent(at: file)
+            let attrs = try FileManager.default.attributesOfItem(atPath: file.path)
+            let mode = (attrs[.posixPermissions] as? NSNumber)?.intValue ?? -1
+            guard (mode & 0o077) == 0 else {
+                throw TLSCertificateError.generationFailed("Insecure permissions on TLS secret: \(file.lastPathComponent)")
+            }
+        }
+    }
+
+    private nonisolated static func generateRandomPassphrase() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 32)
+        let status = SecRandomCopyBytes(kSecRandomDefault, bytes.count, &bytes)
+        guard status == errSecSuccess else {
+            throw TLSCertificateError.generationFailed("SecRandomCopyBytes failed with status \(status)")
+        }
+        return Data(bytes).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
     // MARK: Step 1 - CA Root Certificate
 
-    private static func generateCACert(dir: URL, keyPath: URL, certPath: URL) throws {
+    private nonisolated static func generateCACert(dir: URL, keyPath: URL, certPath: URL) throws {
         let configPath = dir.appendingPathComponent("ca.cnf")
         try """
         [req]
@@ -127,8 +242,8 @@ final class TLSCertificateManager {
 
     // MARK: Step 2 - Server Certificate signed by CA
 
-    private static func generateServerCert(dir: URL, caKey: URL, caCert: URL,
-                                           serverKey: URL, serverCert: URL) throws {
+    private nonisolated static func generateServerCert(dir: URL, caKey: URL, caCert: URL,
+                                                       serverKey: URL, serverCert: URL) throws {
         let csrPath = dir.appendingPathComponent("server.csr")
         let serverConfig = dir.appendingPathComponent("server.cnf")
         let extConfig = dir.appendingPathComponent("server-ext.cnf")
@@ -176,28 +291,57 @@ final class TLSCertificateManager {
 
     // MARK: Step 3 - PKCS12 Identity (server key + cert chain)
 
-    private static func exportPKCS12(identity: URL, serverKey: URL,
-                                     serverCert: URL, caCert: URL, password: String) throws {
+    private nonisolated static func exportPKCS12(identity: URL, serverKey: URL,
+                                                 serverCert: URL, caCert: URL, password: String) throws {
         try runOpenSSL([
             "pkcs12", "-export",
             "-out", identity.path,
             "-inkey", serverKey.path,
             "-in", serverCert.path,
             "-certfile", caCert.path,
-            "-passout", "pass:\(password)",
-        ], errorContext: "export PKCS12 identity")
+            "-passout", "stdin",
+        ], standardInputData: Data((password + "\n").utf8), errorContext: "export PKCS12 identity")
     }
 
     // MARK: Step 4 - Install CA to System Trust
-    // Runs `security add-trusted-cert` via osascript on a background thread.
-    // The `do shell script ... with administrator privileges` mechanism triggers
-    // macOS's standard password dialog (same as Caddy `caddy trust`).
+    // Disabled by default (`allowSystemTrustInstall == false`) until explicitly enabled.
+
+    nonisolated static func makeAdminTrustOsascriptArguments(certURL: URL, expectedDirectory: URL) throws -> [String] {
+        let resolvedCert = certURL.standardizedFileURL
+        let resolvedDir = expectedDirectory.standardizedFileURL
+        try rejectSymlinkIfPresent(at: resolvedDir)
+        try rejectSymlinkIfPresent(at: resolvedCert)
+        guard resolvedCert.deletingLastPathComponent() == resolvedDir else {
+            throw TLSCertificateError.generationFailed("CA certificate path outside TLS directory")
+        }
+        let path = resolvedCert.path
+        guard !path.isEmpty,
+              !path.contains("\0"),
+              !path.contains("\n"),
+              !path.contains("\r"),
+              FileManager.default.fileExists(atPath: path) else {
+            throw TLSCertificateError.generationFailed("Invalid CA certificate path for trust installation")
+        }
+        return [
+            "-e", "on run argv",
+            "-e", "set certPath to item 1 of argv",
+            "-e", #"do shell script "/usr/bin/security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain " & quoted form of certPath with administrator privileges"#,
+            "-e", "end run",
+            "--",
+            path,
+        ]
+    }
 
     private func installCATrust() async {
-        let certPath = caCertPath.path
-
-        guard FileManager.default.fileExists(atPath: certPath) else {
-            log.error("CA certificate file not found at \(certPath, privacy: .public)")
+        guard allowSystemTrustInstall else {
+            log.info("System Keychain CA trust installation skipped (allowSystemTrustInstall=false)")
+            return
+        }
+        let args: [String]
+        do {
+            args = try Self.makeAdminTrustOsascriptArguments(certURL: caCertPath, expectedDirectory: tlsDirectory)
+        } catch {
+            log.error("Refusing CA trust installation: \(String(describing: error), privacy: .public)")
             return
         }
 
@@ -205,10 +349,7 @@ final class TLSCertificateManager {
             DispatchQueue.global(qos: .userInitiated).async {
                 let process = Process()
                 process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
-                process.arguments = [
-                    "-e",
-                    #"do shell script "security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain '"# + certPath + #"'" with administrator privileges"#,
-                ]
+                process.arguments = args
                 process.standardOutput = FileHandle.nullDevice
                 process.standardError = FileHandle.nullDevice
 
@@ -270,16 +411,33 @@ final class TLSCertificateManager {
 
     // MARK: - Process Helpers
 
-    private static func runOpenSSL(_ arguments: [String], errorContext: String) throws {
+    private nonisolated static func runOpenSSL(
+        _ arguments: [String],
+        standardInputData: Data? = nil,
+        errorContext: String
+    ) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/openssl")
         process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
 
+        let inPipe: Pipe?
+        if standardInputData != nil {
+            let pipe = Pipe()
+            process.standardInput = pipe
+            inPipe = pipe
+        } else {
+            inPipe = nil
+        }
+
         let errPipe = Pipe()
         process.standardError = errPipe
 
         try process.run()
+        if let standardInputData, let inPipe {
+            inPipe.fileHandleForWriting.write(standardInputData)
+            try? inPipe.fileHandleForWriting.close()
+        }
         process.waitUntilExit()
 
         guard process.terminationStatus == 0 else {

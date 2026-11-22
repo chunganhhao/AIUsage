@@ -8,7 +8,7 @@ swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --s
 BACKEND_BIN="$(swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --scratch-path "$SCRATCH" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BACKEND_BIN/description.json" > "$REGRESSION_DIR/backend-objects.txt"
 # 编译正式转换/定向刷新方法，系统边界由 fixture engine 替换。
-ruby - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionRefreshMethods.swift" <<'RUBY'
+ruby -E UTF-8:UTF-8 - "$PROJECT_DIR" "$REGRESSION_DIR/ProductionRefreshMethods.swift" <<'RUBY'
 root, output = ARGV
 def extract(source, name)
   pattern = /^    (?:nonisolated )?func #{Regexp.escape(name)}\(/
@@ -19,13 +19,30 @@ def extract(source, name)
   abort "Missing terminator: #{name}" unless finish
   lines[start..finish].join
 end
+def extract_signature(source, signature)
+  lines = source.lines
+  start = lines.index { |line| line.start_with?("    #{signature}") }
+  abort "Missing signature: #{signature}" unless start
+  finish = ((start + 1)...lines.size).find { |i| lines[i].match?(/^    }\s*$/) }
+  abort "Missing terminator: #{signature}" unless finish
+  lines[start..finish].join
+end
 conversion = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator+Conversion.swift'))
 pipeline = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator+FetchPipeline.swift'))
 coordinator = File.read(File.join(root, 'AIUsage/ViewModels/ProviderRefreshCoordinator.swift'))
-methods = %w[convertSummary convertOverview localizeProviderData localizeOverview localizedCostPeriod localizedTimelinePoint localizedProviderResults localizedDashboard localizedProviderList localizedRemoteDashboard].map { |name| extract(conversion, name) }
-methods += %w[codexResetIdentity preserveCodexResetUpdates fetchAccountByCredential fetchSingleProviderLocal fetchSingleProviderRemote fetchDashboardLocal fetchDashboardRemote replaceProviderEntries].map { |name| extract(pipeline, name) }
+methods = %w[convertSummary convertOverview localizeProviderData localizeOverview localizedCostPeriod localizedTimelinePoint localizedProviderResults localizedDashboard localizedProviderList localizedRemoteDashboard recomputedOverview].map { |name| extract(conversion, name) }
+methods += %w[codexResetIdentity acceptsCodexResetRefresh extractCredentialId preserveCodexResetUpdates fetchAccountByCredential fetchSingleProviderLocal fetchSingleProviderRemote fetchDashboardLocal fetchDashboardRemote replaceProviderEntries isProviderHidden liveProviderIdentity].map { |name| extract(pipeline, name) }
 methods += [extract(pipeline, 'reconcileResetProtectedAccountRegistry')] if pipeline.include?('func reconcileResetProtectedAccountRegistry(')
-methods += [extract(coordinator, 'refreshCodexAccountAfterReset')]
+methods += [
+  extract(coordinator, 'refreshCodexAccountAfterReset'),
+  extract(coordinator, 'syncOverviewIfPresent'),
+  extract(coordinator, 'clearStaleOwnedRefreshErrorIfNeeded'),
+  extract_signature(coordinator, 'func removeProviders(matchingBaseProviderIds '),
+  extract_signature(coordinator, 'func removeProviders(matchingBaseProviderId '),
+  extract_signature(coordinator, 'func removeLiveProviders(matching entry:'),
+  extract_signature(coordinator, 'func removeLiveProviders(matching entries:'),
+  extract(coordinator, 'reapplyVisibleSortedProviders')
+]
 File.write(output, "import Foundation\nimport QuotaBackend\nextension ProviderRefreshCoordinator {\n" + methods.join("\n") + "}\n")
 # 保留正式 worker 算法，只在返回前加确定性的挂起点，测试真实 AccountStore 的提交边界。
 persistence = File.read(File.join(root, 'AIUsage/Models/AccountStore+Persistence.swift'))
@@ -58,13 +75,18 @@ if [[ "${1:-}" == "--render" ]]; then
   shift
   # 只替换 shared 绑定为显式 fixture coordinator；不实例化生产 singleton。
   # 时间视图使用正式实现，但去掉全局轮询时钟；#Preview 宏不参与独立 swiftc。
-  ruby - "$PROJECT_DIR" "$REGRESSION_DIR" <<'RUBY'
+  ruby -E UTF-8:UTF-8 - "$PROJECT_DIR" "$REGRESSION_DIR" <<'RUBY'
 root, output = ARGV
 coordinator = File.read(File.join(root, 'AIUsage/ViewModels/CodexResetCreditsCoordinator.swift'))
 abort 'Missing coordinator shared binding' unless coordinator.sub!('static let shared = CodexResetCreditsCoordinator()', 'static var shared: CodexResetCreditsCoordinator { FixtureResetEnvironment.coordinator }')
 File.write(File.join(output, 'PreviewResetCoordinator.swift'), coordinator)
 card = File.read(File.join(root, 'AIUsage/Views/ProviderCard.swift')).split(/^#Preview \{/).first
 File.write(File.join(output, 'PreviewProviderCard.swift'), card)
+
+widgets = File.read(File.join(root, 'AIUsage/Views/AgentToolsView.swift')).split(/^struct AgentConfigToolsView\b/).first
+abort 'Missing environment model fixture seam' unless widgets.sub!('static let shared = EnvironmentOverrideModel()', 'static let shared = EnvironmentOverrideModel(home: FixtureResetEnvironment.home)')
+File.write(File.join(output, 'PreviewAgentWidgets.swift'), widgets)
+
 subscription = File.read(File.join(root, 'AIUsage/Views/CodexProxyManagementView.swift')).split('struct CodexSubscriptionSection', 2).last.split('// MARK: - Codex Global Config Section', 2).first
 File.write(File.join(output, 'PreviewCodexSubscriptionSection.swift'), "import SwiftUI\nimport Combine\nstruct CodexSubscriptionSection" + subscription)
 toggle = File.read(File.join(root, 'AIUsage/Views/ProxyManagementView+Card.swift')).split('// MARK: - Proxy Activation Toggle Style', 2).last.split('// MARK: - Instant Tooltip Modifier', 2).first
@@ -82,6 +104,7 @@ RUBY
   STUB_SOURCE="$REGRESSION_DIR/PreviewStubURLProtocol.swift"
   UI_SOURCES+=(
     "$REGRESSION_DIR/PreviewProviderCard.swift"
+    "$REGRESSION_DIR/PreviewAgentWidgets.swift"
     "$REGRESSION_DIR/PreviewUtilities.swift"
     "$PROJECT_DIR/AIUsage/Views/ProviderIconView.swift"
     "$PROJECT_DIR/AIUsage/Views/ProviderCard+MultiWindowQuota.swift"

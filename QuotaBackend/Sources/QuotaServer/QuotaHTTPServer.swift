@@ -46,11 +46,7 @@ public final class QuotaHTTPServer: @unchecked Sendable {
     static let requestDecoder = JSONDecoder()
     static let responseEncoder = JSONEncoder()
 
-    static let corsHeaders = [
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, x-api-key, authorization, anthropic-version, anthropic-beta"
-    ]
+    static let corsHeaders: [String: String] = [:]
 
     /// 仅探测请求体顶层 `stream` 标志的轻量解码目标，
     /// 避免为路由判断对大 body 做 JSONSerialization 全量建图。
@@ -83,7 +79,8 @@ public final class QuotaHTTPServer: @unchecked Sendable {
     let host: String
     let port: Int
     private let startupToken: String?
-    let engine = ProviderEngine()
+    private let quotaReadTokens: [String]
+    let engine: ProviderEngine
     var httpsConfig: HTTPSConfig?
     private let lifecycleQueue = DispatchQueue(label: "com.aiusage.quotaserver.lifecycle")
 
@@ -304,18 +301,24 @@ public final class QuotaHTTPServer: @unchecked Sendable {
         codexConfig: CodexProxyConfiguration? = nil,
         openCodeConfig: OpenCodeProxyConfiguration? = nil,
         httpsConfig: HTTPSConfig? = nil,
-        startupToken: String? = nil
+        startupToken: String? = nil,
+        engine: ProviderEngine = ProviderEngine()
     ) {
         self.host = host
         self.port = port
         self._proxyConfig = proxyConfig
         self._openCodeConfig = openCodeConfig
         self.httpsConfig = httpsConfig
+        self.engine = engine
 
         let env = ProcessInfo.processInfo.environment
-        self.startupToken = startupToken
+        let resolvedStartupToken = startupToken
             ?? env["AIUSAGE_STARTUP_TOKEN"].flatMap { $0.isEmpty ? nil : $0 }
-        self.globalProxyAdminKey = env["GLOBAL_PROXY_ADMIN_KEY"].flatMap { $0.isEmpty ? nil : $0 }
+        let resolvedAdminKey = env["GLOBAL_PROXY_ADMIN_KEY"].flatMap { $0.isEmpty ? nil : $0 }
+        let resolvedQuotaToken = env["AIUSAGE_QUOTA_API_TOKEN"].flatMap { $0.isEmpty ? nil : $0 }
+        self.startupToken = resolvedStartupToken
+        self.globalProxyAdminKey = resolvedAdminKey
+        self.quotaReadTokens = Array(Set([resolvedStartupToken, resolvedAdminKey, resolvedQuotaToken].compactMap { $0 }))
         self.fixedCodexClientKey = codexConfig?.expectedClientKey
         self.fixedCodexPublicModel = codexConfig?.publicModel
         self.fixedClaudeClientKey = proxyConfig?.expectedClientKey
@@ -625,7 +628,7 @@ public final class QuotaHTTPServer: @unchecked Sendable {
         connection.cancel()
     }
 
-    private func routeRequest(_ request: HTTPRequest) async -> HTTPResponse {
+    func routeRequest(_ request: HTTPRequest) async -> HTTPResponse {
         let path = request.path.split(separator: "?").first.map(String.init) ?? request.path
         let queryItems = parseQueryItems(request.path)
         let corsHeaders = Self.corsHeaders
@@ -641,7 +644,11 @@ public final class QuotaHTTPServer: @unchecked Sendable {
                 "ok": true,
                 "generatedAt": generatedAt,
             ]
-            if let startupToken { payload["instanceToken"] = startupToken }
+            if let challenge = headerValue(QuotaServerHealthProof.challengeHeader.lowercased(), in: request),
+               let startupToken,
+               let proof = QuotaServerHealthProof.compute(challenge: challenge, startupToken: startupToken) {
+                payload["instanceProof"] = proof
+            }
             return jsonResponse(payload, headers: corsHeaders)
 
         // MARK: - Claude Proxy Endpoints
@@ -708,28 +715,80 @@ public final class QuotaHTTPServer: @unchecked Sendable {
             return await handleEventLoggingEndpoint(request: request, headers: corsHeaders)
 
         case ("GET", "/api/providers"):
+            guard isAuthorizedQuotaRead(request) else {
+                return jsonResponse(["error": "Unauthorized"], status: 401, headers: corsHeaders)
+            }
             let providers = ProviderRegistry.allProviders().map { ["id": $0.id, "displayName": $0.displayName, "description": $0.description] }
             return jsonResponse(providers, headers: corsHeaders)
 
         case ("GET", "/api/dashboard"):
+            guard isAuthorizedQuotaRead(request) else {
+                return jsonResponse(["error": "Unauthorized"], status: 401, headers: corsHeaders)
+            }
             httpLog.debug("→ GET /api/dashboard")
             let ids = queryItems["ids"]?
                 .split(separator: ",")
                 .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
                 .filter { !$0.isEmpty }
-            let snapshot = await engine.fetchAll(ids: ids)
+            // Keep HTTP dashboard reads strict cache/projection-only with zero background fetch scheduling.
+            let snapshot = await engine.cachedDashboard(ids: ids, spawnBackgroundRefresh: false)
             return jsonResponse(encodable: snapshot, headers: corsHeaders)
 
         case ("GET", _) where path.hasPrefix("/api/provider/"):
+            guard isAuthorizedQuotaRead(request) else {
+                return jsonResponse(["error": "Unauthorized"], status: 401, headers: corsHeaders)
+            }
             let providerId = String(path.dropFirst("/api/provider/".count))
             httpLog.debug("→ GET /api/provider/\(providerId)")
-            guard let result = await engine.fetchSingle(id: providerId) else {
+            guard let result = await engine.cachedSingle(id: providerId) else {
                 return jsonResponse(["error": "Provider '\(providerId)' not found"], status: 404, headers: corsHeaders)
             }
             return jsonResponse(encodable: result, headers: corsHeaders)
 
         default:
             return jsonResponse(["error": "Not found"], status: 404, headers: corsHeaders)
+        }
+    }
+
+    // MARK: - Auth Boundary Helpers
+
+    private func headerValue(_ lowercaseName: String, in request: HTTPRequest) -> String? {
+        if let direct = request.headers[lowercaseName] {
+            return direct
+        }
+        return request.headers.first { $0.key.caseInsensitiveCompare(lowercaseName) == .orderedSame }?.value
+    }
+
+    private func presentedQuotaSecret(in request: HTTPRequest) -> String? {
+        if let startup = headerValue("x-aiusage-startup-token", in: request)?
+            .trimmingCharacters(in: .whitespacesAndNewlines),
+           !startup.isEmpty {
+            return startup
+        }
+        if let auth = headerValue("authorization", in: request) {
+            let parts = auth.split(separator: " ", maxSplits: 1)
+            if parts.count == 2, parts[0].lowercased() == "bearer" {
+                let bearer = parts[1].trimmingCharacters(in: .whitespacesAndNewlines)
+                if !bearer.isEmpty {
+                    return bearer
+                }
+            }
+        }
+        return nil
+    }
+
+    private func isAuthorizedQuotaRead(_ request: HTTPRequest) -> Bool {
+        let isProxyOnly = proxyConfig?.enabled == true || codexConfig?.enabled == true || openCodeConfig?.enabled == true
+        let acceptedSecrets: [String] = isProxyOnly
+            ? [startupToken, globalProxyAdminKey].compactMap { $0 }.filter { !$0.isEmpty }
+            : quotaReadTokens
+        guard !acceptedSecrets.isEmpty,
+              let presented = presentedQuotaSecret(in: request) else {
+            return false
+        }
+        let presentedBytes = Array(presented.utf8)
+        return acceptedSecrets.contains { secret in
+            QuotaShareServer.constantTimeEquals(presentedBytes, Array(secret.utf8))
         }
     }
 

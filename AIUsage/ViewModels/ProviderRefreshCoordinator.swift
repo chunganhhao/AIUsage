@@ -1,9 +1,16 @@
 import Foundation
 import Combine
+import AppKit
 import os.log
 import QuotaBackend
 
 internal let providerRefreshLog = Logger(subsystem: "com.aiusage.desktop", category: "ProviderRefresh")
+
+struct AccountCheckError: Equatable {
+    let message: String
+    let errorCode: String?
+    let failedAt: Date
+}
 
 // MARK: - ProviderRefreshCoordinator
 // Owns provider snapshot refresh, dashboard fetch, localization of fetched data, and account-registry reconciliation.
@@ -11,19 +18,29 @@ internal let providerRefreshLog = Logger(subsystem: "com.aiusage.desktop", categ
 final class ProviderRefreshCoordinator: ObservableObject {
     static let shared = ProviderRefreshCoordinator()
 
-    @Published var providers: [ProviderData] = []
+    @Published var providers: [ProviderData] = [] {
+        didSet { syncWeeklyResetPriorities() }
+    }
     @Published var overview: DashboardOverview?
     @Published var isLoading = true
     /// 是否完成过首次全量刷新。用于区分「首次加载中（还没拿到任何网络数据）」与
     /// 「确实没有数据」——前者不应展示「凭证过期/没有账号」这类吓人的空态。
     @Published private(set) var hasCompletedInitialLoad = false
-    @Published var errorMessage: String?
+    @Published private(set) var didHydrateDiskSnapshots = false
+    @Published private var refreshError: (message: String, providerId: String?, credentialId: String?)?
+    var errorMessage: String? {
+        get { refreshError?.message }
+        set { refreshError = newValue.map { ($0, nil, nil) } }
+    }
     @Published var lastRefreshTime: Date?
     @Published var isRefreshingAllProviders = false
+    private var pendingRefreshAfterCurrent = false
     @Published private(set) var refreshingProviderIDs: Set<String> = []
     @Published private(set) var refreshingAccountIDs: Set<String> = []
     @Published var providerRefreshTimes: [String: Date] = [:]
     @Published var accountRefreshTimes: [String: Date] = [:]
+    @Published var accountLastCheckErrors: [String: AccountCheckError] = [:]
+    private var deletedCredentialKeysThisSession: Set<String> = []
 
     var codexResetRefreshFence = CodexResetRefreshFence()
 
@@ -31,7 +48,27 @@ final class ProviderRefreshCoordinator: ObservableObject {
     private var refreshTimer: Timer?
     private var claudeCodeRefreshTimer: Timer?
     private var callAnalyticsSyncTimer: Timer?
+    private var warmupTimer: Timer?
+    private var weeklyResetSyncTask: Task<Void, Never>?
+    private let weeklyResetWorker = WeeklyResetPriorityWorker()
     private var isCodexFullHistoryRefreshInProgress = false
+    private var cancellables = Set<AnyCancellable>()
+    private var lastHiddenSidebarSections: Set<String> = []
+
+    static let hiddenBackgroundMinimumInterval: TimeInterval = 300
+    static let wakeVisibilityDebounceSeconds: TimeInterval = 10
+    private(set) var isPopoverVisible = false
+    private var lastSurfaceVisible = true
+    var lastLocalStatsRefreshAt: Date?
+    var lastVisibilityCatchUpAttemptAt: Date?
+
+    var isAnyAppSurfaceVisible: Bool {
+        if isPopoverVisible { return true }
+        guard let app = NSApp else { return true }
+        return app.windows.contains { window in
+            !(window is NSPanel) && window.canBecomeMain && window.isVisible && !window.isMiniaturized
+        }
+    }
 
     /// Used by toolbar / menu bar "Refresh All" buttons to decide between the
     /// spinner and the affordance. Intentionally narrow: single-provider or
@@ -57,12 +94,93 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     private init() {
         // 复制给内置 CPA 的 Codex 账号与订阅监控共用一条 refresh_token 链，刷新时要一起读写。
-        if let cliProxyPaths = try? CLIProxyPaths() {
+        if CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+           let cliProxyPaths = try? CLIProxyPaths() {
             CodexLinkedCredentialCopies.registerDirectory(cliProxyPaths.authDirectory)
         }
+        lastSurfaceVisible = isAnyAppSurfaceVisible
+        lastHiddenSidebarSections = settings.hiddenSidebarSections
         setupAutoRefresh()
         setupClaudeCodeAutoRefresh()
         setupCallAnalyticsAutoSync()
+        setupVisibilityAndWakeObservers()
+        settings.$hiddenSidebarSections
+            .removeDuplicates()
+            .dropFirst()
+            .receive(on: RunLoop.main)
+            .sink { [weak self] hidden in
+                guard let self else { return }
+                let previousHidden = self.lastHiddenSidebarSections
+                self.lastHiddenSidebarSections = hidden
+
+                self.setupCallAnalyticsAutoSync()
+                self.setupClaudeCodeAutoRefresh()
+                if AgentVisibility.isVisible(.claude, hidden: hidden) {
+                    ClaudeSubscriptionManager.shared.startWatching()
+                } else {
+                    ClaudeSubscriptionManager.shared.stopWatching()
+                }
+                if AgentVisibility.isVisible(.opencode, hidden: hidden) {
+                    Task { @MainActor in
+                        _ = OpenCodeNodeStore.shared
+                    }
+                }
+                let visible = self.providers.filter { !AgentVisibility.isProviderHidden($0.baseProviderId, hidden: hidden) }
+                if visible.count != self.providers.count {
+                    self.providers = visible
+                    self.overview = self.recomputedOverview(
+                        for: visible,
+                        baseOverview: self.overview,
+                        generatedAt: self.overview?.generatedAt ?? SharedFormatters.iso8601String(from: Date()),
+                        language: self.language
+                    )
+                }
+
+                self.clearStaleOwnedRefreshErrorIfNeeded()
+
+                let callAnalyticsBecameVisible = previousHidden.contains(AppSection.callAnalytics.rawValue)
+                    && !hidden.contains(AppSection.callAnalytics.rawValue)
+                if callAnalyticsBecameVisible {
+                    self.syncCallAnalytics()
+                }
+
+                let newlyVisibleAgents = AgentKind.allCases.filter {
+                    AgentVisibility.isHidden($0, hidden: previousHidden) && AgentVisibility.isVisible($0, hidden: hidden)
+                }
+                guard !newlyVisibleAgents.isEmpty else { return }
+                let selected = self.selectedProviderIds()
+                if newlyVisibleAgents.contains(where: { selected.contains($0.costProviderId) }) {
+                    self.refreshLocalTokenStatsOnly()
+                }
+                let newlyVisibleQuotaIds = newlyVisibleAgents.flatMap { agent -> [String] in
+                    switch agent {
+                    case .claude: return ["claude-subscription"]
+                    case .codex: return ["codex"]
+                    case .opencode: return []
+                    }
+                }.filter { selected.contains($0) }
+                if !newlyVisibleQuotaIds.isEmpty {
+                    Task { @MainActor [weak self] in
+                        guard let self else { return }
+                        self.didHydrateDiskSnapshots = false
+                        await self.hydrateFromDiskCacheIfNeeded()
+                        for providerId in newlyVisibleQuotaIds {
+                            if providerId == "claude-subscription" || self.settings.autoRefreshInterval > 0 || self.settings.backendMode != "local" {
+                                await self.refreshProviderNow(providerId)
+                            }
+                        }
+                    }
+                }
+            }
+            .store(in: &cancellables)
+        EnvironmentOverrideModel.shared.scan()
+        WarmupController.shared.providerSnapshot = { [weak self] in self?.providers ?? [] }
+        WarmupController.shared.autoRefreshIntervalSeconds = { [weak self] in self?.settings.autoRefreshInterval ?? 300 }
+        WarmupController.shared.onWarmupDispatched = { [weak self] in self?.refreshAllProviders(automatic: true) }
+        warmupTimer = Timer.scheduledTimer(withTimeInterval: 30, repeats: true) { [weak self] _ in
+            guard let self, self.settings.backendMode == "local" else { return }
+            WarmupController.shared.tick(providers: self.providers)
+        }
     }
 
     func configure(
@@ -77,31 +195,129 @@ final class ProviderRefreshCoordinator: ObservableObject {
         self.providerTitleForId = providerTitleForId
     }
 
+    private func syncWeeklyResetPriorities() {
+        weeklyResetSyncTask?.cancel()
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+              settings.backendMode == "local" else { return }
+        weeklyResetSyncTask = Task { @MainActor [weak self] in
+            await Task.yield()
+            guard let self, !Task.isCancelled else { return }
+            // CPA runs exclusively for Codex (Go & Free); exclude Antigravity/other providers.
+            let observations = self.providers.flatMap { provider -> [WeeklyResetPriority.Observation] in
+                guard provider.baseProviderId.lowercased() == "codex",
+                      let email = provider.accountLabel else { return [] }
+                return provider.windows.compactMap { window in
+                    guard QuotaBurnRate.windowDuration(label: window.label) == 7 * 86400, let reset = window.resetAt,
+                          let date = SharedFormatters.parseISO8601(reset) else { return nil }
+                    return .init(provider: provider.baseProviderId, email: email, reset: date, accountID: provider.accountId)
+                }
+            }
+            do {
+                let paths = try CLIProxyPaths()
+                try await self.weeklyResetWorker.sync(authDirectory: paths.authDirectory, policyURL: paths.stateURL, observations: observations)
+            } catch is CancellationError { }
+            catch { if !Task.isCancelled, self.errorMessage == nil { self.errorMessage = error.localizedDescription } }
+        }
+    }
+
+    private func setupVisibilityAndWakeObservers() {
+        let center = NotificationCenter.default
+        let surfaceNotifications: [Notification.Name] = [
+            NSWindow.didBecomeMainNotification,
+            NSWindow.didBecomeKeyNotification,
+            NSWindow.willCloseNotification,
+            NSWindow.didMiniaturizeNotification,
+            NSWindow.didDeminiaturizeNotification,
+        ]
+        for name in surfaceNotifications {
+            _ = center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor [weak self] in
+                    self?.handleSurfaceVisibilityOrWake()
+                }
+            }
+        }
+        _ = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.handleSurfaceVisibilityOrWake(isWake: true)
+            }
+        }
+    }
+
+    func setPopoverVisible(_ visible: Bool) {
+        isPopoverVisible = visible
+        handleSurfaceVisibilityOrWake()
+    }
+
+    func handleSurfaceVisibilityOrWake(isWake: Bool = false, now: Date = Date()) {
+        let nowVisible = isAnyAppSurfaceVisible
+        let becameVisible = !lastSurfaceVisible && nowVisible
+        if nowVisible != lastSurfaceVisible || isWake {
+            lastSurfaceVisible = nowVisible
+            setupAutoRefresh()
+            setupClaudeCodeAutoRefresh()
+        }
+        guard becameVisible || isWake else { return }
+
+        if settings.claudeCodeRefreshInterval > 0 {
+            let localElapsed = lastLocalStatsRefreshAt.map { now.timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+            if localElapsed >= Self.wakeVisibilityDebounceSeconds {
+                lastLocalStatsRefreshAt = now
+                refreshLocalTokenStatsOnly()
+            }
+        }
+        if settings.autoRefreshInterval > 0 {
+            let attemptElapsed = lastVisibilityCatchUpAttemptAt.map { now.timeIntervalSince($0) } ?? .greatestFiniteMagnitude
+            let requiredGap = isWake
+                ? Self.wakeVisibilityDebounceSeconds
+                : max(TimeInterval(settings.autoRefreshInterval), Self.wakeVisibilityDebounceSeconds)
+            let isDue = lastRefreshTime.map { now.timeIntervalSince($0) >= requiredGap } ?? isWake
+            if attemptElapsed >= Self.wakeVisibilityDebounceSeconds && isDue {
+                lastVisibilityCatchUpAttemptAt = now
+                refreshAllProviders(automatic: true)
+            }
+        }
+    }
+
+    private func effectiveTimerInterval(configuredSeconds: Int) -> TimeInterval? {
+        guard configuredSeconds > 0 else { return nil }
+        if isAnyAppSurfaceVisible {
+            return TimeInterval(configuredSeconds)
+        }
+        // shortcut: 300s background floor while hidden; upgrade if per-provider local push events cover all cards.
+        return max(TimeInterval(configuredSeconds), Self.hiddenBackgroundMinimumInterval)
+    }
+
     // MARK: - Timers
 
     func setupAutoRefresh() {
         refreshTimer?.invalidate()
+        refreshTimer = nil
         let normalized = AppSettings.normalizedAutoRefreshInterval(settings.autoRefreshInterval)
         if settings.autoRefreshInterval != normalized {
             settings.autoRefreshInterval = normalized
         }
 
-        if settings.autoRefreshInterval > 0 {
-            refreshTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(settings.autoRefreshInterval), repeats: true) { [weak self] _ in
-                self?.refreshAllProviders()
+        if let interval = effectiveTimerInterval(configuredSeconds: settings.autoRefreshInterval) {
+            refreshTimer = Timer.scheduledTimer(withTimeInterval: interval * Double.random(in: 0.85...1.25), repeats: false) { [weak self] _ in
+                self?.refreshAllProviders(automatic: true)
             }
         }
     }
 
     func setupClaudeCodeAutoRefresh() {
         claudeCodeRefreshTimer?.invalidate()
+        claudeCodeRefreshTimer = nil
         let normalized = AppSettings.normalizedClaudeCodeRefreshInterval(settings.claudeCodeRefreshInterval)
         if settings.claudeCodeRefreshInterval != normalized {
             settings.claudeCodeRefreshInterval = normalized
         }
 
-        if settings.claudeCodeRefreshInterval > 0 {
-            claudeCodeRefreshTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(settings.claudeCodeRefreshInterval), repeats: true) { [weak self] _ in
+        if let interval = effectiveTimerInterval(configuredSeconds: settings.claudeCodeRefreshInterval) {
+            claudeCodeRefreshTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
                 self?.refreshLocalTokenStatsOnly()
             }
         }
@@ -109,6 +325,10 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     func setupCallAnalyticsAutoSync() {
         callAnalyticsSyncTimer?.invalidate()
+        callAnalyticsSyncTimer = nil
+        guard !settings.hiddenSidebarSections.contains(AppSection.callAnalytics.rawValue) else {
+            return
+        }
         let normalized = AppSettings.normalizedAutoRefreshInterval(settings.autoRefreshInterval)
         if settings.autoRefreshInterval != normalized {
             settings.autoRefreshInterval = normalized
@@ -122,24 +342,43 @@ final class ProviderRefreshCoordinator: ObservableObject {
     }
 
     private func syncCallAnalytics() {
+        let hidden = settings.hiddenSidebarSections
+        guard !hidden.contains(AppSection.callAnalytics.rawValue) else { return }
+        let excluded = AgentVisibility.hiddenCallSources(hidden: hidden)
         Task {
-            await CallAnalyticsEngine.shared.syncToday()
+            await CallAnalyticsEngine.shared.syncToday(excludedSources: excluded)
         }
     }
 
     // MARK: - Public refresh API
 
-    func refreshAllProviders() {
+    func refreshAllProviders(automatic: Bool = false) {
         Task { @MainActor in
-            guard !isRefreshingAllProviders else { return }
+            if isRefreshingAllProviders {
+                if !automatic { pendingRefreshAfterCurrent = true }
+                return
+            }
             isRefreshingAllProviders = true
-            defer { isRefreshingAllProviders = false }
-            _ = await fetchDashboard()
+            defer { isRefreshingAllProviders = false; setupAutoRefresh() }
+            var useRecentResults = automatic
+            var isAutomatic = automatic
+            repeat {
+                pendingRefreshAfterCurrent = false
+                _ = await fetchDashboard(useRecentResults: useRecentResults, automatic: isAutomatic)
+                useRecentResults = false
+                isAutomatic = false
+            } while pendingRefreshAfterCurrent
         }
     }
 
     func refreshLocalTokenStatsOnly() {
         Task { @MainActor in
+            let hidden = settings.hiddenSidebarSections
+            let active = ["claude", "codex-cost", "opencode", "antigravity-cost"].filter {
+                selectedProviderIds().contains($0) && !AgentVisibility.isProviderHidden($0, hidden: hidden)
+            }
+            guard !active.isEmpty else { return }
+            lastLocalStatsRefreshAt = Date()
             // Claude（及 Codex 代理轨）统计读取代理用量永久归档；先把待写入的脏日期
             // 入档落盘（异步等待后台写盘完成），确保引擎随后读到的归档反映最新请求。
             await ProxyViewModel.shared.flushPersistenceAsync()
@@ -147,7 +386,6 @@ final class ProviderRefreshCoordinator: ObservableObject {
             // hold up Claude's refresh. Each call goes through
             // `refreshingProviderIDs` so concurrent refreshes of the same
             // provider still deduplicate inside `refreshProviderNow`.
-            let active = ["claude", "codex-cost", "opencode", "antigravity-cost"].filter(selectedProviderIds().contains)
             await withTaskGroup(of: Void.self) { group in
                 for providerId in active {
                     group.addTask { @MainActor [weak self] in
@@ -155,7 +393,9 @@ final class ProviderRefreshCoordinator: ObservableObject {
                     }
                 }
             }
-            checkClaudeDailyThreshold()
+            if active.contains("claude") {
+                checkClaudeDailyThreshold()
+            }
         }
     }
 
@@ -213,18 +453,22 @@ final class ProviderRefreshCoordinator: ObservableObject {
     @MainActor
     func refreshProviderNow(_ providerId: String) async {
         guard selectedProviderIds().contains(providerId),
+              !AgentVisibility.isProviderHidden(providerId, hidden: settings.hiddenSidebarSections),
               !refreshingProviderIDs.contains(providerId) else { return }
         refreshingProviderIDs.insert(providerId)
         defer { refreshingProviderIDs.remove(providerId) }
         errorMessage = nil
         let result = await fetchSingleProvider(providerId)
+        guard selectedProviderIDList().contains(providerId),
+              result.shouldUpdateErrorBanner else { return }
         completeProviderRefresh(providerId: providerId, result: result)
-        errorMessage = result.userMessage
+        refreshError = result.userMessage.map { ($0, providerId, nil) }
     }
 
     @MainActor
     func refreshAccountNow(credentialId: String, providerId: String) async {
-        guard selectedProviderIds().contains(providerId) else { return }
+        guard selectedProviderIds().contains(providerId),
+              !AgentVisibility.isProviderHidden(providerId, hidden: settings.hiddenSidebarSections) else { return }
         let refreshKey = accountRefreshKey(providerId: providerId, credentialId: credentialId)
         guard !refreshingAccountIDs.contains(refreshKey) else { return }
         refreshingAccountIDs.insert(refreshKey)
@@ -234,8 +478,10 @@ final class ProviderRefreshCoordinator: ObservableObject {
             credentialId: credentialId,
             providerId: providerId
         )
+        guard selectedProviderIDList().contains(providerId),
+              result.shouldUpdateErrorBanner else { return }
         completeAccountRefresh(refreshKey: refreshKey, result: result)
-        errorMessage = result.userMessage
+        refreshError = result.userMessage.map { ($0, providerId, credentialId) }
     }
 
     /// 消费结果回读必须发起新请求；不走会跳过 in-flight 的手动刷新入口，也不回退到整个 provider。
@@ -253,8 +499,9 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     @MainActor
     func fetchSingleProvider(_ providerId: String) async -> ProviderRefreshResult {
-        guard selectedProviderIds().contains(providerId) else {
-            return .failure()
+        guard selectedProviderIds().contains(providerId),
+              !AgentVisibility.isProviderHidden(providerId, hidden: settings.hiddenSidebarSections) else {
+            return .ignored()
         }
         if settings.backendMode == "local" {
             return await fetchSingleProviderLocal(providerId)
@@ -265,12 +512,12 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
     @MainActor
     @discardableResult
-    func fetchDashboard() async -> ProviderRefreshResult {
+    func fetchDashboard(useRecentResults: Bool = false, automatic: Bool = false) async -> ProviderRefreshResult {
         let isInitialLoad = providers.isEmpty && overview == nil
         if isInitialLoad { isLoading = true }
         errorMessage = nil
 
-        guard !selectedProviderIds().isEmpty else {
+        guard !selectedProviderIDList().isEmpty else {
             providers = []
             overview = localizeOverview(convertOverview(UsageNormalizer.createDashboardOverview(
                 summaries: [],
@@ -283,16 +530,47 @@ final class ProviderRefreshCoordinator: ObservableObject {
 
         let result: ProviderRefreshResult
         if settings.backendMode == "local" {
-            result = await fetchDashboardLocal()
+            result = await fetchDashboardLocal(useRecentResults: useRecentResults, automatic: automatic)
         } else {
             result = await fetchDashboardRemote(showMessageOnFailure: providers.isEmpty)
         }
 
         completeGlobalRefresh(result)
-        errorMessage = result.userMessage
+        clearStaleOwnedRefreshErrorIfNeeded()
+        let visibleIds = selectedProviderIDList()
+        if let banner = refreshError, let owner = banner.providerId, visibleIds.contains(owner) {
+            // A dashboard batch may succeed for only a subset of the visible providers.
+            if result.refreshedProviders.contains(where: { row in
+                guard row.baseProviderId == owner, row.status != .error, row.errorCode == nil else { return false }
+                guard let credentialId = banner.credentialId else { return true }
+                return self.credentialID(for: row)?.caseInsensitiveCompare(credentialId) == .orderedSame
+            }) {
+                errorMessage = nil
+            }
+        } else if result.shouldUpdateErrorBanner {
+            errorMessage = visibleIds.isEmpty ? nil : result.userMessage
+        }
         isLoading = false
         hasCompletedInitialLoad = true
         return result
+    }
+
+    nonisolated static func shouldSkipImmediateProviderRefresh(for providerId: String) -> Bool {
+        switch providerId.lowercased() {
+        case "codex", "antigravity", "gemini", "gemini-cli", "cursor":
+            return true
+        default:
+            return false
+        }
+    }
+
+    @MainActor
+    func syncExcludedAccountsToEngine() async {
+        let filters = accountStore.excludedEngineAccountFilters()
+        await engine.setExcludedAccounts(
+            credentialIDs: filters.credentialIDs,
+            codexNativeKeys: filters.codexNativeKeys
+        )
     }
 
     @discardableResult
@@ -302,7 +580,8 @@ final class ProviderRefreshCoordinator: ObservableObject {
         note: String?,
         providerDisplayTitle: String
     ) throws -> String {
-        return try accountStore.registerAuthenticatedCredential(
+        deletedCredentialKeysThisSession.remove(accountRefreshKey(providerId: credential.providerId, credentialId: credential.id))
+        let result = try accountStore.registerAuthenticatedCredential(
             credential,
             usage: usage,
             note: note,
@@ -317,6 +596,10 @@ final class ProviderRefreshCoordinator: ObservableObject {
             },
             ensureProviderSelected: ensureProviderSelected
         )
+        Task { @MainActor [weak self] in
+            await self?.syncExcludedAccountsToEngine()
+        }
+        return result
     }
 
     func insertImmediateProviderData(
@@ -335,30 +618,302 @@ final class ProviderRefreshCoordinator: ObservableObject {
             summary.accountLabel = accountLabel
         }
 
-        let providerData = localizeProviderData(convertSummary(summary), language: language)
+        let providerData = localizeProviderData(convertSummary(summary), language: settings.language)
+
+        let isPendingMetadata = (usage.extra["snapshotState"]?.value as? String) == "pending"
 
         // 用户首次连接时，旧的「未连接」占位（`not_logged_in` / `missing_token`）必须随凭证写入立刻清掉。
         // 否则 fetchSingleProvider 完成前 UI 会渲染「占位 ghost + 真卡片」两张，连接成功后看到「多出一张空卡」。
         providers.removeAll { $0.baseProviderId == providerId && $0.needsCredentialConnection }
 
-        if let index = providers.firstIndex(where: { $0.id == providerData.id }) {
-            providers[index] = providerData
-        } else {
-            providers.append(providerData)
-            providers = providers.sorted(by: providerSort)
+        let isVisibleNow = Set(selectedProviderIDList()).contains(providerData.baseProviderId)
+            && !visibleProviders(from: [providerData]).isEmpty
+        if isVisibleNow {
+            if let index = providers.firstIndex(where: { $0.id == providerData.id }) {
+                let existing = providers[index]
+                let hasCachedQuota = !existing.windows.isEmpty
+                    || existing.remainingPercent != nil
+                    || existing.fetchedAt?.nilIfBlank != nil
+                if !(isPendingMetadata && hasCachedQuota) {
+                    providers[index] = providerData
+                }
+            } else {
+                providers.append(providerData)
+                providers = providers.sorted(by: providerSort)
+            }
+            if !isPendingMetadata, let existingOverview = overview {
+                overview = recomputedOverview(
+                    for: providers,
+                    baseOverview: existingOverview,
+                    generatedAt: existingOverview.generatedAt,
+                    language: settings.language
+                )
+            }
+        }
+        guard !isPendingMetadata else { return }
+        clearAccountCheckError(for: providerData, credentialId: credentialId)
+        if isVisibleNow, let fetchedDate = resolvedFetchedDate(for: providerData) {
+            markAccountRefreshed(providerData, at: fetchedDate)
+        }
+        if QuotaSnapshotStore.supportedProviders.contains(providerId.lowercased()) {
+            Task { [weak self] in
+                guard let self,
+                      let credential = AccountCredentialStore.shared.loadCredential(providerId: providerId, credentialId: credentialId) else {
+                    return
+                }
+                await self.syncExcludedAccountsToEngine()
+                await self.engine.persistAuthenticatedSnapshot(
+                    providerId: providerId,
+                    usage: usage,
+                    credential: credential
+                )
+            }
         }
     }
 
+    @MainActor
+    func hydrateFromDiskCacheIfNeeded() async {
+        guard !didHydrateDiskSnapshots else { return }
+        didHydrateDiskSnapshots = true
+        guard settings.backendMode == "local" else { return }
+
+        let ids = Array(Set(selectedProviderIDList()).intersection(QuotaSnapshotStore.supportedProviders))
+        guard !ids.isEmpty else { return }
+
+        await syncExcludedAccountsToEngine()
+        let snapshot = await engine.cachedDashboard(ids: ids, spawnBackgroundRefresh: false)
+        let language = self.language
+        let batch = await Task.detached { [self] in
+            localizedDashboard(from: snapshot, language: language)
+        }.value
+
+        let currentLanguage = self.language
+        let currentVisibleIds = Set(selectedProviderIDList())
+        var merged = visibleProviders(from: providers)
+            .filter { currentVisibleIds.contains($0.baseProviderId) }
+
+        let hydrated = visibleProviders(
+            from: batch.providers.filter { entry in
+                entry.ok && entry.provider.errorCode != "unavailable" && entry.provider.errorCode != "refresh_pending"
+            }.map(\.provider)
+        ).filter { currentVisibleIds.contains($0.baseProviderId) }
+
+        var acceptedHydrated: [ProviderData] = []
+        for candidate in hydrated {
+            if let idx = merged.firstIndex(where: { $0.id == candidate.id }) {
+                if merged[idx].status == .error && candidate.status != .error {
+                    merged[idx] = candidate
+                    acceptedHydrated.append(candidate)
+                }
+            } else {
+                merged.append(candidate)
+                acceptedHydrated.append(candidate)
+            }
+        }
+
+        let published = visibleProviders(from: merged)
+            .filter { currentVisibleIds.contains($0.baseProviderId) }
+            .sorted(by: providerSort)
+        let publishedIDs = Set(published.map(\.id))
+        let publishedHydrated = acceptedHydrated.filter { publishedIDs.contains($0.id) }
+        let effectiveGeneratedAt = publishedHydrated.isEmpty
+            ? (overview?.generatedAt ?? snapshot.generatedAt)
+            : snapshot.generatedAt
+
+        providers = published
+        overview = recomputedOverview(
+            for: published,
+            baseOverview: overview ?? batch.overview,
+            generatedAt: effectiveGeneratedAt,
+            language: currentLanguage
+        )
+
+        for candidate in publishedHydrated {
+            if let acquiredAt = resolvedFetchedDate(for: candidate) {
+                markAccountRefreshed(candidate, at: acquiredAt)
+            }
+        }
+        for providerId in Set(publishedHydrated.map(\.baseProviderId)) {
+            if let latest = publishedHydrated
+                .filter({ $0.baseProviderId == providerId })
+                .compactMap(resolvedFetchedDate(for:))
+                .max() {
+                providerRefreshTimes[providerId] = max(providerRefreshTimes[providerId] ?? .distantPast, latest)
+            }
+        }
+    }
+
+    @MainActor
+    func markInitialLoadCompletedFromCache() {
+        if overview == nil {
+            overview = localizeOverview(
+                convertOverview(
+                    UsageNormalizer.createDashboardOverview(
+                        summaries: [],
+                        generatedAt: SharedFormatters.iso8601String(from: Date())
+                    )
+                ),
+                language: language
+            )
+        }
+        isLoading = false
+        hasCompletedInitialLoad = true
+    }
+
+    struct SnapshotPurgeTarget {
+        let entryId: String
+        let providerId: String
+        let liveProviderId: String?
+        let storageKeys: Set<String>
+        let credentialIds: Set<String>
+        let fallbackAccountIds: Set<String>
+        let fallbackEmails: Set<String>
+    }
+
+    func snapshotPurgeTarget(
+        for entry: ProviderAccountEntry,
+        matchedCredentials: [AccountCredential]
+    ) -> SnapshotPurgeTarget {
+        var credIds: Set<String> = []
+        var storageKeys: Set<String> = []
+        var acctIds: Set<String> = []
+        var emails: Set<String> = []
+
+        if let credId = entry.storedAccount?.credentialId?.nilIfBlank {
+            credIds.insert(credId)
+        }
+        if let live = entry.liveProvider, let liveCredId = credentialID(for: live)?.nilIfBlank {
+            credIds.insert(liveCredId)
+        }
+        for credential in matchedCredentials {
+            credIds.insert(credential.id)
+            if let key = QuotaSnapshotStore.canonicalStorageKey(for: credential) {
+                storageKeys.insert(key)
+            }
+        }
+        if let live = entry.liveProvider {
+            if entry.providerId.lowercased() == "codex",
+               let acct = live.accountId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank,
+               let userId = live.workspaceUserId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank {
+                storageKeys.insert(QuotaSnapshotIdentity.codexNative(accountId: acct, userId: userId).storageKey)
+            } else if entry.providerId.lowercased() == "antigravity",
+                      let email = live.accountLabel?.nilIfBlank {
+                let rawProject = live.metrics.first(where: { $0.label == "Project" })?.value.nilIfBlank
+                let projectId = rawProject.flatMap {
+                    let lower = $0.lowercased()
+                    return (lower == "unknown" || lower == "aicode-consumers") ? nil : $0
+                }
+                if projectId != nil {
+                    storageKeys.insert(QuotaSnapshotIdentity.antigravityEmail(email: email, projectId: projectId).storageKey)
+                }
+            }
+            if let acct = live.accountId?.nilIfBlank { acctIds.insert(acct) }
+            if let label = live.accountLabel?.nilIfBlank { emails.insert(label) }
+        }
+        if let stored = entry.storedAccount {
+            if entry.providerId.lowercased() == "codex",
+               let acct = stored.accountId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank,
+               let userId = stored.workspaceUserId?.trimmingCharacters(in: .whitespacesAndNewlines).lowercased().nilIfBlank {
+                storageKeys.insert(QuotaSnapshotIdentity.codexNative(accountId: acct, userId: userId).storageKey)
+            }
+            if let storedAcctId = stored.accountId?.nilIfBlank { acctIds.insert(storedAcctId) }
+            if let storedEmail = stored.email.nilIfBlank { emails.insert(storedEmail) }
+        }
+
+        let hasSpecificIdentity = !credIds.isEmpty || !storageKeys.isEmpty
+        return SnapshotPurgeTarget(
+            entryId: entry.id,
+            providerId: entry.providerId,
+            liveProviderId: entry.liveProvider?.id,
+            storageKeys: storageKeys,
+            credentialIds: credIds,
+            fallbackAccountIds: hasSpecificIdentity ? [] : acctIds,
+            fallbackEmails: hasSpecificIdentity ? [] : emails
+        )
+    }
+
+    @MainActor
+    func purgePersistedSnapshots(for deletedEntries: [ProviderAccountEntry]) async {
+        let targets = deletedEntries.map {
+            snapshotPurgeTarget(for: $0, matchedCredentials: [])
+        }
+        await purgePersistedSnapshots(targets: targets)
+    }
+
+    @MainActor
+    func purgePersistedSnapshots(targets: [SnapshotPurgeTarget]) async {
+        for target in targets {
+            for credId in target.credentialIds {
+                let key = accountRefreshKey(providerId: target.providerId, credentialId: credId)
+                deletedCredentialKeysThisSession.insert(key)
+                accountRefreshTimes.removeValue(forKey: key)
+                accountLastCheckErrors.removeValue(forKey: key)
+            }
+            clearStaleOwnedRefreshErrorIfNeeded()
+            if let liveProviderId = target.liveProviderId {
+                accountLastCheckErrors.removeValue(forKey: liveProviderId)
+                accountRefreshTimes.removeValue(forKey: accountRefreshKey(providerId: target.providerId, providerDataId: liveProviderId))
+            }
+            await engine.purgePersistedSnapshots(
+                providerId: target.providerId,
+                storageKeys: target.storageKeys,
+                credentialIds: target.credentialIds,
+                accountIds: target.fallbackAccountIds,
+                emails: target.fallbackEmails
+            )
+        }
+    }
+
+    func clearStaleOwnedRefreshErrorIfNeeded() {
+        guard let banner = refreshError, let providerId = banner.providerId else { return }
+        if !selectedProviderIDList().contains(providerId) {
+            errorMessage = nil
+        } else if let credentialId = banner.credentialId,
+                  deletedCredentialKeysThisSession.contains(accountRefreshKey(providerId: providerId, credentialId: credentialId))
+                    || accountStore.excludedEngineAccountFilters().credentialIDs.contains(credentialId.lowercased()) {
+            errorMessage = nil
+        }
+    }
+
+    func syncOverviewIfPresent() {
+        guard let existingOverview = overview else { return }
+        overview = recomputedOverview(
+            for: providers,
+            baseOverview: existingOverview,
+            generatedAt: existingOverview.generatedAt,
+            language: language
+        )
+    }
+
     func removeProviders(matchingBaseProviderIds removed: Set<String>) {
+        if let owner = refreshError?.providerId, removed.contains(owner) {
+            errorMessage = nil
+        }
+        let previousCount = providers.count
         providers.removeAll { removed.contains($0.baseProviderId) }
+        if providers.count != previousCount {
+            syncOverviewIfPresent()
+        }
     }
 
     func removeProviders(matchingBaseProviderId providerId: String) {
-        providers.removeAll { $0.baseProviderId == providerId }
+        removeProviders(matchingBaseProviderIds: [providerId])
     }
 
     /// Drop in-memory live rows for a deleted/hidden account so the UI updates before the next refresh.
     func removeLiveProviders(matching entry: ProviderAccountEntry) {
+        if refreshError?.providerId == entry.providerId, let owner = refreshError?.credentialId {
+            let removedIds = [
+                entry.storedAccount?.credentialId,
+                entry.storedAccount?.providerResultId.flatMap(extractCredentialId(from:)),
+                entry.liveProvider.flatMap { extractCredentialId(from: $0.id) }
+            ]
+            if removedIds.contains(where: { $0?.caseInsensitiveCompare(owner) == .orderedSame }) {
+                errorMessage = nil
+            }
+        }
+
+        let previousCount = providers.count
         if let live = entry.liveProvider {
             let identity = liveProviderIdentity(live)
             providers.removeAll {
@@ -367,15 +922,17 @@ final class ProviderRefreshCoordinator: ObservableObject {
                 }
                 return $0.id == live.id || liveProviderIdentity($0) == identity
             }
-            return
-        }
-
-        providers.removeAll { provider in
-            guard provider.baseProviderId == entry.providerId else { return false }
-            if let stored = entry.storedAccount {
-                return accountStore.matchesStoredWithLive(stored, provider: provider)
+        } else {
+            providers.removeAll { provider in
+                guard provider.baseProviderId == entry.providerId else { return false }
+                if let stored = entry.storedAccount {
+                    return accountStore.matchesStoredWithLive(stored, provider: provider)
+                }
+                return false
             }
-            return false
+        }
+        if providers.count != previousCount {
+            syncOverviewIfPresent()
         }
     }
 
@@ -386,7 +943,9 @@ final class ProviderRefreshCoordinator: ObservableObject {
     }
 
     func reapplyVisibleSortedProviders() {
+        clearStaleOwnedRefreshErrorIfNeeded()
         providers = visibleProviders(from: providers).sorted(by: providerSort)
+        syncOverviewIfPresent()
     }
 
     func buildProviderEntries(
@@ -476,15 +1035,83 @@ final class ProviderRefreshCoordinator: ObservableObject {
             .max()
     }
 
+    func isCredentialStillRegistered(providerId: String, credentialId: String) -> Bool {
+        let key = accountRefreshKey(providerId: providerId, credentialId: credentialId)
+        if deletedCredentialKeysThisSession.contains(key) {
+            return false
+        }
+        return AccountCredentialStore.shared.loadCredential(providerId: providerId, credentialId: credentialId) != nil
+    }
+
+    func resolvedFetchedDate(for provider: ProviderData) -> Date? {
+        guard let fetchedAt = provider.fetchedAt else { return nil }
+        return parseISO8601(fetchedAt)
+    }
+
     func accountRefreshDate(for provider: ProviderData) -> Date? {
+        // Card fetchedAt is authoritative when present so shared email/account aliases
+        // cannot make an older peer workspace look freshly checked.
+        if let fetchedDate = resolvedFetchedDate(for: provider) {
+            return fetchedDate
+        }
         for key in accountRefreshKeys(for: provider) {
             if let refreshedAt = accountRefreshTimes[key] {
                 return refreshedAt
             }
         }
+        return nil
+    }
 
-        guard let fetchedAt = provider.fetchedAt else { return nil }
-        return parseISO8601(fetchedAt)
+    func isLastKnownErrorPreservable(_ provider: ProviderData) -> Bool {
+        provider.status != .error
+            && !provider.needsCredentialConnection
+            && (!provider.windows.isEmpty || provider.remainingPercent != nil || provider.fetchedAt != nil)
+    }
+
+    func isTerminalStopFailure(_ provider: ProviderData) -> Bool {
+        guard provider.status == .error else { return false }
+        let terminalCodes: Set<String> = ["tos_violation", "account_disabled", "unsupported_client", "not_logged_in"]
+        return terminalCodes.contains(provider.errorCode ?? "")
+    }
+
+    func accountCheckErrorKeys(for provider: ProviderData, credentialId: String? = nil) -> [String] {
+        var keys = [provider.id]
+        if let resolvedCredId = (credentialId ?? credentialID(for: provider))?.nilIfBlank {
+            let credKey = accountRefreshKey(providerId: provider.baseProviderId, credentialId: resolvedCredId)
+            if !keys.contains(credKey) {
+                keys.append(credKey)
+            }
+        }
+        return keys
+    }
+
+    func recordAccountCheckError(
+        for provider: ProviderData,
+        credentialId: String? = nil,
+        message: String,
+        errorCode: String?
+    ) {
+        let trimmed = message.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return }
+        let entry = AccountCheckError(message: trimmed, errorCode: errorCode, failedAt: Date())
+        for key in accountCheckErrorKeys(for: provider, credentialId: credentialId) {
+            accountLastCheckErrors[key] = entry
+        }
+    }
+
+    func clearAccountCheckError(for provider: ProviderData, credentialId: String? = nil) {
+        for key in accountCheckErrorKeys(for: provider, credentialId: credentialId) {
+            accountLastCheckErrors.removeValue(forKey: key)
+        }
+    }
+
+    func lastCheckError(for provider: ProviderData) -> AccountCheckError? {
+        for key in accountCheckErrorKeys(for: provider) {
+            if let entry = accountLastCheckErrors[key] {
+                return entry
+            }
+        }
+        return nil
     }
 
     func isProviderRefreshInFlight(_ providerId: String) -> Bool {

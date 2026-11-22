@@ -77,6 +77,21 @@ final class OpenCodeNodeStore: ObservableObject {
         return (home as NSString).appendingPathComponent(".config/aiusage/opencode-global-config.json")
     }
 
+    static func hasPersistedManagedProxyRoute(atPath path: String? = nil) -> Bool {
+        let resolvedPath = path ?? storePath
+        guard let data = FileManager.default.contents(atPath: resolvedPath),
+              let file = try? JSONDecoder.profileDecoder.decode(StoreFile.self, from: data) else {
+            return false
+        }
+        let activeIds = Set(file.activeNodeIds ?? (file.activeNodeId.map { [$0] } ?? []))
+        let proxyOnlyIds = Set(file.proxyOnlyNodeIds ?? [])
+        let candidateIds = activeIds.union(proxyOnlyIds)
+        guard !candidateIds.isEmpty else { return false }
+        return file.nodes.contains { $0.proxyEnabled && candidateIds.contains($0.id) }
+    }
+
+    private(set) var lastSaveError: String?
+
     init() {
         load()
         loadGlobalConfig()
@@ -128,7 +143,20 @@ final class OpenCodeNodeStore: ObservableObject {
             sortNodes()
         }
         save()
+        reapplyIfRunning(updated)
+    }
 
+    func saveCatalogUpdate(_ node: OpenCodeNode) -> Bool {
+        guard let index = nodes.firstIndex(where: { $0.id == node.id }) else { return false }
+        var updated = nodes
+        updated[index] = node
+        guard save(nodes: updated) else { return false }
+        nodes = updated
+        reapplyIfRunning(node)
+        return true
+    }
+
+    private func reapplyIfRunning(_ updated: OpenCodeNode) {
         // 编辑当前激活节点后立即重新激活（重写受管层；代理参数未变时进程原地复用）。
         if activeNodeIds.contains(updated.id) {
             Task { [weak self] in
@@ -154,10 +182,23 @@ final class OpenCodeNodeStore: ObservableObject {
         if proxyOnlyNodeIds.contains(node.id) {
             stopProxyOnly(node)
         }
+        let previousNodes = nodes
+        nodes.removeAll { $0.id == node.id }
+        guard save() else {
+            nodes = previousNodes
+            throw NSError(
+                domain: "OpenCodeNodeStore",
+                code: 2,
+                userInfo: [
+                    NSLocalizedDescriptionKey: lastSaveError ?? AppSettings.shared.t(
+                        "Failed to save OpenCode nodes to disk.",
+                        "无法将 OpenCode 节点保存到磁盘。"
+                    ),
+                ]
+            )
+        }
         // 清理该节点的全局统一代理归因残留（永久累计 + 请求日志），避免 JSON 长期堆积。
         OpenCodeProxyRuntime.shared.purgeNode(node.id)
-        nodes.removeAll { $0.id == node.id }
-        save()
     }
 
     /// 复制节点：新 id/slug（归因独立），插在原节点之后；代理端口避让已占用端口。
@@ -518,16 +559,17 @@ final class OpenCodeNodeStore: ObservableObject {
             return
         }
 
-        // A missing/modified/precedence-shifted config is not a valid active
-        // route. Keep the state visible for recovery, but do not start a proxy
-        // that OpenCode cannot currently reach. The isManaged fallback keeps
-        // pre-session versions recoverable after upgrade.
+        // Config ownership applies only to active managed routes; proxy-only
+        // listeners are user-configured standalone local forwards and still
+        // restore independently when proxyAutoRestoreOnLaunch is enabled.
         let state = configManager.managementState
-        guard state == .managed || (state == .unmanaged && configManager.isManaged) else { return }
+        let canRestoreActiveManagedRoutes = state == .managed || (state == .unmanaged && configManager.isManaged)
 
         var toRestore: [OpenCodeNode] = []
-        for node in activeNodes where node.proxyEnabled {
-            toRestore.append(node)
+        if canRestoreActiveManagedRoutes {
+            for node in activeNodes where node.proxyEnabled {
+                toRestore.append(node)
+            }
         }
         for id in proxyOnlyNodeIds where !activeNodeIds.contains(id) {
             if let node = nodes.first(where: { $0.id == id && $0.proxyEnabled }) {
@@ -660,7 +702,13 @@ final class OpenCodeNodeStore: ObservableObject {
         if changed { save() }
     }
 
-    private func save() {
+    @discardableResult
+    func save() -> Bool {
+        save(nodes: nodes)
+    }
+
+    private func save(nodes: [OpenCodeNode]) -> Bool {
+        lastSaveError = nil
         let file = StoreFile(
             version: Self.storeVersion,
             nodes: nodes,
@@ -675,8 +723,11 @@ final class OpenCodeNodeStore: ObservableObject {
             let data = try JSONEncoder.profileEncoder.encode(file)
             try data.write(to: URL(fileURLWithPath: Self.storePath), options: .atomic)
             try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.storePath)
+            return true
         } catch {
+            lastSaveError = SensitiveDataRedactor.redactedMessage(for: error)
             openCodeStoreLog.error("Failed to save OpenCode nodes: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 

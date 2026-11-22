@@ -1,8 +1,8 @@
 # Third-Party Notices
 
-## CLIProxyAPI
+## Historical Notice — CLIProxyAPI (Retired)
 
-AIUsage can download and run the official full CLIProxyAPI release as an optional local sidecar. CLIProxyAPI is not modified or compiled into AIUsage.
+Earlier builds of AIUsage offered an optional local sidecar integration with [`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI). The CLIProxyAPI sidecar has been retired and is no longer downloaded, started, or bundled by AIUsage. The historical upstream license notice is retained below for attribution.
 
 Source: <https://github.com/router-for-me/CLIProxyAPI>
 

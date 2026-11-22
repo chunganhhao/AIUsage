@@ -9,6 +9,7 @@ struct ProviderCard: View {
     let footerAccountLabelOverride: String?
     let accountEntry: ProviderAccountEntry?
     let refreshAction: (() async -> Void)?
+    let onReconnect: (() -> Void)?
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @EnvironmentObject var activationManager: ProviderActivationManager
@@ -28,7 +29,8 @@ struct ProviderCard: View {
         subtitleOverride: String? = nil,
         footerAccountLabelOverride: String? = nil,
         accountEntry: ProviderAccountEntry? = nil,
-        refreshAction: (() async -> Void)? = nil
+        refreshAction: (() async -> Void)? = nil,
+        onReconnect: (() -> Void)? = nil
     ) {
         self.provider = provider
         self.titleOverride = titleOverride
@@ -36,6 +38,7 @@ struct ProviderCard: View {
         self.footerAccountLabelOverride = footerAccountLabelOverride
         self.accountEntry = accountEntry
         self.refreshAction = refreshAction
+        self.onReconnect = onReconnect
     }
     private var isRefreshing: Bool {
         refreshCoordinator.isRefreshInProgress(for: provider)
@@ -82,7 +85,7 @@ struct ProviderCard: View {
                         GatewayQuietBadge(text: membership, tint: membershipBadgeTint(for: membership))
                     }
                     if shouldShowStatusBadge {
-                        GatewayQuietBadge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
+                        GatewayQuietBadge(text: localizedProviderStatusLabel(provider.statusLabel, language: appState.language), tint: statusColor)
                     }
                 }
 
@@ -99,6 +102,8 @@ struct ProviderCard: View {
                     }
                 }
 
+                EnvironmentOverrideBanner(provider: provider.providerId)
+                BurnRateBadge(windows: provider.windows)
                 if useMultiWindowLayout {
                     MultiWindowQuotaView(
                         windows: provider.windows,
@@ -127,6 +132,28 @@ struct ProviderCard: View {
                                          summaryFetchedAt: provider.fetchedAt, refreshUsage: refreshResetTarget)
             }
 
+            if provider.status != .error,
+               provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex",
+               let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                for: QuotaResetFormatter.snapshotHealth(for: provider),
+                language: appState.language
+               ) {
+                Label(healthBanner, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(.orange)
+                    .lineLimit(2)
+            }
+
+            if let checkError = refreshCoordinator.lastCheckError(for: provider) {
+                Label(
+                    L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption2)
+                .foregroundStyle(.orange)
+                .lineLimit(2)
+            }
+
             HStack(alignment: .center, spacing: 8) {
                 if let account = footerAccountLabel {
                     Label(account, systemImage: accountIdentityIcon(for: account))
@@ -146,13 +173,20 @@ struct ProviderCard: View {
                     SmallProgressView()
                         .frame(width: 12, height: 12)
                 } else if let refreshTimestamp {
-                    RefreshableTimeView(
-                        date: refreshTimestamp,
-                        language: appState.language,
-                        font: .caption2,
-                        foregroundStyle: .secondary,
-                        style: .relativeOnly
-                    )
+                    HStack(spacing: 3) {
+                        if showLastKnownPrefix(for: refreshTimestamp) {
+                            Text(L("Last known ·", "上次已知 ·"))
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        RefreshableTimeView(
+                            date: refreshTimestamp,
+                            language: appState.language,
+                            font: .caption2,
+                            foregroundStyle: .secondary,
+                            style: .relativeOnly
+                        )
+                    }
                 }
 
                 if provider.providerId == "claude-subscription", let directory = provider.sourceFilePath {
@@ -207,16 +241,23 @@ struct ProviderCard: View {
                 }
             }
 
-            Button {
-                Task {
-                    if let refreshAction {
-                        await refreshAction()
-                    } else {
-                        await refreshCoordinator.refreshProviderCardNow(provider)
-                    }
+            if provider.baseProviderId == "antigravity" {
+                Button {
+                    AntigravityAccountSwitcher.openAntigravityApp()
+                } label: {
+                    Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
                 }
+            }
+
+            Button {
+                Task { await runCardRefresh() }
             } label: {
-                Label(L("Refresh This Account", "刷新此账号"), systemImage: "arrow.clockwise")
+                Label(
+                    provider.baseProviderId == "antigravity"
+                        ? L("Reload Saved Snapshot", "重载已存快照")
+                        : L("Refresh This Account", "刷新此账号"),
+                    systemImage: "arrow.clockwise"
+                )
             }
 
             if let candidate = cpaSyncCandidate {
@@ -306,6 +347,14 @@ struct ProviderCard: View {
             Text(activationMessage ?? "")
         }
     }
+
+    private func runCardRefresh() async {
+        if let refreshAction {
+            await refreshAction()
+        } else {
+            await refreshCoordinator.refreshProviderCardNow(provider)
+        }
+    }
     
     private var resetTarget: CodexResetCreditsCoordinator.Target {
         let identity = CodexAccountIdentity(accountId: provider.accountId, userId: provider.workspaceUserId)
@@ -375,26 +424,8 @@ struct ProviderCard: View {
         return primary
     }
     
-    private func localizedStatusLabel(_ label: String) -> String {
-        guard appState.language == "zh" else { return label }
-        switch label {
-        case "Healthy":  return "正常"
-        case "Watch":    return "偏低"
-        case "Critical": return "告急"
-        case "Error":    return "错误"
-        case "Tracking": return "追踪中"
-        case "Idle":     return "空闲"
-        case "Active":   return "活跃"
-        case "Snapshot": return "额度快照"
-        case "Waiting": return "等待同步"
-        case "Proxy session": return "代理会话"
-        case "Feedback disconnected": return "同步已断开"
-        default: return label
-        }
-    }
-
     private var statusBadge: some View {
-        badge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
+        badge(text: localizedProviderStatusLabel(provider.statusLabel, language: appState.language), tint: statusColor)
     }
     
     // MARK: - Helpers
@@ -447,21 +478,22 @@ struct ProviderCard: View {
 
     private func activateThisAccount() {
         guard let entry = accountEntry else { return }
-        do {
-            try activationManager.activateAccount(entry: entry)
-        } catch {
-            if activationManager.activationResult == nil {
+        Task { @MainActor in
+            do {
+                guard try await activationManager.activateAccount(entry: entry) else { return }
+            } catch {
                 activationMessage = SensitiveDataRedactor.redactedMessage(for: error)
                 showActivationAlert = true
+                return
             }
-        }
-        if let result = activationManager.activationResult {
-            switch result {
-            case .success(let msg), .failure(let msg):
-                activationMessage = msg
-                showActivationAlert = true
+            if let result = activationManager.activationResult {
+                switch result {
+                case .success(let msg), .failure(let msg):
+                    activationMessage = msg
+                    showActivationAlert = true
+                }
+                activationManager.activationResult = nil
             }
-            activationManager.activationResult = nil
         }
     }
 
@@ -476,10 +508,10 @@ struct ProviderCard: View {
     /// 采用多窗口进度布局的服务商。
     /// Codex / Kimi / MiniMax：卡片只展示 5 小时 + 周窗口两条（第三条如 Code Review 进详情）。
     /// Droid Individual：5 小时 / 周 / 月都是硬限制，卡片展示三条。
-    private static let multiWindowProviderIds: Set<String> = ["codex", "claude-subscription", "kimi", "minimax", "droid"]
+    private static let multiWindowProviderIds: Set<String> = ["codex", "claude-subscription", "kimi", "minimax", "droid", "antigravity"]
 
     private static func multiWindowVisibleLimit(for providerId: String) -> Int {
-        providerId == "droid" ? 3 : 2
+        providerId == "antigravity" ? Int.max : (providerId == "droid" ? 3 : 2)
     }
 
     private var shouldShowStatusBadge: Bool {
@@ -538,6 +570,14 @@ struct ProviderCard: View {
         case .segments:
             return 50
         }
+    }
+
+    private func showLastKnownPrefix(for timestamp: Date) -> Bool {
+        guard provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex" else {
+            return false
+        }
+        return refreshCoordinator.lastCheckError(for: provider) != nil
+            || Date().timeIntervalSince(timestamp) >= 120
     }
 
     private func copyToPasteboard(_ value: String) {

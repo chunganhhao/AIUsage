@@ -60,6 +60,8 @@ struct ProviderAuthCandidate: Identifiable, Hashable {
     let identityScope: IdentityScope
     /// 本地就能读到的套餐名（如 Codex id_token、Cursor 应用缓存），用于连接前的账号卡片。
     var plan: String? = nil
+    var workspaceId: String? = nil
+    var capturesWorkspaceIdentity: Bool = false
 }
 
 struct ProviderMonitoredSessionIndex {

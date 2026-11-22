@@ -105,27 +105,43 @@ public enum UsageNormalizer {
             raw: usage
         )
 
+        var normalized: ProviderSummary
         switch provider.id {
-        case "warp":    return normalizeWarp(base: &base, usage: usage)
-        case "antigravity": return normalizeAntigravity(base: &base, usage: usage)
-        case "antigravity-cost": return normalizeAntigravityCost(base: &base, usage: usage)
-        case "claude":  return normalizeClaude(base: &base, usage: usage)
-        case "claude-subscription": return normalizeClaudeSubscription(base: &base, usage: usage)
-        case "codex-cost": return normalizeCodexCost(base: &base, usage: usage)
-        case "copilot": return normalizeCopilot(base: &base, usage: usage)
-        case "codex":   return normalizeCodex(base: &base, usage: usage)
-        case "gemini":  return normalizeGemini(base: &base, usage: usage)
-        case "kimi":    return normalizeKimi(base: &base, usage: usage)
-        case "kiro":    return normalizeKiro(base: &base, usage: usage)
-        case "minimax": return normalizeMiniMax(base: &base, usage: usage)
-        case "opencode": return normalizeOpenCode(base: &base, usage: usage)
-        case "cursor":  return normalizeCursor(base: &base, usage: usage)
-        case "droid":   return normalizeDroid(base: &base, usage: usage)
+        case "warp":    normalized = normalizeWarp(base: &base, usage: usage)
+        case "antigravity": normalized = normalizeAntigravity(base: &base, usage: usage)
+        case "antigravity-cost": normalized = normalizeAntigravityCost(base: &base, usage: usage)
+        case "claude":  normalized = normalizeClaude(base: &base, usage: usage)
+        case "claude-subscription": normalized = normalizeClaudeSubscription(base: &base, usage: usage)
+        case "codex-cost": normalized = normalizeCodexCost(base: &base, usage: usage)
+        case "copilot": normalized = normalizeCopilot(base: &base, usage: usage)
+        case "codex":   normalized = normalizeCodex(base: &base, usage: usage)
+        case "gemini":  normalized = normalizeGemini(base: &base, usage: usage)
+        case "kimi":    normalized = normalizeKimi(base: &base, usage: usage)
+        case "kiro":    normalized = normalizeKiro(base: &base, usage: usage)
+        case "minimax": normalized = normalizeMiniMax(base: &base, usage: usage)
+        case "opencode": normalized = normalizeOpenCode(base: &base, usage: usage)
+        case "cursor":  normalized = normalizeCursor(base: &base, usage: usage)
+        case "droid":   normalized = normalizeDroid(base: &base, usage: usage)
         default:
             base.headline = HeadlineInfo(eyebrow: "Live snapshot", primary: base.label, secondary: "Fetched successfully", supporting: sourceLabel)
             base.spotlight = "This provider is connected."
-            return base
+            normalized = base
         }
+
+        if (usage.extra["snapshotState"]?.value as? String) == "pending" {
+            normalized.fetchedAt = nil
+            normalized.status = "idle"
+            normalized.statusLabel = "Waiting"
+            if normalized.remainingPercent == nil && normalized.windows.isEmpty {
+                normalized.headline = HeadlineInfo(
+                    eyebrow: normalized.headline.eyebrow,
+                    primary: "Waiting for first sync",
+                    secondary: "Local metadata only — awaiting quota sync",
+                    supporting: normalized.headline.supporting
+                )
+            }
+        }
+        return normalized
     }
 
     public static func errorSummary(provider: any ProviderFetcher, error: Error) -> ProviderSummary {
@@ -166,46 +182,97 @@ public enum UsageNormalizer {
 
     // MARK: - Dashboard Overview
 
-    public static func createDashboardOverview(summaries: [ProviderSummary], generatedAt: String) -> DashboardOverview {
-        let active     = summaries.filter { $0.status != "error" }
-        let attention  = summaries.filter { $0.status == "watch" || $0.status == "critical" }
-        let critical   = summaries.filter { $0.status == "critical" }
-        let localCost  = summaries.filter { $0.category == ProviderCategory.localCost }
-        let resetSoon  = summaries.filter { s in s.nextResetAt.map { isWithinHours($0, hours: 24) } ?? false }
+    public struct OverviewEntry: Sendable {
+        public let id: String
+        public let label: String
+        public let category: String
+        public let status: String
+        public let secondaryHeadline: String
+        public let nextResetAt: String?
+        public let monthUsd: Double
+        public let weekTokens: Int
+        public let unpricedAlertBody: String?
 
-        let localCostMonthUsd = localCost.reduce(0.0) { $0 + ($1.costSummary?.month?.usd ?? 0) }
-        let localWeekTokens   = localCost.reduce(0) { $0 + ($1.costSummary?.week?.tokens ?? 0) }
+        public init(
+            id: String,
+            label: String,
+            category: String,
+            status: String,
+            secondaryHeadline: String,
+            nextResetAt: String?,
+            monthUsd: Double = 0,
+            weekTokens: Int = 0,
+            unpricedAlertBody: String? = nil
+        ) {
+            self.id = id
+            self.label = label
+            self.category = category
+            self.status = status
+            self.secondaryHeadline = secondaryHeadline
+            self.nextResetAt = nextResetAt
+            self.monthUsd = monthUsd
+            self.weekTokens = weekTokens
+            self.unpricedAlertBody = unpricedAlertBody
+        }
+    }
+
+    public static func createDashboardOverview(summaries: [ProviderSummary], generatedAt: String) -> DashboardOverview {
+        let entries = summaries.map { s in
+            OverviewEntry(
+                id: s.id,
+                label: s.label,
+                category: s.category,
+                status: s.status,
+                secondaryHeadline: s.headline.secondary,
+                nextResetAt: s.nextResetAt,
+                monthUsd: s.costSummary?.month?.usd ?? 0,
+                weekTokens: s.costSummary?.week?.tokens ?? 0,
+                unpricedAlertBody: s.unpricedModels.flatMap { $0.isEmpty ? nil : $0.joined(separator: ", ") }
+            )
+        }
+        return createDashboardOverview(entries: entries, generatedAt: generatedAt)
+    }
+
+    public static func createDashboardOverview(entries: [OverviewEntry], generatedAt: String) -> DashboardOverview {
+        let active     = entries.filter { $0.status != "error" }
+        let attention  = entries.filter { $0.status == "watch" || $0.status == "critical" }
+        let critical   = entries.filter { $0.status == "critical" }
+        let localCost  = entries.filter { $0.category == ProviderCategory.localCost }
+        let resetSoon  = entries.filter { e in e.nextResetAt.map { isWithinHours($0, hours: 24) } ?? false }
+
+        let localCostMonthUsd = localCost.reduce(0.0) { $0 + $1.monthUsd }
+        let localWeekTokens   = localCost.reduce(0) { $0 + $1.weekTokens }
 
         var alerts: [AlertInfo] = []
-        for s in summaries {
-            if s.status == "critical" {
+        for e in entries {
+            if e.status == "critical" {
                 alerts.append(
                     AlertInfo(
-                        id: "\(s.id):status-critical",
+                        id: "\(e.id):status-critical",
                         tone: "critical",
-                        providerId: s.id,
-                        title: "\(s.label) needs attention",
-                        body: s.headline.secondary
+                        providerId: e.id,
+                        title: "\(e.label) needs attention",
+                        body: e.secondaryHeadline
                     )
                 )
-            } else if s.status == "watch" {
+            } else if e.status == "watch" {
                 alerts.append(
                     AlertInfo(
-                        id: "\(s.id):status-watch",
+                        id: "\(e.id):status-watch",
                         tone: "watch",
-                        providerId: s.id,
-                        title: "\(s.label) is getting tight",
-                        body: s.headline.secondary
+                        providerId: e.id,
+                        title: "\(e.label) is getting tight",
+                        body: e.secondaryHeadline
                     )
                 )
-            } else if let unpriced = s.unpricedModels, !unpriced.isEmpty {
+            } else if let unpriced = e.unpricedAlertBody, !unpriced.isEmpty {
                 alerts.append(
                     AlertInfo(
-                        id: "\(s.id):unpriced-models",
+                        id: "\(e.id):unpriced-models",
                         tone: "neutral",
-                        providerId: s.id,
-                        title: "\(s.label) has unpriced models",
-                        body: unpriced.joined(separator: ", ")
+                        providerId: e.id,
+                        title: "\(e.label) has unpriced models",
+                        body: unpriced
                     )
                 )
             }
@@ -220,7 +287,7 @@ public enum UsageNormalizer {
             localCostMonthUsd:  roundNumber(localCostMonthUsd, digits: 2),
             localWeekTokens:    localWeekTokens,
             stats: [
-                StatInfo(label: "Connected Sources", value: "\(active.count)",    note: "\(summaries.count) providers in the mesh"),
+                StatInfo(label: "Connected Sources", value: "\(active.count)",    note: "\(entries.count) providers in the mesh"),
                 StatInfo(label: "Attention Queue",   value: "\(attention.count)", note: critical.count > 0 ? "\(critical.count) critical right now" : "Everything is within normal range"),
                 StatInfo(label: "Tracked Local Cost", value: formatCurrency(localCostMonthUsd), note: "\(formatInt(localWeekTokens)) tokens observed this week"),
                 StatInfo(label: "Resets In 24h",     value: "\(resetSoon.count)", note: resetSoon.isEmpty ? "No urgent resets detected" : "A few windows are about to roll over")

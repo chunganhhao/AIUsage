@@ -174,6 +174,7 @@ enum GatewayAccountListLogic {
             }
     }
 
+    @MainActor
     static func linkedCandidateByAuthFileName(
         manager: CLIProxyGatewayManager
     ) -> [String: CLIProxyAccountSyncCandidate] {
@@ -196,6 +197,7 @@ enum GatewayAccountListLogic {
         return result
     }
 
+    @MainActor
     static func modelCountsByAuthFileName(manager: CLIProxyGatewayManager) -> [String: Int] {
         manager.authFiles.reduce(into: [String: Int]()) { result, file in
             if let count = manager.cachedModelCount(for: file) {
@@ -204,10 +206,12 @@ enum GatewayAccountListLogic {
         }
     }
 
+    @MainActor
     static func modelErrorNames(manager: CLIProxyGatewayManager) -> Set<String> {
         Set(manager.authFileModelErrors.keys.map { $0.lowercased() })
     }
 
+    @MainActor
     static func connectivityByAuthFileName(
         manager: CLIProxyGatewayManager
     ) -> [String: CLIProxyAccountConnectivityState] {
@@ -263,6 +267,7 @@ enum GatewayAccountListLogic {
         }.count
     }
 
+    @MainActor
     static func unsyncedCandidateCount(manager: CLIProxyGatewayManager) -> Int {
         manager.syncCandidates.filter { candidate in
             guard case .compatible = candidate.compatibility else { return false }

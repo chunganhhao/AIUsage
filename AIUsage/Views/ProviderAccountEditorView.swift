@@ -248,8 +248,10 @@ struct ProviderAccountEditorView: View {
         if connectable.count > 1 { return nil }
 
         switch authPlan.method {
-        case .codexCLI where codexExecutable == nil, .manual:
+        case .codexCLI where codexExecutable == nil:
             return FooterAction(id: "detect", title: L("Check Again", "重新检测")) { Task { await detect() } }
+        case .manual:
+            return FooterAction(id: "detect", title: L("Check Again", "重新检测"), perform: startSignIn)
         case .kiro where !appInstalled:
             return FooterAction(id: "builder-id", title: L("Sign in with AWS Builder ID", "使用 AWS Builder ID 登录"), perform: startBuilderIDSignIn)
         default:

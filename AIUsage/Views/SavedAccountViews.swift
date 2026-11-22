@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import QuotaBackend
 
 struct SavedAccountCard: View {
     let account: ProviderAccountEntry
@@ -14,6 +15,10 @@ struct SavedAccountCard: View {
     @State private var pendingAccountDeletion = false
     private var hasSecureCredential: Bool {
         account.storedAccount?.credentialId != nil
+    }
+    private var isSwitchSafePausedAntigravity: Bool {
+        hasSecureCredential
+            && account.providerId == "antigravity"
     }
 
     var body: some View {
@@ -38,7 +43,15 @@ struct SavedAccountCard: View {
                 Spacer()
 
                 HStack(spacing: 6) {
-                    if hasSecureCredential {
+                    if isSwitchSafePausedAntigravity {
+                        Text(L("Switch-Safe", "防封静默"))
+                            .font(.caption2.weight(.semibold))
+                            .foregroundStyle(.teal)
+                            .padding(.horizontal, 10)
+                            .padding(.vertical, 6)
+                            .background(Color.teal.opacity(0.10))
+                            .clipShape(Capsule())
+                    } else if hasSecureCredential {
                         Text(L("Offline", "离线"))
                             .font(.caption2.weight(.semibold))
                             .foregroundStyle(.orange)
@@ -60,9 +73,11 @@ struct SavedAccountCard: View {
 
             VStack(alignment: .leading, spacing: 6) {
                 Text(
-                    hasSecureCredential
-                        ? L("Credential may have expired", "凭证可能已过期")
-                        : L("Awaiting a live session", "等待在线会话")
+                    isSwitchSafePausedAntigravity
+                        ? L("Paused in background", "后台轮询已暂停")
+                        : (hasSecureCredential
+                            ? L("Credential may have expired", "凭证可能已过期")
+                            : L("Awaiting a live session", "等待在线会话"))
                 )
                     .font(.title3)
                     .bold()
@@ -75,9 +90,11 @@ struct SavedAccountCard: View {
                 }
 
                 Text(
-                    hasSecureCredential
-                        ? L("The stored credential could not fetch live data. Try refreshing or reconnecting.", "已存储的凭证未能获取实时数据。可尝试刷新或重新连接。")
-                        : L("Account saved locally. Will auto-match when the app session appears.", "账号已保存到本地。对应应用出现在线会话后会自动匹配。")
+                    isSwitchSafePausedAntigravity
+                        ? L("Background checks read only the running Antigravity IDE locally; dormant accounts stay cache-only. Switch accounts inside Antigravity IDE to refresh locally.", "后台仅通过本地 Antigravity IDE 读取活跃账号，休眠账号保持仅读缓存；请在 Antigravity IDE 内切换账号以本地刷新。")
+                        : (hasSecureCredential
+                            ? L("The stored credential could not fetch live data. Try refreshing or reconnecting.", "已存储的凭证未能获取实时数据。可尝试刷新或重新连接。")
+                            : L("Account saved locally. Will auto-match when the app session appears.", "账号已保存到本地。对应应用出现在线会话后会自动匹配。"))
                 )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -90,9 +107,7 @@ struct SavedAccountCard: View {
                 if hasSecureCredential {
                     Button {
                         guard !isRefreshing, let credentialId = account.storedAccount?.credentialId else { return }
-                        isRefreshing = true
-                        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
-                        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
+                        performRetry(credentialId: credentialId)
                     } label: {
                         if isRefreshing {
                             ProgressView()
@@ -180,6 +195,12 @@ struct SavedAccountCard: View {
         }
     }
 
+    private func performRetry(credentialId: String) {
+        isRefreshing = true
+        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
+    }
+
     private func copyToPasteboard(_ value: String) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(value, forType: .string)
@@ -199,6 +220,10 @@ struct SavedAccountDetailView: View {
     @State private var isRefreshing = false
     private var hasSecureCredential: Bool {
         account.storedAccount?.credentialId != nil
+    }
+    private var isSwitchSafePausedAntigravity: Bool {
+        hasSecureCredential
+            && account.providerId == "antigravity"
     }
 
     var body: some View {
@@ -282,9 +307,7 @@ struct SavedAccountDetailView: View {
                     if hasSecureCredential {
                         Button {
                             guard !isRefreshing, let credentialId = account.storedAccount?.credentialId else { return }
-                            isRefreshing = true
-                            refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
-                            DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
+                            performRetry(credentialId: credentialId)
                         } label: {
                             if isRefreshing {
                                 ProgressView().controlSize(.small)
@@ -354,5 +377,11 @@ struct SavedAccountDetailView: View {
             appState.deleteAccount(account)
             dismiss()
         }
+    }
+
+    private func performRetry(credentialId: String) {
+        isRefreshing = true
+        refreshCoordinator.refreshAccount(credentialId: credentialId, providerId: account.providerId)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) { isRefreshing = false }
     }
 }

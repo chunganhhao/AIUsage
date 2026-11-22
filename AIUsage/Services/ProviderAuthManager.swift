@@ -32,13 +32,13 @@ enum ProviderAuthManager {
             )
         case "antigravity":
             return ProviderAuthPlan(
-                method: .googleOAuth,
-                summary: L("Sign in with Google to see Antigravity's per-model quotas.",
-                           "使用 Google 账号登录，按模型查看 Antigravity 额度。"),
-                signInTitle: L("Sign in with Google", "使用 Google 登录"),
-                signedOutTitle: L("Antigravity isn't signed in on this Mac", "本机 Antigravity 尚未登录"),
-                signedOutDetail: L("Approve your Google account in the browser — Antigravity doesn't need to be installed.",
-                                   "在浏览器中授权 Google 账号即可，无需安装 Antigravity。")
+                method: .manual,
+                summary: L("View local Antigravity IDE session quotas and saved snapshots.",
+                           "查看本机 Antigravity IDE 会话额度与已保存的快照。"),
+                signInTitle: L("Use Antigravity IDE Session", "使用 Antigravity IDE 会话"),
+                signedOutTitle: L("Antigravity IDE session not detected", "未检测到 Antigravity IDE 会话"),
+                signedOutDetail: L("Sign in inside the official Antigravity app, or view last-known cached snapshots. Direct browser OAuth is disabled per policy.",
+                                   "请在官方 Antigravity 应用内登录，或查看本地缓存快照。按策略已禁用直接浏览器 OAuth。")
             )
         case "copilot":
             return ProviderAuthPlan(
@@ -121,7 +121,10 @@ enum ProviderAuthManager {
         }
     }
 
-    static func makeCodexCandidate(authFileURL: URL) -> ProviderAuthCandidate {
+    static func makeCodexCandidate(
+        authFileURL: URL,
+        shouldCopyFile: Bool = true
+    ) -> ProviderAuthCandidate {
         let path = authFileURL.path
         let json = loadJSONObject(at: path)
         let tokens = json?["tokens"] as? [String: Any]
@@ -147,64 +150,7 @@ enum ProviderAuthManager {
             authMethod: .authFile,
             credentialValue: path,
             sourcePath: path,
-            shouldCopyFile: true,
-            identityScope: .sharedSource
-        )
-    }
-
-    static func makeAntigravityCandidate(authFileURL: URL) -> ProviderAuthCandidate {
-        let path = authFileURL.path
-        let json = loadJSONObject(at: path)
-        let email = stringValue(json?["email"])
-            ?? jwtEmail(from: stringValue(json?["id_token"]))
-            ?? jwtEmail(from: stringValue(json?["access_token"]))
-        let fingerprint: String?
-        if let json {
-            fingerprint = sessionFingerprint(from: json)
-        } else {
-            fingerprint = nil
-        }
-
-        return ProviderAuthCandidate(
-            id: "antigravity-oauth:\(path)",
-            providerId: "antigravity",
-            sourceIdentifier: "antigravity-oauth:\(path)",
-            sessionFingerprint: fingerprint,
-            title: email ?? "Antigravity Login",
-            subtitle: "From CPA",
-            detail: authFileURL.lastPathComponent,
-            modifiedAt: Date(),
-            authMethod: .authFile,
-            credentialValue: path,
-            sourcePath: path,
-            shouldCopyFile: true,
-            identityScope: .sharedSource
-        )
-    }
-
-    static func makeGeminiCandidate(authFileURL: URL) -> ProviderAuthCandidate {
-        let path = authFileURL.path
-        let data = try? Data(contentsOf: authFileURL, options: .mappedIfSafe)
-        let email = data.flatMap { CLIProxyGeminiCredentialBridge.accountEmail(from: $0) }
-        let json = loadJSONObject(at: path)
-        let fingerprint = json.flatMap {
-            sessionFingerprint(from: $0, preferredKeys: ["email"])
-        } ?? email.flatMap { normalizedHandle($0) }
-
-        return ProviderAuthCandidate(
-            id: "gemini-oauth:\(path)",
-            providerId: "gemini",
-            sourceIdentifier: "gemini-oauth:\(path)",
-            sessionFingerprint: fingerprint,
-            title: email ?? "Gemini CLI Login",
-            subtitle: "From CPA",
-            detail: authFileURL.lastPathComponent,
-            modifiedAt: (try? authFileURL.resourceValues(forKeys: [.contentModificationDateKey]))?
-                .contentModificationDate,
-            authMethod: .authFile,
-            credentialValue: path,
-            sourcePath: path,
-            shouldCopyFile: true,
+            shouldCopyFile: shouldCopyFile,
             identityScope: .sharedSource
         )
     }
@@ -243,68 +189,89 @@ enum ProviderAuthManager {
     }
 
     static func unmanagedCandidates(for providerId: String) -> [ProviderAuthCandidate] {
+        if AgentVisibility.isLocalCostCatalogId(providerId) {
+            return []
+        }
         let monitored = monitoredSessions(for: providerId)
         return discoverCandidates(for: providerId).filter { !isCandidateManaged($0, monitored: monitored) }
     }
 
-    static func monitoredSessions(for providerId: String) -> ProviderMonitoredSessionIndex {
-        let credentials = AccountCredentialStore.shared.loadCredentials(for: providerId)
-        return ProviderMonitoredSessionIndex(
-            sourceIdentifiers: Set(credentials.compactMap { credential in
-                guard sourceIdentifierIsStableIdentity(for: credential) else { return nil }
-                return credential.metadata["sourceIdentifier"]
-                    ?? credential.metadata["sourcePath"]
-                    ?? authFileSourceIdentifier(for: credential.credential, authMethod: credential.authMethod)
-            }),
-            sessionFingerprints: Set(credentials.compactMap { credential in
-                if providerId == "codex" {
-                    return CodexAccountIdentity(credential: credential).key
-                        ?? credential.metadata["sessionFingerprint"].flatMap { $0.hasPrefix("codex:") ? $0 : nil }
-                }
-                return normalizedHandle(credential.metadata["sessionFingerprint"])
-            }),
-            accountHandles: Set(credentials.compactMap { credential in
-                normalizedHandle(
-                    credential.metadata["accountHandle"]
-                        ?? credential.metadata["accountEmail"]
-                        ?? credential.accountLabel
-                )
-            })
-        )
-    }
-
-    static func authenticateCandidate(_ candidate: ProviderAuthCandidate) async throws -> (AccountCredential, ProviderUsage) {
+    static func authenticateCandidate(
+        _ candidate: ProviderAuthCandidate,
+        localOnly: Bool = false,
+        allowLocalMetadataFallback: Bool = false
+    ) async throws -> (AccountCredential, ProviderUsage) {
         var copiedPath: String?
+        var temporaryStageDir: URL?
+        defer {
+            if let dir = temporaryStageDir {
+                try? FileManager.default.removeItem(at: dir)
+            }
+        }
         do {
             let credentialValue: String
-            if candidate.authMethod == .authFile, candidate.shouldCopyFile, let sourcePath = candidate.sourcePath {
+            if candidate.authMethod == .authFile, candidate.shouldCopyFile {
+                let effectiveSourcePath: String
+                if let explicitSourcePath = candidate.sourcePath?.nilIfBlank {
+                    effectiveSourcePath = explicitSourcePath
+                } else if let staged = try stageDeferredAuthFileIfNeeded(for: candidate) {
+                    temporaryStageDir = staged.directoryURL
+                    effectiveSourcePath = staged.fileURL.path
+                } else {
+                    effectiveSourcePath = candidate.credentialValue
+                }
                 copiedPath = try copyImportedAuthFile(
                     providerId: candidate.providerId,
-                    sourcePath: sourcePath,
+                    sourcePath: effectiveSourcePath,
                     suggestedName: candidate.title
                 )
-                credentialValue = copiedPath ?? sourcePath
+                if let dir = temporaryStageDir {
+                    try? FileManager.default.removeItem(at: dir)
+                    temporaryStageDir = nil
+                }
+                credentialValue = copiedPath ?? effectiveSourcePath
             } else {
                 credentialValue = candidate.credentialValue
             }
 
-            let storedSourcePath = candidate.sourcePath ?? ""
+            let storedSourcePath = AccountCredentialStore.persistentSourcePath(from: candidate.sourcePath) ?? ""
+
+            var metadata: [String: String] = [
+                "sourceIdentifier": candidate.sourceIdentifier,
+                "sourcePath": storedSourcePath,
+                "importedAt": SharedFormatters.iso8601String(from: Date()),
+                "sessionFingerprint": candidate.sessionFingerprint ?? "",
+                "identityScope": candidate.identityScope.rawValue
+            ]
+            if candidate.providerId == "antigravity",
+               let workspaceId = normalizedAntigravityWorkspaceId(candidate.workspaceId) {
+                metadata["projectId"] = workspaceId
+                metadata["project_id"] = workspaceId
+            }
 
             let credential = AccountCredential(
                 providerId: candidate.providerId,
                 accountLabel: candidate.title.nilIfBlank,
                 authMethod: candidate.authMethod,
                 credential: credentialValue,
-                metadata: [
-                    "sourceIdentifier": candidate.sourceIdentifier,
-                    "sourcePath": storedSourcePath,
-                    "importedAt": SharedFormatters.iso8601String(from: Date()),
-                    "sessionFingerprint": candidate.sessionFingerprint ?? "",
-                    "identityScope": candidate.identityScope.rawValue
-                ]
+                metadata: metadata
             )
 
-            let usage = try await validate(credential: credential)
+            let usage = try await validate(
+                credential: credential,
+                localOnly: localOnly,
+                allowLocalMetadataFallback: allowLocalMetadataFallback
+            )
+            if candidate.providerId == "antigravity", candidate.capturesWorkspaceIdentity {
+                let expectedWorkspace = normalizedAntigravityWorkspaceId(candidate.workspaceId)
+                let usageWorkspace = normalizedAntigravityWorkspaceId(usage.extra["projectId"]?.value as? String)
+                guard let expectedWorkspace, usageWorkspace == expectedWorkspace else {
+                    throw ProviderError(
+                        "candidate_changed",
+                        "The active Antigravity workspace changed or could not be verified during import. Refresh and select the workspace again."
+                    )
+                }
+            }
             return (credential, usage)
         } catch {
             if let copiedPath {
@@ -356,14 +323,173 @@ enum ProviderAuthManager {
 
     // MARK: - Validation
 
-    private static func validate(credential: AccountCredential) async throws -> ProviderUsage {
+    private static func validate(
+        credential: AccountCredential,
+        localOnly: Bool = false,
+        allowLocalMetadataFallback: Bool = false
+    ) async throws -> ProviderUsage {
+        if localOnly, allowLocalMetadataFallback, credential.providerId != "antigravity" {
+            if credential.authMethod == .authFile {
+                return try validateLocalAuthFileMetadata(credential: credential)
+            }
+            let trimmed = credential.credential.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !trimmed.isEmpty else {
+                throw ProviderError("missing_credential", "\(credential.providerId) credential is empty.")
+            }
+            var usage = ProviderUsage(
+                provider: credential.providerId,
+                label: credential.providerId.capitalized,
+                accountId: credential.accountLabel?.nilIfBlank ?? credential.id
+            )
+            usage.accountEmail = credential.accountLabel?.nilIfBlank
+            usage.fetchedAt = ""
+            usage.extra["snapshotState"] = AnyCodable("pending")
+            return usage
+        }
         guard let provider = ProviderRegistry.provider(for: credential.providerId) as? any CredentialAcceptingProvider else {
+            if localOnly, allowLocalMetadataFallback, credential.authMethod == .authFile {
+                return try validateLocalAuthFileMetadata(credential: credential)
+            }
             throw ProviderError("unsupported_provider", "\(credential.providerId) does not accept imported credentials.")
+        }
+        if localOnly, let antigravity = provider as? AntigravityProvider {
+            let requiresConcreteProject = AntigravityProvider.normalizedProjectId(
+                credential.metadata["projectId"] ?? credential.metadata["project_id"]
+            ) != nil
+            do {
+                return try await antigravity.fetchUsage(
+                    with: credential,
+                    localOnly: true,
+                    requireProjectMatch: requiresConcreteProject
+                )
+            } catch let error as ProviderError where allowLocalMetadataFallback && error.code == "local_only_unavailable" {
+                return try validateLocalAuthFileMetadata(credential: credential)
+            }
+        }
+        if localOnly, allowLocalMetadataFallback, credential.authMethod == .authFile {
+            return try validateLocalAuthFileMetadata(credential: credential)
+        }
+        if localOnly, credential.providerId == "codex", credential.authMethod == .authFile {
+            let candidateKey = CodexQuotaPollingPolicy.verifiedNativeIdentity(atPath: credential.credential)?.nativeKey
+            let activeKey = CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey
+            if activeKey == nil || candidateKey != activeKey {
+                return try validateLocalAuthFileMetadata(credential: credential)
+            }
         }
         return try await provider.fetchUsage(with: credential)
     }
 
+    private static func validateLocalAuthFileMetadata(credential: AccountCredential) throws -> ProviderUsage {
+        guard credential.authMethod == .authFile else {
+            throw ProviderError("unsupported_auth_method", "\(credential.providerId) local metadata validation requires an auth file.")
+        }
+        let expandedPath = NSString(string: credential.credential).expandingTildeInPath
+        guard let data = FileManager.default.contents(atPath: expandedPath),
+              let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            throw ProviderError("invalid_auth_file", "Auth file could not be parsed as JSON.")
+        }
+        let tokens = json["tokens"] as? [String: Any]
+        func nonEmptyString(_ value: Any?) -> String? {
+            guard let text = (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !text.isEmpty else {
+                return nil
+            }
+            return text
+        }
+        let providerId = credential.providerId.lowercased()
+        switch providerId {
+        case "antigravity":
+            if let suspension = AntigravityAccountProtection.suspension(in: data) {
+                throw suspension
+            }
+            let hasToken = nonEmptyString(json["access_token"] ?? json["accessToken"]) != nil
+                || nonEmptyString(json["refresh_token"] ?? json["refreshToken"]) != nil
+            guard hasToken else {
+                throw ProviderError("missing_token", "Antigravity auth file is missing an OAuth token.")
+            }
+            let email = nonEmptyString(json["email"])
+                ?? nonEmptyString(credential.accountLabel)
+            let projectId = nonEmptyString(json["project_id"] ?? json["projectId"])
+            var usage = ProviderUsage(
+                provider: "antigravity",
+                label: "Antigravity",
+                accountId: email ?? credential.id
+            )
+            usage.accountEmail = email
+            usage.fetchedAt = ""
+            usage.extra["snapshotState"] = AnyCodable("pending")
+            if let projectId {
+                usage.extra["projectId"] = AnyCodable(projectId)
+            }
+            return usage
+        case "codex":
+            let hasToken = nonEmptyString(tokens?["access_token"] ?? tokens?["accessToken"]) != nil
+                || nonEmptyString(tokens?["refresh_token"] ?? tokens?["refreshToken"]) != nil
+                || nonEmptyString(json["access_token"] ?? json["accessToken"]) != nil
+                || nonEmptyString(json["refresh_token"] ?? json["refreshToken"]) != nil
+            guard hasToken else {
+                throw ProviderError("missing_token", "Codex auth file is missing OAuth tokens.")
+            }
+            let identity = CodexAccountIdentity(authJSON: json)
+            let planRaw = nonEmptyString(json["plan_type"] ?? json["planType"])
+                ?? nonEmptyString(tokens?["plan_type"] ?? tokens?["planType"])
+            var usage = ProviderUsage(
+                provider: "codex",
+                label: "Codex",
+                accountId: identity.accountId
+            )
+            usage.accountEmail = identity.email ?? nonEmptyString(credential.accountLabel)
+            usage.accountPlan = CodexProvider.planDisplayName(forRaw: planRaw)
+            usage.fetchedAt = ""
+            if let userId = identity.userId {
+                usage.extra["userId"] = AnyCodable(userId)
+            }
+            usage.extra["snapshotState"] = AnyCodable("pending")
+            return usage
+        default:
+            let hasToken = nonEmptyString(tokens?["access_token"] ?? tokens?["accessToken"]) != nil
+                || nonEmptyString(tokens?["refresh_token"] ?? tokens?["refreshToken"]) != nil
+                || nonEmptyString(json["access_token"] ?? json["accessToken"]) != nil
+                || nonEmptyString(json["refresh_token"] ?? json["refreshToken"]) != nil
+            guard hasToken else {
+                throw ProviderError("missing_token", "\(credential.providerId) auth file is missing OAuth tokens.")
+            }
+            let email = nonEmptyString(json["email"]) ?? nonEmptyString(credential.accountLabel)
+            let accountId = nonEmptyString(json["account_id"] ?? json["accountId"] ?? json["project_id"] ?? json["projectId"])
+            var usage = ProviderUsage(
+                provider: credential.providerId,
+                label: credential.providerId.capitalized,
+                accountId: accountId
+            )
+            usage.accountEmail = email
+            usage.fetchedAt = ""
+            usage.extra["snapshotState"] = AnyCodable("pending")
+            return usage
+        }
+    }
+
     // MARK: - Import Persistence
+
+    private static func stageDeferredAuthFileIfNeeded(
+        for candidate: ProviderAuthCandidate
+    ) throws -> (directoryURL: URL, fileURL: URL)? {
+        guard candidate.providerId == "antigravity",
+              candidate.sourceIdentifier.hasPrefix("antigravity-ide:"),
+              candidate.sourcePath?.nilIfBlank == nil else {
+            return nil
+        }
+        guard candidate.capturesWorkspaceIdentity,
+              let expectedWorkspace = normalizedAntigravityWorkspaceId(candidate.workspaceId) else {
+            throw ProviderError(
+                "candidate_changed",
+                "The active Antigravity workspace could not be verified before import. Refresh and select the workspace again."
+            )
+        }
+        return try stageAntigravityIDECandidate(
+            expectedSourceIdentifier: candidate.sourceIdentifier,
+            expectedWorkspaceId: expectedWorkspace
+        )
+    }
 
     private static func copyImportedAuthFile(
         providerId: String,
@@ -373,22 +499,23 @@ enum ProviderAuthManager {
         let sourceURL = URL(fileURLWithPath: sourcePath)
         let directory = try managedImportDirectory(for: providerId)
         let stem = sanitizedFilenameStem(suggestedName)
-        let filename = "\(stem)-\(DateFormat.string(from: Date(), format: "yyyyMMdd-HHmmss")).json"
+        let filename = "\(stem)-\(DateFormat.string(from: Date(), format: "yyyyMMdd-HHmmss"))-\(UUID().uuidString).json"
         let destinationURL = directory.appendingPathComponent(filename)
 
         let data: Data
-        let normalizedProviderID = CLIProxyCredentialAdapter.normalizedProviderID(providerId)
+        let normalizedProviderID = providerId.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if providerId == "droid",
            let normalizedData = DroidProvider.managedSessionData(from: sourcePath) {
             data = normalizedData
         } else if normalizedProviderID == "gemini" {
-            data = try CLIProxyGeminiCredentialBridge.makeNativePayload(
+            data = try GeminiCredentialBridge.makeNativePayload(
                 from: Data(contentsOf: sourceURL, options: .mappedIfSafe)
             )
         } else {
             data = try Data(contentsOf: sourceURL)
         }
         try data.write(to: destinationURL, options: .atomic)
+        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: destinationURL.path)
         return destinationURL.path
     }
 

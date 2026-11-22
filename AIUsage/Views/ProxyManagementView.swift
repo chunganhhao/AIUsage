@@ -45,15 +45,9 @@ struct ProxyManagementView: View {
         viewModel.configurations.filter { family.contains($0.nodeType) }
     }
 
-    /// Codex 订阅账号（OAuth，~/.codex/auth.json）。仅 Codex 家族用于统一切换器的「订阅账号」区。
-    private var codexSubscriptionEntries: [ProviderAccountEntry] {
-        guard family.isCodex else { return [] }
-        return appState.providerAccountGroups.first { $0.providerId == "codex" }?.accounts ?? []
-    }
-
-    /// 是否有任何可展示内容：API 节点，或（Codex）订阅账号。决定显示空态还是列表。
+    /// 是否有任何可展示内容：Codex 代理页常驻展示通用配置与全局统一代理；Claude 家族按节点列表决定空态。
     private var hasAnyContent: Bool {
-        !displayConfigs.isEmpty || !codexSubscriptionEntries.isEmpty
+        !displayConfigs.isEmpty || family.isCodex
     }
 
     /// 当前家族的激活节点 id（Claude 走 activatedConfigId，Codex 走 activatedCodexConfigId）。
@@ -84,6 +78,11 @@ struct ProxyManagementView: View {
     }
 
     var body: some View {
+        bodyContent
+            .modelSyncFlashOverlay()
+    }
+
+    private var bodyContent: some View {
         VStack(spacing: 0) {
             // Codex 专属：系统代理会拦截 codex 发往本地的请求导致 502，开启时顶部提示+一键修复。
             if family.isCodex {
@@ -102,11 +101,6 @@ struct ProxyManagementView: View {
                             CodexGlobalConfigSection()
                             // 全局统一代理：固定入口 + 热切换激活节点（启用时接管 config.toml）。
                             CodexGlobalProxySection()
-                            // 统一切换器（订阅账号 + API 节点，单一互斥激活）。
-                            if !codexSubscriptionEntries.isEmpty {
-                                CodexSubscriptionSection(entries: codexSubscriptionEntries)
-                            }
-                            // 订阅制不按 token 计费 → 不再设订阅定价，订阅用量仅在统计页按 token 呈现。
                         } else if showsClaudeProductConfiguration {
                             // 通用配置仅作用于 Claude 的 ~/.claude/settings.json。
                             GlobalConfigSection()
@@ -115,6 +109,9 @@ struct ProxyManagementView: View {
                         }
                         if !displayConfigs.isEmpty {
                             configurationsList
+                        } else if family.isCodex {
+                            emptyState
+                                .padding(.vertical, 24)
                         }
                     }
                     .padding(20)

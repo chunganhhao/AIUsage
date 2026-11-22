@@ -8,7 +8,7 @@
 
 <p align="center">
   Track quotas, costs, and accounts across 10+ AI providers.<br>
-  Four native coding proxies, plus a managed CLIProxyAPI gateway that shares one subscription account pool across apps and API clients.
+  Native coding proxies for Claude Code / Desktop / Science, Codex CLI, and OpenCode, plus built-in Token Saver (RTK, Caveman &amp; Ponytail).
 </p>
 
 <p align="center">
@@ -48,7 +48,6 @@
   </tr>
   <tr>
     <td width="132" align="center">
-      <a href="https://api-models.com/sign-up?aff=mfLW"><img src="docs/images/api-models-logo-light.png" alt="API Models" width="88"></a><br>
       <strong>API Models</strong>
     </td>
     <td>
@@ -84,18 +83,12 @@
 </table>
 </details>
 
-<p align="center">
-  <img src="docs/images/dashboard-overview_en.png" alt="AIUsage dashboard" width="100%">
-</p>
-
 ---
 
 ## Table of Contents
 
 - [Features](#features)
-- [Preview](#preview)
 - [Install](#install)
-- [CPA Gateway](#cpa-gateway)
 - [Proxies](#proxies)
 - [Session Center](#session-center)
 - [Call Analytics](#call-analytics)
@@ -114,7 +107,7 @@
 | **Codex Proxy** | Point Codex CLI at any OpenAI-compatible upstream; unified switcher across subscription accounts and API nodes, surgical `config.toml` merge |
 | **OpenCode Proxy** | Switch OpenCode across upstreams via a managed `opencode.json` block — OpenAI-compatible, Anthropic and Responses protocols, per-node usage attribution, per-model pricing and optional request logging |
 | **Claude Science Proxy** | Launch local Claude Science without a Claude subscription and route its inference to any third-party model; local virtual login and an isolated sandbox, with optional adoption so the double-clicked desktop app is login-free too — never touching your real credentials |
-| **CPA Gateway** | Run the official CLIProxyAPI as a managed local gateway: one OAuth account pool, live model discovery, multi-protocol APIs, optional LAN access, and one-click connections to Codex, Claude Code / Science, and OpenCode |
+| **Token Saver** | Coding-only RTK CLI output wrapper, Caveman concise replies, and Ponytail minimal-code rules across Claude Code, Codex, and Antigravity |
 | **Global Proxy** | One fixed local endpoint per agent — hot-swap the active upstream node with zero CLI restart, per-node cost attribution, and automatic cross-track port arbitration |
 | **Unified API Providers** | Configure one upstream (Base URL, format, key, model library/pricing) once and distribute it to Codex / Claude / OpenCode at once; linked nodes inherit from the master and sync on change, with per-field local overrides |
 | **Session Center** | Browse Claude Code, Codex & OpenCode history in one place — search titles, prompts and (optionally) full replies and tool calls, see which sessions are running right now, read full conversations, resume in your terminal with one click; read-only, nothing uploaded |
@@ -122,85 +115,17 @@
 | **Menu Bar** | Multi-account status bar icons, quota/cost metrics, per-proxy node switchers, quick-glance popover, colored progress bars |
 | **Credential Vault** | macOS Keychain storage for all managed credentials |
 
-## Preview
-
-<table>
-  <tr>
-    <td width="50%"><img src="docs/images/dashboard-overview_en.png" alt="Dashboard"></td>
-    <td width="50%"><img src="docs/images/provider-monitoring_en.png" alt="Provider monitoring"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Dashboard</strong></td>
-    <td align="center"><strong>Provider & Multi-account Monitoring</strong></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/CPA_en.png" alt="CPA Gateway overview with managed runtime, account pool, connected apps, and live models"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><strong>CPA Gateway · Managed Runtime, Account Pool &amp; Live Models</strong></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/Claude-Code_en.png" alt="Claude Code proxy and node management"></td>
-    <td width="50%"><img src="docs/images/Claude-Desktop_en.png" alt="Claude Desktop third-party model gateway"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Claude · Code Proxy &amp; Nodes</strong></td>
-    <td align="center"><strong>Claude · Desktop Gateway</strong></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/Claude-Science_en.png" alt="Claude Science research workspace"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><strong>Claude · Science Research Workspace</strong></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/Codex-Proxy-stats_en.png" alt="Codex proxy"></td>
-    <td width="50%"><img src="docs/images/Opencode-Proxy-stats_en.png" alt="OpenCode proxy"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Codex Proxy · Nodes &amp; Subscriptions</strong></td>
-    <td align="center"><strong>OpenCode Proxy · Nodes &amp; Stats</strong></td>
-  </tr>
-  <tr>
-    <td width="50%"><img src="docs/images/proxy-stats_en.png" alt="Usage stats"></td>
-    <td width="50%"><img src="docs/images/menu_bar_en.png" alt="Menu bar"></td>
-  </tr>
-  <tr>
-    <td align="center"><strong>Usage Stats (Claude, Codex &amp; OpenCode)</strong></td>
-    <td align="center"><strong>Menu Bar</strong></td>
-  </tr>
-  <tr>
-    <td colspan="2"><img src="docs/images/Call_analytics_en.png" alt="Call Analytics"></td>
-  </tr>
-  <tr>
-    <td colspan="2" align="center"><strong>Call Analytics · MCP / Skill / Tool Usage</strong></td>
-  </tr>
-</table>
-
 ## Install
 
 Download `.dmg` or `.zip` from the [Releases](https://github.com/sylearn/AIUsage/releases) page.
 
-Universal Binary — runs natively on both Apple Silicon and Intel Macs (macOS 14+).
+Universal Binary — runs natively on both Apple Silicon and Intel Macs (macOS 14+; native local HTTPS / Claude Desktop HTTPS gateway requires macOS 15+ for memory-only TLS identity loading without default Keychain import).
 
-## CPA Gateway
-
-CPA Gateway turns subscription accounts into one managed local API surface. Powered by the official [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) release. AIUsage downloads, verifies, starts, updates, and can roll back CLIProxyAPI independently, so a CPA update does not require a new AIUsage release.
-
-| Capability | What it does |
-| --- | --- |
-| **Unified account pool** | Add CPA-native OAuth accounts, install official provider plugins, configure compatible API-key upstreams, copy supported AIUsage accounts (Codex, Antigravity) into CPA, or migrate auth files with a recognized, deduplicated batch import |
-| **Five managed surfaces** | Connect Codex, OpenCode, Claude Code, Claude Desktop, and Claude Science through AIUsage's existing proxy tracks without replacing their native capabilities |
-| **Native client APIs** | Copy complete OpenAI Responses / Chat, Anthropic Messages, and Gemini endpoints from setup sheets, with legacy and advanced paths in the supported-route list |
-| **Unified model catalog** | Collapse known CPA protocol aliases into one logical model, show recognized vendor logos, and expose the exact model ID required by each OpenAI, Anthropic, or Gemini client in model details |
-| **Independent updates** | Install, verify, dry-run, promote, and roll back official CPA builds inside AIUsage while preserving runtime data and configuration |
-| **Safe network boundary** | Loopback-only by default; LAN access is explicit, keeps remote management disabled, separates the hidden management key, and makes AIUsage call management only through loopback |
-
-**Quick start:** Open AIUsage → CPA Gateway → install and start CPA → add an account → connect an AIUsage app or copy an endpoint for another client. See the [CPA Gateway architecture](docs/CLIPROXYAPI_INTEGRATION_DESIGN.md) for lifecycle, synchronization, routing, and security details.
+> **Upgrade note — managed CPA is paused for account safety.** AIUsage will not start or adopt the managed CLIProxyAPI sidecar, even for API-key-only use, until the sidecar can reject subscription credentials during live reload. Saved CPA credentials and settings are preserved. To verify an old managed listener stopped, use **Verify CPA Stopped** in Gateway; AIUsage does not stop a listener owned by another running instance or erase previously published client routes. Stop the old owner and explicitly select a separate route in those clients before using them. Native Codex monitoring and separate official API-key routes do not depend on CPA.
 
 ## Proxies
 
-AIUsage provides native proxy tracks for **Claude**, **Codex (Codex CLI)**, and **OpenCode**. The Claude hub keeps one node pool across Code, Desktop, and Science while preserving the different lifecycle and security boundary of each surface. CPA Gateway can be selected as a managed upstream without replacing any native proxy capability.
+AIUsage provides native proxy tracks for **Claude**, **Codex (Codex CLI)**, and **OpenCode**. The Claude hub keeps one node pool across Code, Desktop, and Science while preserving the different lifecycle and security boundary of each surface.
 
 ### Claude Code Proxy
 
@@ -215,7 +140,7 @@ Use Claude Code CLI with any OpenAI-compatible model, or transparently log Anthr
 
 ### Claude Desktop Gateway
 
-Connect any existing Claude node—including third-party and CPA-backed models—to Claude Desktop's official 3P Gateway without entering the upstream endpoint, model, or key again.
+Connect any existing Claude node—including third-party models—to Claude Desktop's official 3P Gateway without entering the upstream endpoint, model, or key again.
 
 | Capability | What it does |
 |------------|-------------|
@@ -330,9 +255,7 @@ See which **MCP servers, skills and tools** you actually use. AIUsage parses the
 
 ## Acknowledgements
 
-CPA Gateway runs the official [`router-for-me/CLIProxyAPI`](https://github.com/router-for-me/CLIProxyAPI) release as an optional, separately updated local sidecar. CLIProxyAPI remains an independent upstream project under its own license; see [Third-Party Notices](THIRD_PARTY_NOTICES.md).
-
-Product inspiration and implementation references include [`CodexBar`](https://github.com/steipete/CodexBar) and [`Quotio`](https://github.com/nguyenphutrong/quotio).
+Product inspiration and implementation references include [`CodexBar`](https://github.com/steipete/CodexBar) and [`Quotio`](https://github.com/nguyenphutrong/quotio). See [Third-Party Notices](THIRD_PARTY_NOTICES.md) for license attributions.
 
 ## Friendly Links
 

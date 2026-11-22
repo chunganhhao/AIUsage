@@ -11,6 +11,11 @@ extension CLIProxyGatewayManager {
     /// Reads the selected files, recognizes them locally, gathers existing CPA
     /// state, and publishes a preview session. Nothing is uploaded yet.
     func prepareAuthImport(from urls: [URL], mode: CLIProxyAuthImportSession.Mode) async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            lastError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            authImportSession = nil
+            return
+        }
         guard !isImportingAuthFiles, let client = managementClient() else { return }
         isImportingAuthFiles = true
         lastError = nil
@@ -101,6 +106,11 @@ extension CLIProxyGatewayManager {
     /// A single refresh of the account pool, model catalog, and distribution
     /// state runs after the whole batch.
     func executeAuthImport() async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            lastError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            authImportSession = nil
+            return
+        }
         guard var session = authImportSession, session.phase == .preview,
               !isImportingAuthFiles, let client = managementClient() else { return }
         isImportingAuthFiles = true
@@ -121,6 +131,11 @@ extension CLIProxyGatewayManager {
 
     /// Retries only items whose upload failed; everything else keeps its outcome.
     func retryFailedAuthImports() async {
+        guard CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild else {
+            lastError = CLIProxyCapabilityMatrix.subscriptionsUnavailableMessage
+            authImportSession = nil
+            return
+        }
         guard var session = authImportSession, session.phase == .completed,
               session.failedCount > 0,
               !isImportingAuthFiles, let client = managementClient() else { return }
@@ -168,6 +183,9 @@ extension CLIProxyGatewayManager {
             guard let inspection = item.inspection else {
                 return .uploadFailed(message: L("The recognized payload is unavailable.", "识别结果不可用。"))
             }
+            if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(inspection.providerType) {
+                return .blocked(reason: CLIProxyAuthImportInspectionFailure.disallowedProvider(type: inspection.providerType).message)
+            }
             do {
                 try await client.uploadAuthFile(data: inspection.payload, name: existingName)
                 return .replacedExisting(name: existingName)
@@ -177,6 +195,9 @@ extension CLIProxyGatewayManager {
         case .upload(let name, let renamedFrom):
             guard let inspection = item.inspection else {
                 return .uploadFailed(message: L("The recognized payload is unavailable.", "识别结果不可用。"))
+            }
+            if CLIProxyCapabilityMatrix.isDisallowedCPAProvider(inspection.providerType) {
+                return .blocked(reason: CLIProxyAuthImportInspectionFailure.disallowedProvider(type: inspection.providerType).message)
             }
             do {
                 try await client.uploadAuthFile(data: inspection.payload, name: name)

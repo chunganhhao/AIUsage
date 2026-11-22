@@ -45,15 +45,15 @@ extension CLIProxyGatewayManager {
             return .failed(L("The CPA auth file is missing or unreadable.", "CPA 认证文件不存在或无法读取。"))
         }
         let authURL = URL(fileURLWithPath: path)
+        if let sourceData = try? Data(contentsOf: authURL, options: .mappedIfSafe),
+           let planRejection = CLIProxyCapabilityMatrix.codexPlanRejectionReason(fromAuthData: sourceData) {
+            return .failed(planRejection)
+        }
 
         let candidate: ProviderAuthCandidate
         switch providerID {
         case "codex":
             candidate = ProviderAuthManager.makeCodexCandidate(authFileURL: authURL)
-        case "antigravity":
-            candidate = ProviderAuthManager.makeAntigravityCandidate(authFileURL: authURL)
-        case "gemini":
-            candidate = ProviderAuthManager.makeGeminiCandidate(authFileURL: authURL)
         default:
             return .unsupported(providerID: file.gatewayProviderID)
         }
@@ -70,9 +70,15 @@ extension CLIProxyGatewayManager {
         }
 
         do {
-            let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(candidate)
+            let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
+                candidate,
+                localOnly: true,
+                allowLocalMetadataFallback: true
+            )
             try AppState.shared.registerAuthenticatedCredential(credential, usage: usage, note: nil)
-            _ = await ProviderRefreshCoordinator.shared.fetchSingleProvider(providerID)
+            if !ProviderRefreshCoordinator.shouldSkipImmediateProviderRefresh(for: providerID) {
+                _ = await ProviderRefreshCoordinator.shared.fetchSingleProvider(providerID)
+            }
             subscriptionBridgeLog.notice(
                 "Added CPA auth to subscription accounts provider=\(providerID, privacy: .public) label=\(label, privacy: .public)"
             )
@@ -86,6 +92,9 @@ extension CLIProxyGatewayManager {
 
     /// 启动时：把 AuthImports/codex 中尚未出现在订阅列表的账号补回（跳过永久删除）。
     func backfillSubscriptionAccountsFromAuthImportsIfNeeded() async {
+        // Off 模式下启动不进行后台扫描或 OpenAI token/OAuth 校验；仅激活原生身份才允许校验。
+        guard AppSettings.shared.autoRefreshInterval != 0 else { return }
+        guard CodexQuotaPollingPolicy.activeNativeIdentity() != nil else { return }
         let roots = ProviderManagedImportStore.readableImportRoots().map {
             $0.appendingPathComponent("codex", isDirectory: true)
         }
@@ -99,9 +108,21 @@ extension CLIProxyGatewayManager {
             ) else { continue }
 
             for url in files where url.pathExtension.lowercased() == "json" {
+                guard AppSettings.shared.autoRefreshInterval != 0,
+                      let expectedIdentity = CodexQuotaPollingPolicy.activeNativeIdentity(),
+                      let expectedKey = expectedIdentity.nativeKey else {
+                    return
+                }
                 let path = url.standardizedFileURL.path
                 guard seenPaths.insert(path).inserted else { continue }
-                let candidate = ProviderAuthManager.makeCodexCandidate(authFileURL: url)
+                guard let candidateIdentity = CodexQuotaPollingPolicy.verifiedNativeIdentity(atPath: path),
+                      candidateIdentity.nativeKey == expectedKey else {
+                    continue
+                }
+                let candidate = ProviderAuthManager.makeCodexCandidate(
+                    authFileURL: url,
+                    shouldCopyFile: !ProviderManagedImportStore.isWritableManagedImportPath(path)
+                )
                 if subscriptionAlreadyContains(
                     candidate: candidate,
                     providerID: "codex",
@@ -109,8 +130,25 @@ extension CLIProxyGatewayManager {
                 ) {
                     continue
                 }
+                guard CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey == expectedKey else {
+                    continue
+                }
                 do {
-                    let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(candidate)
+                    let (credential, usage) = try await ProviderAuthManager.authenticateCandidate(
+                        candidate,
+                        localOnly: true,
+                        allowLocalMetadataFallback: true
+                    )
+                    let currentActiveKey = CodexQuotaPollingPolicy.activeNativeIdentity()?.nativeKey
+                    let credentialKey = CodexQuotaPollingPolicy.credentialIdentity(for: credential)?.nativeKey
+                    guard currentActiveKey == expectedKey, credentialKey == expectedKey else {
+                        if candidate.shouldCopyFile,
+                           credential.authMethod == .authFile,
+                           credential.credential != candidate.sourcePath {
+                            try? FileManager.default.removeItem(atPath: credential.credential)
+                        }
+                        continue
+                    }
                     try AppState.shared.registerAuthenticatedCredential(credential, usage: usage, note: nil)
                     didAdd = true
                     subscriptionBridgeLog.notice(
@@ -123,20 +161,14 @@ extension CLIProxyGatewayManager {
                 }
             }
         }
-        if didAdd {
-            _ = await ProviderRefreshCoordinator.shared.fetchSingleProvider("codex")
-        }
+        _ = didAdd
     }
 
-    private static let subscriptionImportableProviderIDs: Set<String> = [
-        "codex", "antigravity", "gemini", "gemini-cli"
-    ]
+    private static let subscriptionImportableProviderIDs: Set<String> = ["codex"]
 
     private static func subscriptionProviderID(for gatewayProviderID: String) -> String? {
         switch gatewayProviderID.lowercased() {
         case "codex": return "codex"
-        case "antigravity": return "antigravity"
-        case "gemini", "gemini-cli": return "gemini"
         default: return nil
         }
     }
@@ -192,13 +224,13 @@ extension CLIProxyGatewayManager {
 
         if respectPermanentRemoval {
             if let path, registry.contains(where: {
-                $0.isPermanentlyRemoved && ($0.sourceFilePath?.lowercased() == path)
+                ($0.isPermanentlyRemoved || $0.isHidden) && ($0.sourceFilePath?.lowercased() == path)
             }) {
                 return true
             }
         }
 
-        for account in registry where !account.isHidden && !account.isPermanentlyRemoved {
+        for account in registry where respectPermanentRemoval || (!account.isHidden && !account.isPermanentlyRemoved) {
             if let fingerprint = candidateFingerprint,
                let credID = account.credentialId,
                let cred = credentialByID[credID],
@@ -209,11 +241,12 @@ extension CLIProxyGatewayManager {
                 return true
             }
             if providerID == "antigravity" {
-                if let fileProjectId,
-                   let existingProject = credentialByID[account.credentialId ?? ""]?
-                    .metadata["projectId"]?
+                let storedProject = (credentialByID[account.credentialId ?? ""]?
+                    .metadata["projectId"] ?? account.accountId)?
                     .trimmingCharacters(in: .whitespacesAndNewlines)
-                    .lowercased(),
+                    .lowercased()
+                if let fileProjectId,
+                   let existingProject = storedProject,
                    !existingProject.isEmpty,
                    existingProject == fileProjectId,
                    !candidateEmail.isEmpty,

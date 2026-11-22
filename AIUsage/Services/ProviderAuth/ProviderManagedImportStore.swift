@@ -29,6 +29,10 @@ enum ProviderManagedImportStore {
         return canonicalManagedPath(path) != nil
     }
 
+    static func isWritableManagedImportPath(_ path: String?) -> Bool {
+        writableManagedPath(path) != nil
+    }
+
     static func primaryManagedImportPath(for credential: AccountCredential) -> String? {
         if credential.authMethod == .authFile,
            let credentialPath = canonicalManagedPath(credential.credential) {
@@ -119,9 +123,38 @@ enum ProviderManagedImportStore {
         pruneEmptyDirectories(under: rootDirectory)
     }
 
+    /// Runtime deletion removes only writable managed files owned by the deleted credentials
+    /// that are no longer referenced by remaining vault credentials, sparing in-flight imports.
+    static func cleanupManagedImports(
+        forDeletedCredentials deletedCredentials: [AccountCredential],
+        referencedBy remainingCredentials: [AccountCredential]
+    ) {
+        guard let rootDirectory = try? managedImportsRootDirectory(),
+              FileManager.default.fileExists(atPath: rootDirectory.path) else {
+            return
+        }
+
+        let referencedPaths = Set(remainingCredentials.flatMap { writableManagedImportPaths(for: $0) })
+        let candidatePaths = Set(deletedCredentials.flatMap { writableManagedImportPaths(for: $0) })
+            .subtracting(referencedPaths)
+        guard !candidatePaths.isEmpty else { return }
+
+        for path in candidatePaths {
+            try? FileManager.default.removeItem(atPath: path)
+        }
+
+        pruneEmptyDirectories(under: rootDirectory)
+    }
+
     /// 当前进程应写入的 AuthImports 根目录。
     static func managedImportsRootDirectory() throws -> URL {
         try boundary(create: true).activeRootURL
+    }
+
+    static func stagingRootDirectory() throws -> URL {
+        let importsRoot = try managedImportsRootDirectory()
+        let stagingName = importsRoot.lastPathComponent.replacingOccurrences(of: "AuthImports", with: "Staging")
+        return importsRoot.deletingLastPathComponent().appendingPathComponent(stagingName, isDirectory: true)
     }
 
     /// 读取补回时同时扫正式目录与当前隔离目录（Debug 仍能看到已恢复的历史文件）。

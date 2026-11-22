@@ -86,64 +86,14 @@ final class AntigravityLoginCoordinator: ObservableObject {
 
     func start() {
         cancel()
-
-        let currentSessionID = UUID()
-        sessionID = currentSessionID
-        phase = .launching
         authURL = nil
         callbackURL = nil
-        outputSummary = "Preparing Google sign-in…"
         importedAuthFileURL = nil
         accountEmail = nil
-        didFinish = false
-
-        let fileManager = FileManager.default
-        let sessionDirectory = fileManager.temporaryDirectory
-            .appendingPathComponent("aiusage-antigravity-login-\(currentSessionID.uuidString)", isDirectory: true)
-
-        do {
-            try fileManager.createDirectory(at: sessionDirectory, withIntermediateDirectories: true)
-        } catch {
-            sessionID = nil
-            phase = .failed("Failed to prepare an Antigravity login session: \(SensitiveDataRedactor.redactedMessage(for: error))")
-            return
-        }
-
-        sessionDirectoryURL = sessionDirectory
-
-        guard let oauthConfiguration = oauthConfigurationProvider() else {
-            cleanup(removeArtifacts: true)
-            phase = .failed("AIUsage could not find Antigravity OAuth configuration. Install Antigravity or set AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_ID / AIUSAGE_ANTIGRAVITY_OAUTH_CLIENT_SECRET.")
-            return
-        }
-        self.oauthConfiguration = oauthConfiguration
-
-        do {
-            let listener = try listenerFactory()
-            self.listener = listener
-
-            listener.stateUpdateHandler = { [weak self] state in
-                DispatchQueue.main.async {
-                    guard let self, self.sessionID == currentSessionID else { return }
-                    self.handleListenerState(state, sessionID: currentSessionID)
-                }
-            }
-
-            listener.newConnectionHandler = { [weak self] connection in
-                DispatchQueue.main.async {
-                    guard let self, self.sessionID == currentSessionID else {
-                        connection.cancel()
-                        return
-                    }
-                    self.accept(connection, sessionID: currentSessionID)
-                }
-            }
-
-            listener.start(queue: listenerQueue)
-        } catch {
-            cleanup(removeArtifacts: true)
-            phase = .failed("Failed to start the Antigravity sign-in callback server: \(SensitiveDataRedactor.redactedMessage(for: error))")
-        }
+        didFinish = true
+        phase = .failed(
+            "Direct Antigravity browser OAuth is disabled for policy compliance (Google Antigravity Terms §6). View local snapshots or open the official Antigravity app instead."
+        )
     }
 
     func cancel() {
@@ -735,7 +685,10 @@ final class AntigravityLoginCoordinator: ObservableObject {
                 "openid",
                 "https://www.googleapis.com/auth/cloud-platform",
                 "https://www.googleapis.com/auth/userinfo.email",
-                "https://www.googleapis.com/auth/userinfo.profile"
+                "https://www.googleapis.com/auth/userinfo.profile",
+                "https://www.googleapis.com/auth/cclog",
+                "https://www.googleapis.com/auth/experimentsandconfigs",
+                "https://www.googleapis.com/auth/aicode"
             ].joined(separator: " ")),
             URLQueryItem(name: "state", value: stateToken),
             URLQueryItem(name: "response_type", value: "code"),

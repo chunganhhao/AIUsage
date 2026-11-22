@@ -22,6 +22,7 @@ class NodeProfileStore: ObservableObject {
     @Published var globalConfig: GlobalConfig = .empty
     @Published var codexGlobalConfig: CodexGlobalConfig = .empty
     @Published var commonConfigError: String?
+    private(set) var lastIOError: String?
 
     private let fileManager = FileManager.default
 
@@ -98,6 +99,7 @@ class NodeProfileStore: ObservableObject {
 
     @discardableResult
     func save(_ profile: NodeProfile) -> Bool {
+        lastIOError = nil
         ensureDirectoryExists()
         var p = profile
         // Codex 节点的 settings（Claude settings.json blob）运行时不使用，落盘统一清空保持干净；
@@ -122,19 +124,43 @@ class NodeProfileStore: ObservableObject {
             }
             return true
         } catch {
+            lastIOError = SensitiveDataRedactor.redactedMessage(for: error)
             storeLog.error("Failed to save profile \(profile.metadata.name, privacy: .public): \(String(describing: error), privacy: .public)")
             return false
         }
     }
 
-    func delete(_ id: String) {
+    @discardableResult
+    func delete(_ id: String) -> Bool {
+        lastIOError = nil
         let path = filePath(for: id)
-        try? fileManager.removeItem(atPath: path)
+        if fileManager.fileExists(atPath: path) {
+            do {
+                try fileManager.removeItem(atPath: path)
+            } catch {
+                let nsError = error as NSError
+                let isMissingFile = (nsError.domain == NSCocoaErrorDomain && nsError.code == NSFileNoSuchFileError)
+                    || (nsError.domain == NSPOSIXErrorDomain && nsError.code == Int(ENOENT))
+                if !isMissingFile || fileManager.fileExists(atPath: path) {
+                    lastIOError = SensitiveDataRedactor.redactedMessage(for: error)
+                    storeLog.error("Failed to delete profile \(id, privacy: .public): \(String(describing: error), privacy: .public)")
+                    return false
+                }
+            }
+        }
+        guard !fileManager.fileExists(atPath: path) else {
+            lastIOError = AppSettings.shared.t(
+                "Profile file still exists on disk after deletion.",
+                "删除后节点配置文件仍存在于磁盘上。"
+            )
+            return false
+        }
         profiles.removeAll { $0.id == id }
         if activatedProfileId == id {
             activatedProfileId = nil
             saveActivatedId()
         }
+        return true
     }
 
     func profile(for id: String) -> NodeProfile? {

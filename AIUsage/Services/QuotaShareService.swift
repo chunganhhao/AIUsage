@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import Darwin
+import Network
 import Security
 import QuotaBackend
 
@@ -120,6 +121,7 @@ final class QuotaShareService: ObservableObject {
 
     @Published private(set) var status: Status = .off
     @Published private(set) var hostToken: String = ""
+    @Published private(set) var isEncryptedTransportEnabled = false
 
     private let settings = AppSettings.shared
     private let refreshCoordinator = ProviderRefreshCoordinator.shared
@@ -129,6 +131,7 @@ final class QuotaShareService: ObservableObject {
     /// 每次重建监听器递增；旧监听器迟到的状态回调按代号丢弃，避免覆盖新状态。
     private var generation = 0
     private var cancellables = Set<AnyCancellable>()
+    private var tlsOptionsProvider: () -> NWProtocolTLS.Options? = { nil }
 
     private init() {}
 
@@ -166,6 +169,7 @@ final class QuotaShareService: ObservableObject {
         guard enabled else {
             stopServer()
             snapshotBox.update(nil)
+            isEncryptedTransportEnabled = false
             status = .off
             return
         }
@@ -185,7 +189,9 @@ final class QuotaShareService: ObservableObject {
         generation += 1
         let currentGeneration = generation
         let box = snapshotBox
-        let server = QuotaShareServer(port: port, token: hostToken) { providerIds in
+        let tlsOptions = tlsOptionsProvider()
+        isEncryptedTransportEnabled = (tlsOptions != nil)
+        let server = QuotaShareServer(port: port, token: hostToken, tlsOptions: tlsOptions) { providerIds in
             box.payload(for: providerIds)
         }
         self.server = server
@@ -255,8 +261,12 @@ final class QuotaShareService: ObservableObject {
 
     // MARK: - Addresses
 
-    /// 本机可供其它设备填写的 IPv4 地址：Tailscale（100.64.0.0/10）在前，局域网私有地址在后。
-    static func shareAddresses() -> [ShareAddress] {
+    /// Addresses other devices can reach (plaintext sharing stays loopback-only; CGNAT/LAN IPs are omitted unless TLS is configured).
+    static func shareAddresses(
+        includePrivateLAN: Bool = false,
+        includeUnverifiedCGNAT: Bool = false
+    ) -> [ShareAddress] {
+        guard includePrivateLAN || includeUnverifiedCGNAT else { return [] }
         var head: UnsafeMutablePointer<ifaddrs>?
         guard getifaddrs(&head) == 0, let first = head else { return [] }
         defer { freeifaddrs(head) }
@@ -274,8 +284,12 @@ final class QuotaShareService: ObservableObject {
             let bytes = withUnsafeBytes(of: raw) { Array($0) }
             let kind: ShareAddress.Kind
             switch (bytes[0], bytes[1]) {
-            case (100, 64...127): kind = .tailscale
-            case (10, _), (172, 16...31), (192, 168): kind = .lan
+            case (100, 64...127):
+                guard includeUnverifiedCGNAT else { continue }
+                kind = .tailscale
+            case (10, _), (172, 16...31), (192, 168):
+                guard includePrivateLAN else { continue }
+                kind = .lan
             default: continue
             }
             let ip = bytes.map(String.init).joined(separator: ".")

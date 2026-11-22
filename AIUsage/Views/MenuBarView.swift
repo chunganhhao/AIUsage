@@ -9,7 +9,6 @@ struct MenuBarView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
     @ObservedObject var proxyVM = ProxyViewModel.shared
-    @ObservedObject var openCodeStore = OpenCodeNodeStore.shared
     // 三条全局代理轨道各自独立观察：菜单栏切换器、Codex 账号行托管态都需要按轨实时反映。
     @ObservedObject var globalCodex = GlobalProxyManager.codex
     @ObservedObject var globalClaude = GlobalProxyManager.claude
@@ -17,8 +16,11 @@ struct MenuBarView: View {
     @ObservedObject private var settings = AppSettings.shared
     @State private var activationMessage: String?
     @State private var activationSuccess = true
+    @State private var feedbackPresenterToken: UUID?
     // 当前展开的轨道面板（自定义内嵌覆盖层，取代原生 Menu 下拉）。nil = 全部收起。
     @State var openPanelTrack: GlobalProxyTrack?
+    @State var pendingRestartPrompt: MenuBarRestartPrompt?
+    @State var isConfirmingRestart = false
 
     var body: some View {
         ZStack(alignment: .top) {
@@ -29,18 +31,42 @@ struct MenuBarView: View {
                 Divider()
                 TokenSaverMenuBarSection(onOpenSettings: openTokenSaverSettings)
                 Divider()
-                menuBarContent
+                quotaSection
                 costTrackingSection
-                MenuBarRecentSessionsSection { openMainWindow(section: .sessions) }
+                if !settings.hiddenSidebarSections.contains(AppSection.sessions.rawValue) {
+                    MenuBarRecentSessionsSection { openMainWindow(section: .sessions) }
+                }
                 Divider()
                 menuBarFooter
             }
             if let track = openPanelTrack, isMenuBarTrackVisible(track) {
                 trackPanelOverlay(track: track)
             }
+            if let prompt = pendingRestartPrompt {
+                restartConfirmationOverlay(prompt: prompt)
+            }
+        }
+        .overlay(alignment: .bottom) {
+            if let message = activationMessage {
+                activationToast(message: message, success: activationSuccess)
+            }
         }
         .frame(width: 420)
         .background(VisualEffectBlur())
+        .onAppear {
+            feedbackPresenterToken = MenuBarActivationFeedback.bindPresenter { message, ok in
+                withAnimation(.easeInOut(duration: 0.3)) {
+                    activationSuccess = ok
+                    activationMessage = message
+                }
+            }
+        }
+        .onDisappear {
+            if let token = feedbackPresenterToken {
+                MenuBarActivationFeedback.unbindPresenter(token)
+                feedbackPresenterToken = nil
+            }
+        }
     }
 
     // 轨道顺序与侧边栏一致：Codex → OpenCode → Claude Code。被侧边栏隐藏的 agent 同步隐藏其切换器。
@@ -189,6 +215,38 @@ struct MenuBarView: View {
 
     // MARK: - Content
 
+    /// 账号额度区（可折叠，状态记住）。收起时只留标题行与「最低剩余」摘要。
+    private var quotaSection: some View {
+        VStack(spacing: 0) {
+            if !quotaProviderGroups.isEmpty {
+                MenuBarCollapsibleHeader(
+                    title: L("Account Quota", "账号额度", "Hạn mức tài khoản"),
+                    isExpanded: $settings.menuBarUsageExpanded,
+                    collapsedSummary: quotaCollapsedSummary?.text,
+                    summaryColor: quotaCollapsedSummary?.color ?? .secondary
+                )
+            }
+            if settings.menuBarUsageExpanded || quotaProviderGroups.isEmpty {
+                menuBarContent
+            }
+        }
+    }
+
+    /// 收起时的摘要：可见服务里剩余额度最低的一项。
+    private var quotaCollapsedSummary: (text: String, color: Color)? {
+        let hidden = settings.hiddenSidebarSections
+        let lowest = refreshCoordinator.providers
+            .filter {
+                !AgentVisibility.isProviderHidden($0.baseProviderId, hidden: hidden)
+                    && AgentVisibility.isQuotaAccount(providerId: $0.baseProviderId, category: $0.category)
+            }
+            .compactMap(\.remainingPercent)
+            .min()
+        guard let lowest else { return nil }
+        let percent = Int(lowest.rounded())
+        return (L("Lowest \(percent)% left", "最低剩余 \(percent)%", "Thấp nhất còn \(percent)%"), MenuBarHelpers.quotaColor(lowest))
+    }
+
     private var menuBarContent: some View {
         Group {
             if refreshCoordinator.isLoading && refreshCoordinator.providers.isEmpty {
@@ -218,7 +276,10 @@ struct MenuBarView: View {
                                 codexProxyActive: proxyVM.activatedId(isCodex: true) != nil,
                                 codexGlobalProxyManaged: globalCodex.isEnabled,
                                 activationMessage: $activationMessage,
-                                activationSuccess: $activationSuccess
+                                activationSuccess: $activationSuccess,
+                                onRequestRestartConfirmation: { entry in
+                                    presentRestartConfirmation(for: entry)
+                                }
                             )
                             .environmentObject(appState)
                         }
@@ -227,13 +288,183 @@ struct MenuBarView: View {
                     .padding(.vertical, 8)
                 }
                 .frame(maxHeight: 600)
-                .overlay(alignment: .bottom) {
-                    if let message = activationMessage {
-                        activationToast(message: message, success: activationSuccess)
-                    }
+            }
+        }
+    }
+
+    func presentRestartConfirmation(for entry: ProviderAccountEntry) {
+        guard entry.providerId == "codex" else { return }
+        withAnimation(.spring(response: 0.28, dampingFraction: 0.85)) {
+            openPanelTrack = nil
+            pendingRestartPrompt = MenuBarRestartPrompt(entry: entry)
+        }
+    }
+
+    private func confirmAndRestartApp(for prompt: MenuBarRestartPrompt) {
+        guard !isConfirmingRestart else { return }
+        isConfirmingRestart = true
+        Task { @MainActor in
+            let ok: Bool
+            var restartFailure: String?
+            do {
+                try await ProviderActivationManager.shared.restartCodexApp(fallbackEntry: prompt.entry)
+                ok = true
+            } catch {
+                ok = false
+                restartFailure = error.localizedDescription
+            }
+            isConfirmingRestart = false
+            withAnimation(.easeInOut(duration: 0.2)) {
+                pendingRestartPrompt = nil
+                activationSuccess = ok
+                if ok {
+                    activationMessage = L(
+                        "\(prompt.appDisplayName) restarted with \(prompt.accountLabel)",
+                        "\(prompt.appDisplayName) 已使用 \(prompt.accountLabel) 重启"
+                    )
+                } else {
+                    activationMessage = restartFailure ?? L(
+                        "Could not restart \(prompt.appDisplayName) automatically. Please reopen it manually.",
+                        "无法自动重启 \(prompt.appDisplayName)，请手动重新打开。"
+                    )
                 }
             }
         }
+    }
+
+    @ViewBuilder
+    private func restartConfirmationOverlay(prompt: MenuBarRestartPrompt) -> some View {
+        let accent = MenuBarColors.accent(for: prompt.providerId)
+        ZStack {
+            Rectangle()
+                .fill(Color.black.opacity(0.32))
+                .contentShape(Rectangle())
+                .onTapGesture {
+                    guard !isConfirmingRestart else { return }
+                    withAnimation(.easeOut(duration: 0.15)) {
+                        pendingRestartPrompt = nil
+                    }
+                }
+
+            VStack(alignment: .leading, spacing: 14) {
+                HStack(spacing: 10) {
+                    ZStack(alignment: .bottomTrailing) {
+                        ProviderIconView(prompt.providerId, size: 28)
+                            .frame(width: 38, height: 38)
+                            .background(
+                                RoundedRectangle(cornerRadius: 10, style: .continuous)
+                                    .fill(accent.opacity(0.14))
+                            )
+                        Image(systemName: "arrow.clockwise.circle.fill")
+                            .font(.system(size: 13, weight: .bold))
+                            .foregroundStyle(accent)
+                            .background(Circle().fill(Color(nsColor: .windowBackgroundColor)))
+                            .offset(x: 3, y: 3)
+                    }
+
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(
+                            prompt.providerId == "codex"
+                                ? L("Restart Codex to Switch Account?", "需要重启 Codex 以切换账号")
+                                : L("Restart Antigravity to Switch Account?", "需要重启 Antigravity 以切换账号")
+                        )
+                        .font(.system(size: 13, weight: .bold))
+                        .foregroundStyle(.primary)
+
+                        HStack(spacing: 5) {
+                            Circle()
+                                .fill(.green)
+                                .frame(width: 6, height: 6)
+                            Text(prompt.accountLabel)
+                                .font(.system(size: 11, weight: .semibold))
+                                .foregroundStyle(.secondary)
+                                .lineLimit(1)
+                        }
+                    }
+
+                    Spacer(minLength: 0)
+                }
+
+                Text(
+                    prompt.providerId == "codex"
+                        ? L(
+                            "Credentials for \"\(prompt.accountLabel)\" are now active. Please confirm to restart Codex so the selected account takes effect immediately.",
+                            "账号“\(prompt.accountLabel)”已设为当前激活。请确认重启 Codex 客户端，使所选账号立即生效。"
+                        )
+                        : L(
+                            "Credentials for \"\(prompt.accountLabel)\" are now active. Please confirm to restart Antigravity.app so the selected account takes effect immediately.",
+                            "账号“\(prompt.accountLabel)”已设为当前激活。请确认重启 Antigravity.app，使所选账号立即生效。"
+                        )
+                )
+                .font(.system(size: 11.5))
+                .foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+
+                HStack(spacing: 8) {
+                    Button {
+                        withAnimation(.easeOut(duration: 0.15)) {
+                            pendingRestartPrompt = nil
+                        }
+                    } label: {
+                        Text(L("Later", "稍后手动重启"))
+                            .font(.system(size: 11.5, weight: .medium))
+                            .foregroundStyle(.primary)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 7)
+                            .background(
+                                RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                    .fill(Color.primary.opacity(0.08))
+                            )
+                            .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isConfirmingRestart)
+
+                    Button {
+                        confirmAndRestartApp(for: prompt)
+                    } label: {
+                        HStack(spacing: 5) {
+                            if isConfirmingRestart {
+                                SmallProgressView().frame(width: 12, height: 12)
+                            } else {
+                                Image(systemName: "arrow.clockwise.circle.fill")
+                                    .font(.system(size: 12, weight: .semibold))
+                            }
+                            Text(
+                                isConfirmingRestart
+                                    ? L("Restarting…", "正在重启…")
+                                    : (prompt.providerId == "codex"
+                                        ? L("Restart Codex", "确认并重启 Codex")
+                                        : L("Restart Antigravity", "确认并重启 AGY"))
+                            )
+                            .font(.system(size: 11.5, weight: .semibold))
+                            .lineLimit(1)
+                        }
+                        .foregroundStyle(.white)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 7)
+                        .background(
+                            RoundedRectangle(cornerRadius: 8, style: .continuous)
+                                .fill(accent)
+                        )
+                        .contentShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isConfirmingRestart)
+                }
+            }
+            .padding(16)
+            .frame(width: 344)
+            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+            .overlay(
+                RoundedRectangle(cornerRadius: 16, style: .continuous)
+                    .strokeBorder(accent.opacity(0.35), lineWidth: 1)
+            )
+            .shadow(color: .black.opacity(0.32), radius: 20, y: 8)
+            .transition(.scale(scale: 0.95).combined(with: .opacity))
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .zIndex(20)
     }
 
     private func activationToast(message: String, success: Bool) -> some View {
@@ -252,9 +483,11 @@ struct MenuBarView: View {
         .shadow(color: .black.opacity(0.1), radius: 8, y: 2)
         .padding(.bottom, 8)
         .transition(.move(edge: .bottom).combined(with: .opacity))
-        .onAppear {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
-                withAnimation(.easeOut(duration: 0.3)) {
+        .task(id: message) {
+            try? await Task.sleep(for: .seconds(2.5))
+            guard !Task.isCancelled else { return }
+            withAnimation(.easeOut(duration: 0.3)) {
+                if activationMessage == message {
                     activationMessage = nil
                 }
             }
@@ -306,8 +539,8 @@ struct MenuBarView: View {
     }
 
     private func openTokenSaverSettings() {
-        CLIProxyGatewayNavigation.shared.showSettings(destination: .tokenSaver)
-        openMainWindow(section: .subscriptionGateway)
+        appState.requestedSettingsCategory = .tokenSaver
+        openMainWindow(section: .settings)
     }
 
     private func openMainWindow(section: AppSection) {
@@ -483,6 +716,27 @@ private enum OverallHealthStatus {
         case .critical: return .red
         case .idle: return .gray
         }
+    }
+}
+
+struct MenuBarRestartPrompt: Identifiable, Equatable {
+    let entry: ProviderAccountEntry
+
+    var id: String { "\(entry.providerId):\(entry.id)" }
+    var providerId: String { entry.providerId }
+
+    static func == (lhs: MenuBarRestartPrompt, rhs: MenuBarRestartPrompt) -> Bool {
+        lhs.id == rhs.id && lhs.accountLabel == rhs.accountLabel
+    }
+
+    var accountLabel: String {
+        if let email = entry.accountEmail?.nilIfBlank { return email }
+        if let name = entry.accountDisplayName?.nilIfBlank { return name }
+        return entry.accountPrimaryLabel
+    }
+
+    var appDisplayName: String {
+        providerId == "codex" ? "Codex" : "Antigravity.app"
     }
 }
 

@@ -9,27 +9,46 @@ import Foundation
 struct CallAnalyticsInventory {
     let homeDirectory: String
     var environment: [String: String] = ProcessInfo.processInfo.environment
+    var onPathTouched: ((CallSourceKind, String) -> Void)? = nil
 
     /// 「可清理」技能目录：仅用户自建 / 自行安装、能单独删除的技能目录，按来源归属。
     /// 内置（.cursor/skills-cursor）与插件缓存（plugins/cache）里的技能由工具 / 插件托管，
     /// 用户无法单独清理（只能卸载整个插件），故不计入零调用清单——
     /// 它们的调用仍由各事件源正常统计，不影响排行与「已用」判定。
     /// 目录名即 skill 名（与日志中 input.skill / state.input.name / SKILL.md 路径对应）。
-    private var skillRoots: [(source: CallSourceKind, path: String)] {
-        ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/skills") } + [
-            (.codex, "\(homeDirectory)/.codex/skills"),
-            (.opencode, "\(homeDirectory)/.config/opencode/skills")
-        ]
+    private func skillRoots(excludedSources: Set<CallSourceKind>) -> [(source: CallSourceKind, path: String)] {
+        var roots: [(source: CallSourceKind, path: String)] = []
+        if !excludedSources.contains(.claude) {
+            roots.append(contentsOf: ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/skills") })
+        }
+        if !excludedSources.contains(.codex) {
+            roots.append((.codex, "\(homeDirectory)/.codex/skills"))
+        }
+        if !excludedSources.contains(.opencode) {
+            roots.append((.opencode, "\(homeDirectory)/.config/opencode/skills"))
+        }
+        if !excludedSources.contains(.antigravity) {
+            roots.append((.antigravity, "\(homeDirectory)/.gemini/antigravity/skills"))
+        }
+        return roots
     }
 
     /// MCP 配置文件，按来源归属。Claude 用 JSON（含项目级 projects.*.mcpServers），
     /// Codex 用 TOML（[mcp_servers.NAME]）。OpenCode 由统一 resolver 单独处理，
     /// 按 OpenCode 的全局/附加层合并后扫描。
-    private var mcpConfigFiles: [(source: CallSourceKind, path: String, format: MCPConfigFormat)] {
-        ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/.claude.json", .json) } + [
-            (.claude, "\(homeDirectory)/.claude.json", .json),
-            (.codex, "\(homeDirectory)/.codex/config.toml", .codexTOML)
-        ]
+    private func mcpConfigFiles(excludedSources: Set<CallSourceKind>) -> [(source: CallSourceKind, path: String, format: MCPConfigFormat)] {
+        var files: [(source: CallSourceKind, path: String, format: MCPConfigFormat)] = []
+        if !excludedSources.contains(.claude) {
+            files.append(contentsOf: ClaudeLogDirectoryResolver(homeDirectory: homeDirectory, environment: environment).configDirectories.map { (.claude, "\($0)/.claude.json", .json) })
+            files.append((.claude, "\(homeDirectory)/.claude.json", .json))
+        }
+        if !excludedSources.contains(.codex) {
+            files.append((.codex, "\(homeDirectory)/.codex/config.toml", .codexTOML))
+        }
+        if !excludedSources.contains(.antigravity) {
+            files.append((.antigravity, "\(homeDirectory)/.gemini/antigravity/mcp_config.json", .json))
+        }
+        return files
     }
 
     private enum MCPConfigFormat {
@@ -40,9 +59,10 @@ struct CallAnalyticsInventory {
     private static let skillMarker = "SKILL.md"
     private static let skipDirectoryNames: Set<String> = ["node_modules", ".git", "Pods", "dist", "build"]
 
-    func installedSkills() -> [InstalledItem] {
+    func installedSkills(excludedSources: Set<CallSourceKind> = []) -> [InstalledItem] {
         var items = Set<InstalledItem>()
-        for root in skillRoots {
+        for root in skillRoots(excludedSources: excludedSources) {
+            onPathTouched?(root.source, root.path)
             var names = Set<String>()
             collectSkillNames(root: root.path, into: &names)
             for name in names { items.insert(InstalledItem(source: root.source, name: name)) }
@@ -50,9 +70,10 @@ struct CallAnalyticsInventory {
         return items.sorted { ($0.name, $0.source.rawValue) < ($1.name, $1.source.rawValue) }
     }
 
-    func installedMCPServers() -> [InstalledItem] {
+    func installedMCPServers(excludedSources: Set<CallSourceKind> = []) -> [InstalledItem] {
         var items = Set<InstalledItem>()
-        for config in mcpConfigFiles {
+        for config in mcpConfigFiles(excludedSources: excludedSources) {
+            onPathTouched?(config.source, config.path)
             var names = Set<String>()
             switch config.format {
             case .json: collectJSONMCPNames(path: config.path, into: &names)
@@ -61,13 +82,16 @@ struct CallAnalyticsInventory {
             for name in names { items.insert(InstalledItem(source: config.source, name: name)) }
         }
 
-        let resolver = OpenCodeConfigResolver(homeDirectory: homeDirectory, environment: environment)
-        var openCodeNames = Set<String>()
-        if let object = resolver.readEffectiveObject() {
-            addServerKeys(from: object, into: &openCodeNames)
-        }
-        for name in openCodeNames {
-            items.insert(InstalledItem(source: .opencode, name: name))
+        if !excludedSources.contains(.opencode) {
+            onPathTouched?(.opencode, "\(homeDirectory)/.config/opencode")
+            let resolver = OpenCodeConfigResolver(homeDirectory: homeDirectory, environment: environment)
+            var openCodeNames = Set<String>()
+            if let object = resolver.readEffectiveObject() {
+                addServerKeys(from: object, into: &openCodeNames)
+            }
+            for name in openCodeNames {
+                items.insert(InstalledItem(source: .opencode, name: name))
+            }
         }
         return items.sorted { ($0.name, $0.source.rawValue) < ($1.name, $1.source.rawValue) }
     }
@@ -75,7 +99,7 @@ struct CallAnalyticsInventory {
     // MARK: - Skills
 
     private func collectSkillNames(root: String, into names: inout Set<String>) {
-        let rootURL = URL(fileURLWithPath: root, isDirectory: true)
+        let rootURL = URL(fileURLWithPath: root, isDirectory: true).resolvingSymlinksInPath()
         guard FileManager.default.fileExists(atPath: root),
               let enumerator = FileManager.default.enumerator(
                 at: rootURL,
@@ -83,6 +107,13 @@ struct CallAnalyticsInventory {
                 options: [.skipsHiddenFiles, .skipsPackageDescendants]
               ) else { return }
 
+        // Enumerators do not descend into linked skill directories.
+        for child in (try? FileManager.default.contentsOfDirectory(at: rootURL, includingPropertiesForKeys: [.isSymbolicLinkKey], options: [.skipsHiddenFiles])) ?? [] {
+            if (try? child.resourceValues(forKeys: [.isSymbolicLinkKey]).isSymbolicLink) == true,
+               FileManager.default.fileExists(atPath: child.appendingPathComponent(Self.skillMarker).path) {
+                names.insert(child.lastPathComponent)
+            }
+        }
         for case let item as URL in enumerator {
             let component = item.lastPathComponent
             if Self.skipDirectoryNames.contains(component) {

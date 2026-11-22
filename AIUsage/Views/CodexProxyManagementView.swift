@@ -1,5 +1,7 @@
 import SwiftUI
 import Combine
+import AppKit
+import QuotaBackend
 
 // MARK: - Codex Subscription Order Store
 // 持久化 Codex 订阅账号的自定义展示顺序（账号 id 列表，存 UserDefaults）。
@@ -59,7 +61,15 @@ struct CodexProxyManagementView: View {
 
 struct CodexSubscriptionSection: View {
     let entries: [ProviderAccountEntry]
+    var isAppInstalled: Bool = false
+    var isRestarting: Bool = false
+    var onAddAccount: (() -> Void)? = nil
+    var onRestartApp: (() -> Void)? = nil
+    var onAccountSwitched: (() -> Void)? = nil
+    var onShowStatus: ((String, Bool) -> Void)? = nil
+
     @EnvironmentObject private var appState: AppState
+    @EnvironmentObject private var refreshCoordinator: ProviderRefreshCoordinator
     @ObservedObject private var activation = ProviderActivationManager.shared
     @ObservedObject private var proxyVM = ProxyViewModel.shared
     @ObservedObject private var globalProxy = GlobalProxyManager.shared
@@ -71,11 +81,12 @@ struct CodexSubscriptionSection: View {
     @State private var dragTranslation: CGFloat = 0
     @State private var rowHeights: [String: CGFloat] = [:]
     @State private var editingNoteEntry: ProviderAccountEntry?
+    @State private var pendingDeleteEntry: ProviderAccountEntry?
 
     private let rowSpacing: CGFloat = 8
     private let fallbackRowHeight: CGFloat = 64
     // 与节点列表的 codexProxy 品牌色一致。
-    private static let codexBrand = Color(red: 0.40, green: 0.52, blue: 0.92)
+    static let codexBrand = Color(red: 0.40, green: 0.52, blue: 0.92)
 
     /// 代理占用 config.toml（每节点代理 或 全局统一代理）时即为生效身份，订阅一律视为未激活
     /// （与菜单栏一致，杜绝双高亮）。全局代理启用时还会禁用激活开关（单独激活被互斥拦截）。
@@ -92,28 +103,40 @@ struct CodexSubscriptionSection: View {
                 ProviderIconView("codex", size: 16)
                 Text(L("Account List", "账号列表"))
                     .font(.headline.weight(.bold))
+                if !ordered.isEmpty {
+                    Text("\(ordered.count)")
+                        .font(.caption2.weight(.bold))
+                        .foregroundStyle(.secondary)
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 2)
+                        .background(Capsule().fill(Color.primary.opacity(0.06)))
+                }
                 Spacer()
                 Text("~/.codex/auth.json")
                     .font(.system(size: 10, design: .monospaced))
                     .foregroundStyle(.secondary)
             }
 
-            LazyVStack(spacing: rowSpacing) {
-                ForEach(Array(ordered.enumerated()), id: \.element.id) { index, entry in
-                    let isDragging = draggingId == entry.id
-                    subscriptionRow(entry)
-                        .background {
-                            if draggingId != nil {
-                                rowHeightReader(for: entry.id)
+            if ordered.isEmpty {
+                emptyAccountList
+            } else {
+                LazyVStack(spacing: rowSpacing) {
+                    ForEach(Array(ordered.enumerated()), id: \.element.id) { index, entry in
+                        let isDragging = draggingId == entry.id
+                        subscriptionRow(entry)
+                            .background {
+                                if draggingId != nil {
+                                    rowHeightReader(for: entry.id)
+                                }
                             }
-                        }
-                        .offset(y: rowOffset(index: index, id: entry.id, srcIdx: srcIdx, target: target))
-                        .scaleEffect(isDragging ? 1.02 : 1, anchor: .center)
-                        .shadow(color: .black.opacity(isDragging ? 0.22 : 0),
-                                radius: isDragging ? 9 : 0, y: isDragging ? 5 : 0)
-                        .zIndex(isDragging ? 1 : 0)
-                        .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.82), value: target)
-                        .animation(.interactiveSpring(response: 0.30, dampingFraction: 0.85), value: draggingId)
+                            .offset(y: rowOffset(index: index, id: entry.id, srcIdx: srcIdx, target: target))
+                            .scaleEffect(isDragging ? 1.02 : 1, anchor: .center)
+                            .shadow(color: .black.opacity(isDragging ? 0.22 : 0),
+                                    radius: isDragging ? 9 : 0, y: isDragging ? 5 : 0)
+                            .zIndex(isDragging ? 1 : 0)
+                            .animation(.interactiveSpring(response: 0.28, dampingFraction: 0.82), value: target)
+                            .animation(.interactiveSpring(response: 0.30, dampingFraction: 0.85), value: draggingId)
+                    }
                 }
             }
         }
@@ -145,6 +168,58 @@ struct CodexSubscriptionSection: View {
             }
             .environmentObject(appState)
         }
+        .alert(
+            L("Remove Account?", "确认移除账号？"),
+            isPresented: Binding(
+                get: { pendingDeleteEntry != nil },
+                set: { if !$0 { pendingDeleteEntry = nil } }
+            ),
+            presenting: pendingDeleteEntry
+        ) { entry in
+            Button(L("Remove", "移除"), role: .destructive) {
+                appState.deleteAccount(entry)
+                pendingDeleteEntry = nil
+            }
+            Button(L("Cancel", "取消"), role: .cancel) {
+                pendingDeleteEntry = nil
+            }
+        } message: { entry in
+            Text(L(
+                "Remove \"\(entry.accountPrimaryLabel)\" from AIUsage? Local Codex sessions will not be deleted.",
+                "从 AIUsage 移除“\(entry.accountPrimaryLabel)”？不会删除本地 Codex 会话记录。"
+            ))
+        }
+    }
+
+    private var emptyAccountList: some View {
+        VStack(spacing: 10) {
+            Image(systemName: "person.crop.circle.badge.plus")
+                .font(.system(size: 28))
+                .foregroundStyle(.secondary)
+            Text(L("No Codex accounts connected yet", "尚未连接 Codex 账号"))
+                .font(.subheadline.weight(.semibold))
+            Text(L(
+                "Add multiple OpenAI Codex accounts here to monitor 5-hour / weekly rate-limit windows and switch ~/.codex/auth.json in 1 click.",
+                "在此添加多个 OpenAI Codex 账号，即可监控 5 小时/每周配额窗口，并一键切换 ~/.codex/auth.json。"
+            ))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: 460)
+
+            if let onAddAccount {
+                Button {
+                    onAddAccount()
+                } label: {
+                    Label(L("Connect Codex Account", "连接 Codex 账号"), systemImage: "plus.circle.fill")
+                }
+                .buttonStyle(.borderedProminent)
+                .controlSize(.regular)
+                .padding(.top, 4)
+            }
+        }
+        .frame(maxWidth: .infinity)
+        .padding(.vertical, 24)
     }
 
     private func rowHeightReader(for id: String) -> some View {
@@ -301,9 +376,28 @@ struct CodexSubscriptionSection: View {
         .help("\(window.label): \(window.value) · \(window.note)")
     }
 
+    private func performAccountActivation(_ entry: ProviderAccountEntry) {
+        Task { @MainActor in
+            do {
+                guard try await activation.activateAccount(entry: entry) else { return }
+                onAccountSwitched?()
+                let message: String
+                if case .success(let result) = activation.activationResult {
+                    message = result
+                } else {
+                    message = L("Switched to \(entry.accountPrimaryLabel)", "已切换到 \(entry.accountPrimaryLabel)", "Đã chuyển sang \(entry.accountPrimaryLabel)")
+                }
+                onShowStatus?(message, false)
+            } catch {
+                onShowStatus?(SensitiveDataRedactor.redactedMessage(for: error), true)
+            }
+        }
+    }
+
     @ViewBuilder
     private func subscriptionRow(_ entry: ProviderAccountEntry) -> some View {
         let isActive = !proxyActive && activation.isActiveAccount(entry)
+        let busy = isRestarting
         HStack(spacing: 10) {
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 13, weight: .semibold))
@@ -326,6 +420,14 @@ struct CodexSubscriptionSection: View {
                     if let plan = entry.liveProvider?.membershipLabel?.nilIfBlank {
                         planBadge(plan)
                     }
+                    if isActive {
+                        Text(L("IDE Active", "当前生效"))
+                            .font(.system(size: 9, weight: .bold))
+                            .foregroundStyle(Self.codexBrand)
+                            .padding(.horizontal, 6)
+                            .padding(.vertical, 1.5)
+                            .background(Capsule().fill(Self.codexBrand.opacity(0.14)))
+                    }
                 }
                 noteRow(entry)
                 usageWindowPills(entry)
@@ -346,19 +448,21 @@ struct CodexSubscriptionSection: View {
                     get: { isActive },
                     set: { newValue in
                         if newValue {
-                            try? activation.activateAccount(entry: entry)
+                            performAccountActivation(entry)
                         } else {
                             activation.deactivateAccount(entry: entry)
+                            onAccountSwitched?()
                         }
                     }
                 ))
                 .labelsHidden()
-                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: false))
-                .disabled(globalProxy.isEnabled)
+                .toggleStyle(ProxyActivationToggleStyle(brandColor: Self.codexBrand, isBusy: busy))
+                .disabled(globalProxy.isEnabled || busy)
                 .help(globalProxy.isEnabled
                       ? L("Global proxy is enabled; switch the active node in the global proxy card.",
                           "全局代理已启用，请在全局代理卡片切换激活节点。")
-                      : "")
+                      : L("Switch Codex account in ~/.codex/auth.json.",
+                          "直接写入 ~/.codex/auth.json 切换 Codex 账号。"))
             }
         }
         .padding(.horizontal, 12)
@@ -371,6 +475,47 @@ struct CodexSubscriptionSection: View {
             RoundedRectangle(cornerRadius: 12)
                 .stroke(isActive ? Self.codexBrand.opacity(0.50) : Color.primary.opacity(0.06), lineWidth: 1)
         )
+        .contextMenu {
+            if !activation.isRemoteViewOnly(entry) {
+                Button {
+                    performAccountActivation(entry)
+                } label: {
+                    Label(L("Switch to This Account", "切换到此账号"), systemImage: "arrow.left.arrow.right.circle")
+                }
+                .disabled(globalProxy.isEnabled || busy)
+
+                Divider()
+            }
+
+            if let provider = entry.liveProvider {
+                Button {
+                    Task { await refreshCoordinator.refreshProviderCardNow(provider) }
+                } label: {
+                    Label(L("Refresh Quota", "刷新配额"), systemImage: "arrow.clockwise")
+                }
+            }
+
+            Button {
+                editingNoteEntry = entry
+            } label: {
+                Label(L("Edit Note", "编辑备注"), systemImage: "pencil")
+            }
+
+            Button {
+                NSPasteboard.general.clearContents()
+                NSPasteboard.general.setString(entry.accountPrimaryLabel, forType: .string)
+            } label: {
+                Label(L("Copy Account Email", "复制账号邮箱"), systemImage: "doc.on.doc")
+            }
+
+            Divider()
+
+            Button(role: .destructive) {
+                pendingDeleteEntry = entry
+            } label: {
+                Label(L("Remove Account", "移除账号"), systemImage: "trash")
+            }
+        }
     }
 }
 

@@ -25,7 +25,7 @@ public enum CodexLinkedCredentialCopies {
     /// 已登记目录中属于该凭据的副本：标记是这个凭据，或标记是旧凭据但原生身份（工作区 + 用户）相同。
     /// 重新登录会换凭据 ID，CPA 副本上的标记要等用户再次同步才会更新。
     /// 没有标记的文件（CPA 自己登录的账号）是独立的 token 链，不关联。
-    static func paths(forCredentialId credentialId: String, nativeIdentityKey: String? = nil) -> [String] {
+    public static func paths(forCredentialId credentialId: String, nativeIdentityKey: String? = nil) -> [String] {
         let id = normalized(credentialId)
         guard !id.isEmpty else { return [] }
         let registered = lock.withLock { directories }

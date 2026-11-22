@@ -2,6 +2,19 @@ import Foundation
 import os.log
 import Security
 import Darwin
+import QuotaBackend
+
+private final class NoRedirectHealthSessionDelegate: NSObject, URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
 
 // MARK: - QuotaServer Unified Cold Start
 // 三条代理轨（Claude/Codex/OpenCode + Science）共用的唯一 QuotaServer 冷启动实现。
@@ -160,6 +173,14 @@ enum QuotaServerLauncher {
         throw QuotaServerStartupError.executableNotFound
     }
 
+    private static let healthProbeDelegate = NoRedirectHealthSessionDelegate()
+    private static let healthProbeSession: URLSession = {
+        let config = URLSessionConfiguration.ephemeral
+        config.connectionProxyDictionary = [:]
+        config.waitsForConnectivity = false
+        return URLSession(configuration: config, delegate: healthProbeDelegate, delegateQueue: nil)
+    }()
+
     private static func launchCandidate(
         _ candidate: QuotaServerExecutable,
         arguments: [String],
@@ -217,12 +238,21 @@ enum QuotaServerLauncher {
             }
 
             do {
+                let challenge = UUID().uuidString
                 var request = URLRequest(url: healthURL, timeoutInterval: 1)
                 request.httpMethod = "GET"
-                let (data, response) = try await URLSession.shared.data(for: request)
+                request.setValue(challenge, forHTTPHeaderField: QuotaServerHealthProof.challengeHeader)
+                let (data, response) = try await healthProbeSession.data(for: request)
                 if let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) {
                     let payload = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
-                    guard payload?["instanceToken"] as? String == startupToken else {
+                    let expectedProof = QuotaServerHealthProof.compute(
+                        challenge: challenge,
+                        startupToken: startupToken
+                    ) ?? ""
+                    let receivedProof = (payload?["instanceProof"] as? String) ?? ""
+                    guard payload?["instanceToken"] == nil,
+                          !expectedProof.isEmpty,
+                          QuotaShareServer.constantTimeEquals(Array(receivedProof.utf8), Array(expectedProof.utf8)) else {
                         lastProbe = "health endpoint belongs to another process"
                         try? await Task.sleep(nanoseconds: probeIntervalNanos)
                         continue

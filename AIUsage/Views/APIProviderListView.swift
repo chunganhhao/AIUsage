@@ -1,7 +1,7 @@
 import SwiftUI
 
 // MARK: - API Provider List
-// 「服务商 → API 提供商」分类下的列表：新增/编辑统一上游配置，并分发到 Codex / Claude / OpenCode / CPA。
+// 「服务商 → API 提供商」分类下的列表：新增/编辑统一上游配置，并分发到 Codex / Claude / OpenCode。
 // 操作反馈：行内按钮即时态 + 顶部轻横幅。
 
 struct APIProviderListView: View {
@@ -82,6 +82,7 @@ struct APIProviderListView: View {
     var body: some View {
         content
         .appFlashOverlay(flash)
+        .modelSyncFlashOverlay()
         .onChange(of: requestNew) { _, newValue in
             guard newValue else { return }
             editorContext = EditorContext(id: "new", provider: APIProvider(), initialTargets: [])

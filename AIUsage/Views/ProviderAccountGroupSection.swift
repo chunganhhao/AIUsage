@@ -1,4 +1,5 @@
 import SwiftUI
+import QuotaBackend
 
 struct ProviderAccountGroupSection: View {
     let group: ProviderAccountGroup
@@ -56,6 +57,21 @@ struct ProviderAccountGroupSection: View {
                         )
                         pill(text: L("\(group.connectedCount) live", "\(group.connectedCount) 个在线"), tint: .green)
                         pill(text: L("\(group.accounts.count) accounts", "\(group.accounts.count) 个账号"), tint: .blue)
+                        if (group.providerId == "antigravity" || group.providerId == "codex"),
+                           group.accounts.count >= 2,
+                           let bestNext = group.accounts.bestNextQuotaCandidate(
+                            isActive: { entry in
+                                ProviderActivationManager.shared.isActiveAccount(entry)
+                            }
+                           ) {
+                            pill(
+                                text: L(
+                                    "Best next: \(bestNext.label) (\(Int(bestNext.remainingPercent.rounded()))%)",
+                                    "推荐切换: \(bestNext.label) (\(Int(bestNext.remainingPercent.rounded()))%)"
+                                ),
+                                tint: .teal
+                            )
+                        }
                     }
 
                     HStack(spacing: 10) {
@@ -72,7 +88,13 @@ struct ProviderAccountGroupSection: View {
                         }
                         .buttonStyle(.borderless)
                         .disabled(refreshCoordinator.isProviderRefreshInFlight(group.providerId))
-                        .help(L("Refresh every account under \(group.title)", "刷新 \(group.title) 下的所有账号"))
+                        .help(
+                            group.providerId == "antigravity"
+                                ? L("Reads only the active Antigravity IDE locally; dormant accounts remain cache-only.", "仅读取当前活跃的 Antigravity IDE 本地会话；休眠账号保持只读缓存。")
+                                : group.providerId == "codex"
+                                    ? L("Checks only the active Desktop native Codex account; dormant vault accounts stay cache-only.", "仅刷新当前活跃的桌面原生 Codex 账号；休眠账号保持只读缓存。")
+                                    : L("Refresh every account under \(group.title)", "刷新 \(group.title) 下的所有账号")
+                        )
 
                         Button {
                             appState.setProviderScanningEnabled(group.providerId, isEnabled: !group.isScanningEnabled)
@@ -194,7 +216,11 @@ struct ProviderAccountGroupSection: View {
                     account: account
                 )
             } else {
-                ManagedProviderAccountCard(account: account, provider: liveProvider)
+                ManagedProviderAccountCard(
+                    account: account,
+                    provider: liveProvider,
+                    onReconnect: onAddAccount
+                )
                     .environmentObject(appState)
                     .environmentObject(refreshCoordinator)
             }
@@ -383,6 +409,7 @@ struct EmptyProviderAccountState: View {
 struct ManagedProviderAccountCard: View {
     let account: ProviderAccountEntry
     let provider: ProviderData
+    var onReconnect: (() -> Void)?
 
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
@@ -393,7 +420,8 @@ struct ManagedProviderAccountCard: View {
             titleOverride: account.cardTitle,
             footerAccountLabelOverride: account.footerAccountLabel,
             accountEntry: account,
-            refreshAction: refreshThisAccount
+            refreshAction: refreshThisAccount,
+            onReconnect: onReconnect
         )
     }
 

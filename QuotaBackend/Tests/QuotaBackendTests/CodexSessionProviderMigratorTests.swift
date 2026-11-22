@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import SQLite3
 import XCTest
@@ -152,6 +153,158 @@ final class CodexSessionProviderMigratorTests: XCTestCase {
 
         let second = try CodexSessionProviderMigrator.migrate(homeDirectory: home.path)
         XCTAssertEqual(second.migratedDatabaseRows, 0)
+    }
+
+    func testMigrateSkipsLegacyCPAArchiveBackedRootsFilesAndDatabasesWhileMigratingOrdinaryOnes() throws {
+        let home = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-migrator-archive-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: home) }
+
+        let fm = FileManager.default
+        let archiveDir = home.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+        let archiveSessions = archiveDir.appendingPathComponent("archive-sessions", isDirectory: true)
+        let archiveSqlite = archiveDir.appendingPathComponent("archive-sqlite", isDirectory: true)
+        try fm.createDirectory(at: archiveSessions, withIntermediateDirectories: true)
+        try fm.createDirectory(at: archiveSqlite, withIntermediateDirectories: true)
+
+        try Data(#"{"type":"codex"}"#.utf8).write(to: archiveDir.appendingPathComponent("aiusage-codex-1.json"))
+        let preExistingLock = archiveDir.appendingPathComponent("preexisting.lock")
+        try Data("keep-lock".utf8).write(to: preExistingLock)
+        try Data("keep-wal".utf8).write(to: archiveDir.appendingPathComponent("wal-target.bin"))
+
+        let archivedRollout = archiveSessions.appendingPathComponent("archived-rollout.jsonl")
+        let archiveStateDB = archiveSqlite.appendingPathComponent("state_9.sqlite")
+        let archiveCatalogDB = archiveSqlite.appendingPathComponent("codex-dev.db")
+        try writeRollout(sessionID: "arch-sess", provider: "aiusage-proxy", to: archivedRollout)
+        try createIndexDatabase(at: archiveStateDB, table: "threads")
+        try createIndexDatabase(at: archiveCatalogDB, table: "local_thread_catalog")
+        let manifestBefore = try recursiveManifest(at: archiveDir)
+
+        let codexDir = home.appendingPathComponent(".codex", isDirectory: true)
+        let ordinaryRollout = codexDir.appendingPathComponent("sessions/2026/09/05/ordinary.jsonl")
+        try writeRollout(sessionID: "ord-sess", provider: "aiusage-proxy", to: ordinaryRollout)
+        try fm.createSymbolicLink(
+            at: codexDir.appendingPathComponent("sessions/aliased-subdir"),
+            withDestinationURL: archiveSessions
+        )
+        try fm.createSymbolicLink(
+            at: codexDir.appendingPathComponent("archived_sessions"),
+            withDestinationURL: archiveSessions
+        )
+
+        let ordinaryStateDB = codexDir.appendingPathComponent("state_1.sqlite")
+        let walLinkedStateDB = codexDir.appendingPathComponent("state_2.sqlite")
+        try createIndexDatabase(at: ordinaryStateDB, table: "threads")
+        try createIndexDatabase(at: walLinkedStateDB, table: "threads")
+        let walDBBefore = try Data(contentsOf: walLinkedStateDB)
+        try fm.createSymbolicLink(
+            at: codexDir.appendingPathComponent("state_2.sqlite-wal"),
+            withDestinationURL: archiveDir.appendingPathComponent("wal-target.bin")
+        )
+        try fm.createSymbolicLink(
+            at: codexDir.appendingPathComponent("sqlite"),
+            withDestinationURL: archiveSqlite
+        )
+
+        let report = try CodexSessionProviderMigrator.migrate(homeDirectory: home.path)
+
+        let walDBVerifyCopy = home.appendingPathComponent("verify-wal-state.sqlite")
+        try fm.copyItem(at: walLinkedStateDB, to: walDBVerifyCopy)
+
+        XCTAssertEqual(report.migratedFiles, 1)
+        XCTAssertEqual(report.migratedDatabaseRows, 1)
+        XCTAssertEqual(try provider(in: ordinaryRollout), "openai")
+        XCTAssertEqual(try modelProviders(in: ordinaryStateDB, table: "threads"), ["openai", "openai", "cliproxyapi"])
+        XCTAssertEqual(try Data(contentsOf: walLinkedStateDB), walDBBefore)
+        XCTAssertEqual(try modelProviders(in: walDBVerifyCopy, table: "threads"), ["aiusage-proxy", "openai", "cliproxyapi"])
+        XCTAssertEqual(try provider(in: archivedRollout), "aiusage-proxy")
+        XCTAssertEqual(try modelProviders(in: archiveStateDB, table: "threads"), ["aiusage-proxy", "openai", "cliproxyapi"])
+        XCTAssertEqual(try modelProviders(in: archiveCatalogDB, table: "local_thread_catalog"), ["aiusage-proxy", "openai", "cliproxyapi"])
+        XCTAssertEqual(try recursiveManifest(at: archiveDir), manifestBefore)
+        XCTAssertTrue(fm.fileExists(atPath: preExistingLock.path))
+
+        // Direct ~/.codex symlink pointing into CLIProxyAPI/auth must scan/migrate nothing
+        let home2 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-migrator-whole-codex-\(UUID().uuidString)", isDirectory: true)
+        defer { try? fm.removeItem(at: home2) }
+        let archiveDir2 = home2.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth", isDirectory: true)
+        try writeRollout(
+            sessionID: "arch2-sess",
+            provider: "aiusage-proxy",
+            to: archiveDir2.appendingPathComponent("sessions/arch2.jsonl")
+        )
+        try createIndexDatabase(at: archiveDir2.appendingPathComponent("state_8.sqlite"), table: "threads")
+        try fm.createDirectory(at: home2, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: home2.appendingPathComponent(".codex"), withDestinationURL: archiveDir2)
+        let manifest2Before = try recursiveManifest(at: archiveDir2)
+
+        let report2 = try CodexSessionProviderMigrator.migrate(homeDirectory: home2.path)
+
+        XCTAssertEqual(report2.scannedFiles, 0)
+        XCTAssertEqual(report2.migratedFiles, 0)
+        XCTAssertEqual(report2.migratedDatabaseRows, 0)
+        XCTAssertFalse(fm.fileExists(atPath: CodexSessionProviderMigrator.archiveURL(homeDirectory: home2.path).path))
+        XCTAssertEqual(try recursiveManifest(at: archiveDir2), manifest2Before)
+
+        // Mid-scan archive-root repointing: write checks resolve fresh archiveRoots after discovery
+        let home3 = FileManager.default.temporaryDirectory
+            .appendingPathComponent("aiusage-migrator-repoint-\(UUID().uuidString)", isDirectory: true)
+        defer {
+            CodexSessionProviderMigrator.afterDiscoveryHookForTesting = nil
+            try? fm.removeItem(at: home3)
+        }
+        let archiveV1 = home3.appendingPathComponent("archive-v1", isDirectory: true)
+        let archiveV2 = home3.appendingPathComponent("archive-v2", isDirectory: true)
+        try fm.createDirectory(at: archiveV1, withIntermediateDirectories: true)
+        try writeRollout(
+            sessionID: "race-sess",
+            provider: "aiusage-proxy",
+            to: archiveV2.appendingPathComponent("sessions/2026/09/05/race.jsonl")
+        )
+        try createIndexDatabase(at: archiveV2.appendingPathComponent("state_8.sqlite"), table: "threads")
+        let cliProxyAuth = home3.appendingPathComponent("Library/Application Support/AIUsage/CLIProxyAPI/auth")
+        try fm.createDirectory(at: cliProxyAuth.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: cliProxyAuth, withDestinationURL: archiveV1)
+        try fm.createSymbolicLink(at: home3.appendingPathComponent(".codex"), withDestinationURL: archiveV2)
+        let manifest3Before = try recursiveManifest(at: archiveV2)
+
+        CodexSessionProviderMigrator.afterDiscoveryHookForTesting = {
+            let staging = cliProxyAuth.deletingLastPathComponent().appendingPathComponent(".swap-\(UUID().uuidString)")
+            try? fm.createSymbolicLink(at: staging, withDestinationURL: archiveV2)
+            _ = rename(staging.path, cliProxyAuth.path)
+        }
+        let report3 = try CodexSessionProviderMigrator.migrate(homeDirectory: home3.path)
+        CodexSessionProviderMigrator.afterDiscoveryHookForTesting = nil
+
+        XCTAssertEqual(report3.scannedFiles, 1)
+        XCTAssertEqual(report3.migratedFiles, 0)
+        XCTAssertEqual(report3.migratedDatabaseRows, 0)
+        XCTAssertFalse(fm.fileExists(atPath: CodexSessionProviderMigrator.archiveURL(homeDirectory: home3.path).path))
+        XCTAssertEqual(try recursiveManifest(at: archiveV2), manifest3Before)
+    }
+
+    private func recursiveManifest(at root: URL) throws -> [String] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(
+            at: root,
+            includingPropertiesForKeys: [.isRegularFileKey, .isSymbolicLinkKey],
+            options: []
+        ) else { return [] }
+        let rootPrefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        var entries: [String] = []
+        for case let item as URL in enumerator {
+            let vals = try item.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
+            let rel = item.path.hasPrefix(rootPrefix) ? String(item.path.dropFirst(rootPrefix.count)) : item.path
+            if vals.isSymbolicLink == true {
+                let dest = (try? fm.destinationOfSymbolicLink(atPath: item.path)) ?? ""
+                entries.append("L:\(rel)->\(dest)")
+            } else if vals.isRegularFile == true {
+                let data = try Data(contentsOf: item)
+                let sha = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+                entries.append("F:\(rel):\(data.count):\(sha)")
+            }
+        }
+        return entries.sorted()
     }
 
     private func writeRollout(sessionID: String, provider: String, to url: URL) throws {

@@ -456,7 +456,9 @@ final class SessionCenterStore: ObservableObject {
     // MARK: Actions
 
     func resume(_ session: SessionSummary) async {
-        if let activity = session.activity, !confirmResumeWhileActive(session, activity: activity) { return }
+        if session.tool != .antigravity,
+           let activity = session.activity,
+           !confirmResumeWhileActive(session, activity: activity) { return }
         let plan: SessionResumePlan
         do {
             plan = try SessionResumePlan.make(for: session)
@@ -473,12 +475,105 @@ final class SessionCenterStore: ObservableObject {
         let terminal = terminal
         do {
             try await TerminalLauncher.launch(plan, in: terminal)
-            let opened = L("Opened in \(terminal.displayName)", "已在 \(terminal.displayName) 中打开")
+            let opened = L("Opened in \(terminal.displayName)", "已在 \(terminal.displayName) 中打开", "Đã mở trong \(terminal.displayName)")
             show(.success(terminal.confirmationNote.map { opened + " · " + $0 } ?? opened))
         } catch {
             copyToPasteboard(plan.commandLine)
             show(.error(L("Couldn't open \(terminal.displayName). The resume command was copied.",
-                          "无法打开 \(terminal.displayName)，已复制恢复命令。")))
+                          "无法打开 \(terminal.displayName)，已复制恢复命令。",
+                          "Không thể mở \(terminal.displayName). Đã sao chép lệnh tiếp tục.")))
+        }
+    }
+
+    func desktopAppInfo(for tool: SessionTool) -> (name: String, url: URL?) {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        switch tool {
+        case .codex:
+            return ("Codex.app", ProviderActivationManager.resolveInstalledCodexAppURL(homeDirectory: home))
+        case .antigravity:
+            return (
+                "Antigravity.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["com.google.antigravity"],
+                    candidatePaths: ["/Applications/Antigravity.app", "\(home)/Applications/Antigravity.app"]
+                )
+            )
+        case .claude:
+            return (
+                "Claude.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["com.anthropic.claudefordesktop"],
+                    candidatePaths: ["/Applications/Claude.app", "\(home)/Applications/Claude.app"]
+                )
+            )
+        case .opencode:
+            return (
+                "OpenCode.app",
+                Self.resolveDesktopAppURL(
+                    bundleIds: ["ai.opencode.desktop", "com.opencode.desktop", "dev.opencode.desktop"],
+                    candidatePaths: ["/Applications/OpenCode.app", "\(home)/Applications/OpenCode.app"]
+                )
+            )
+        }
+    }
+
+    private static func resolveDesktopAppURL(bundleIds: [String], candidatePaths: [String]) -> URL? {
+        for bundleId in bundleIds {
+            if let runningURL = NSRunningApplication.runningApplications(withBundleIdentifier: bundleId)
+                .first(where: { !$0.isTerminated })?.bundleURL {
+                return runningURL
+            }
+            if let workspaceURL = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleId) {
+                return workspaceURL
+            }
+        }
+        let fm = FileManager.default
+        for path in candidatePaths where fm.fileExists(atPath: path) {
+            return URL(fileURLWithPath: path)
+        }
+        return nil
+    }
+
+    func openInDesktopApp(_ session: SessionSummary) async {
+        let app = desktopAppInfo(for: session.tool)
+        let plan: SessionResumePlan
+        do {
+            plan = try SessionResumePlan.make(for: session)
+        } catch SessionResumeError.directoryMissing {
+            show(.error(L("The project folder no longer exists, so this session can't be resumed.",
+                          "项目目录已不存在，无法继续这个会话。", key: "sessions.error.directory_missing")))
+            return
+        } catch {
+            show(.error(L("This session ID can't be resumed safely.", "会话 ID 格式异常，已停止继续。",
+                          key: "sessions.error.invalid_id")))
+            return
+        }
+        guard let appURL = app.url else {
+            show(.error(L("\(app.name) is not installed in /Applications.", "未在 /Applications 中安装 \(app.name)。", "\(app.name) chưa được cài đặt trong /Applications.")))
+            return
+        }
+        let folderURL = URL(fileURLWithPath: plan.directory)
+        let configuration = NSWorkspace.OpenConfiguration()
+        configuration.activates = true
+        if let deepLinkURL = plan.desktopDeepLinkURL {
+            do {
+                _ = try await NSWorkspace.shared.open([deepLinkURL], withApplicationAt: appURL, configuration: configuration)
+                show(.success(L("Opened session in \(app.name)", "已在 \(app.name) 中打开该会话", "Đã mở phiên trong \(app.name)")))
+                return
+            } catch {
+                // Fall back to opening the workspace folder if the custom URL scheme fails.
+            }
+        }
+        do {
+            _ = try await NSWorkspace.shared.open([folderURL], withApplicationAt: appURL, configuration: configuration)
+            show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开", "Đã mở trong \(app.name)")))
+        } catch {
+            do {
+                _ = try await NSWorkspace.shared.openApplication(at: appURL, configuration: configuration)
+                show(.success(L("Opened in \(app.name)", "已在 \(app.name) 中打开", "Đã mở trong \(app.name)")))
+            } catch {
+                show(.error(L("Couldn't open \(app.name).", "无法打开 \(app.name)。", "Không thể mở \(app.name).")))
+            }
         }
     }
 
@@ -490,9 +585,11 @@ final class SessionCenterStore: ObservableObject {
         alert.messageText = L("This session is still open", "这个会话还开着", key: "sessions.resume_active.title")
         alert.informativeText = activity == .waiting
             ? L("\(tool) has it open in another terminal. Resuming here means two processes write to the same session.",
-                "\(tool) 正在另一个终端里开着这个会话。在这里再继续，两边会同时写同一份记录。")
+                "\(tool) 正在另一个终端里开着这个会话。在这里再继续，两边会同时写同一份记录。",
+                "\(tool) đang mở phiên này ở một terminal khác. Tiếp tục tại đây nghĩa là hai tiến trình cùng ghi vào một phiên.")
             : L("\(tool) is still working on it. Resuming here means two processes write to the same session.",
-                "\(tool) 还在处理这个会话。在这里再继续，两边会同时写同一份记录。")
+                "\(tool) 还在处理这个会话。在这里再继续，两边会同时写同一份记录。",
+                "\(tool) vẫn đang xử lý phiên này. Tiếp tục tại đây nghĩa là hai tiến trình cùng ghi vào một phiên.")
         alert.addButton(withTitle: L("Resume Anyway", "仍然继续", key: "sessions.resume_active.confirm"))
         alert.addButton(withTitle: L("Cancel", "取消", key: "sessions.resume_active.cancel"))
         return alert.runModal() == .alertFirstButtonReturn
@@ -621,10 +718,18 @@ enum SessionDateText {
         return .earlier
     }
 
+    private static func localeIdentifier(for language: String) -> String {
+        switch language {
+        case "zh": return "zh_CN"
+        case "vi": return "vi_VN"
+        default: return "en_US"
+        }
+    }
+
     /// 今天「14:27」，昨天「昨天 22:58」，本周「周三」，今年「10月26日」，更早「2025/10/23」。
     static func short(_ date: Date, now: Date = Date(), calendar: Calendar = .current) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: AppSettings.shared.language == "zh" ? "zh_CN" : "en_US")
+        formatter.locale = Locale(identifier: localeIdentifier(for: AppSettings.shared.language))
         switch bucket(for: date, now: now, calendar: calendar) {
         case .today:
             formatter.dateFormat = "HH:mm"
@@ -644,7 +749,7 @@ enum SessionDateText {
 
     static func full(_ date: Date) -> String {
         let formatter = DateFormatter()
-        formatter.locale = Locale(identifier: AppSettings.shared.language == "zh" ? "zh_CN" : "en_US")
+        formatter.locale = Locale(identifier: localeIdentifier(for: AppSettings.shared.language))
         formatter.setLocalizedDateFormatFromTemplate("yyyyMMMd HH:mm")
         return formatter.string(from: date)
     }

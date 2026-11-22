@@ -347,8 +347,9 @@ extension ProviderAccountEditorView {
     private var antigravityLoginSection: some View {
         googleLoginSection(
             phase: antigravityLogin.phase,
-            description: L("AIUsage opened Antigravity's official Google sign-in in your browser. Approve it there and the account connects automatically.",
-                           "已在浏览器打开 Antigravity 官方 Google 登录页，授权后自动接入。"),
+            description: L("Prefer importing your Antigravity IDE session. Browser OAuth may use an unsupported legacy client; it does not prevent account restrictions.",
+                           "优先导入 Antigravity IDE 会话。浏览器 OAuth 可能使用不再支持的旧客户端，不能保证账号安全。",
+                           "Ưu tiên nhập phiên Antigravity IDE. OAuth trình duyệt có thể dùng client cũ không còn hỗ trợ; không bảo đảm tránh hạn chế tài khoản."),
             accountEmail: antigravityLogin.accountEmail,
             hasAuthURL: antigravityLogin.authURL != nil,
             reopen: { antigravityLogin.reopenInBrowser() }

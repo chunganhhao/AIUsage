@@ -299,6 +299,91 @@ final class CodexLinkedCredentialCopiesTests: XCTestCase {
         let nestedNewer = try writeCPACopy(flat: (stale, "R0"), nested: (rotated, "R1"), name: "nested.json")
         XCTAssertEqual(try CodexProvider().loadCredentials(from: nestedNewer.path).refreshToken, "R1")
     }
+
+    /// Even when metadata.sourcePath is missing (isolated login temp dir) and live .codex/auth.json holds another user,
+    /// .codex/auth.json.bak for this same workspace still heals stale managed and CPA copies.
+    func testHealsFromHomeDirectoryBackupWithoutSourcePathWhenAuthJsonSwitched() async throws {
+        let stale = try accessToken("A0", issuedDaysAgo: 9)
+        let fresh = try accessToken("A1", issuedDaysAgo: 0)
+        let otherMember = try accessToken("B1", issuedDaysAgo: 0, user: "member-b")
+        let own = try writeOwnCopy(access: stale, refresh: "R0", refreshedDaysAgo: 1)
+        let cpa = try writeCPACopy(flat: (stale, "R0"), nested: (stale, "R0"))
+
+        let dotCodex = directory.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: dotCodex, withIntermediateDirectories: true)
+        let liveAuth = dotCodex.appendingPathComponent("auth.json")
+        let liveBackup = dotCodex.appendingPathComponent("auth.json.bak")
+        try JSONSerialization.data(withJSONObject: [
+            "auth_mode": "chatgpt",
+            "last_refresh": iso(daysAgo: 0),
+            "tokens": ["account_id": "business-1", "access_token": otherMember, "refresh_token": "RB", "id_token": try idToken(user: "member-b")]
+        ]).write(to: liveAuth)
+        let liveBefore = try Data(contentsOf: liveAuth)
+        try JSONSerialization.data(withJSONObject: [
+            "auth_mode": "chatgpt",
+            "last_refresh": iso(daysAgo: 0),
+            "tokens": ["account_id": "business-1", "access_token": fresh, "refresh_token": "R1", "id_token": try idToken(user: "member-a")]
+        ]).write(to: liveBackup)
+
+        _ = try await CodexProvider(homeDirectory: directory.path).fetchUsage(with: credential(for: own))
+
+        XCTAssertTrue(oauthRequests.isEmpty)
+        XCTAssertEqual(usageAuthorizations, ["Bearer \(fresh)"])
+        XCTAssertEqual(try CodexProvider(homeDirectory: directory.path).loadCredentials(from: own.path).refreshToken, "R1")
+        XCTAssertEqual(try CodexProvider(homeDirectory: directory.path).loadCredentials(from: cpa.path).refreshToken, "R1")
+        XCTAssertEqual(try Data(contentsOf: liveAuth), liveBefore)
+    }
+
+    func testEqualIatRecoveryPrefersUsableAccessOverRejectedTokenWithRefreshToken() async throws {
+        let sameIat = (Date().timeIntervalSince1970 - day).rounded()
+        let staleAccess = try jwt(["jti": "A-stale", "iat": sameIat, "exp": sameIat + 10 * day, "https://api.openai.com/auth": claims(user: "member-a")])
+        let goodAccess = try jwt(["jti": "A-good", "iat": sameIat, "exp": sameIat + 10 * day, "https://api.openai.com/auth": claims(user: "member-a")])
+
+        let own = directory.appendingPathComponent("own-no-rt.json")
+        try JSONSerialization.data(withJSONObject: [
+            "OPENAI_API_KEY": NSNull(),
+            "auth_mode": "chatgpt",
+            "last_refresh": iso(daysAgo: 0),
+            "tokens": ["account_id": "business-1", "access_token": staleAccess, "id_token": try idToken()]
+        ]).write(to: own)
+
+        let explicit = directory.appendingPathComponent("explicit-good.json")
+        try JSONSerialization.data(withJSONObject: [
+            "OPENAI_API_KEY": NSNull(),
+            "auth_mode": "chatgpt",
+            "last_refresh": iso(daysAgo: 0),
+            "tokens": ["account_id": "business-1", "access_token": goodAccess, "id_token": try idToken()]
+        ]).write(to: explicit)
+
+        let dotCodex = directory.appendingPathComponent(".codex", isDirectory: true)
+        try FileManager.default.createDirectory(at: dotCodex, withIntermediateDirectories: true)
+        try JSONSerialization.data(withJSONObject: [
+            "auth_mode": "chatgpt",
+            "last_refresh": iso(daysAgo: 0),
+            "tokens": ["account_id": "business-1", "access_token": staleAccess, "refresh_token": "R-consumed", "id_token": try idToken()]
+        ]).write(to: dotCodex.appendingPathComponent("auth.json.bak"))
+
+        StubURLProtocol.respond(Self.oauthURL, status: 400, body: #"{"error":"refresh_token_reused"}"#)
+        StubURLProtocol.respond(Self.usageURL) { req in
+            req.headers["Authorization"] == "Bearer \(goodAccess)" ? (200, #"{"plan_type":"team"}"#) : (401, "{}")
+        }
+
+        let cred = AccountCredential(
+            id: credentialId,
+            providerId: "codex",
+            authMethod: .authFile,
+            credential: own.path,
+            metadata: [
+                "accountId": "business-1",
+                "workspaceUserId": "member-a",
+                "sourcePath": explicit.path
+            ]
+        )
+        _ = try await CodexProvider(homeDirectory: directory.path).fetchUsage(with: cred)
+
+        XCTAssertTrue(usageAuthorizations.contains("Bearer \(goodAccess)"))
+        XCTAssertEqual(try CodexProvider(homeDirectory: directory.path).loadCredentials(from: own.path).accessToken, goodAccess)
+    }
 }
 
 private extension Data {

@@ -52,9 +52,12 @@ struct DashboardView: View {
 
     /// 首次加载中、本地 Token 统计还没扫到时，仅对热力图区域显示骨架（而非整页）。
     private var isAwaitingLocalStats: Bool {
-        !refreshCoordinator.hasCompletedInitialLoad
+        let hidden = appState.settings.hiddenSidebarSections
+        return !refreshCoordinator.hasCompletedInitialLoad
             && costTrackingProviders.isEmpty
-            && appState.selectedProviderIds.contains(where: { $0 == "claude" || $0 == "codex-cost" || $0 == "opencode" || $0 == "antigravity-cost" })
+            && appState.selectedProviderIds.contains(where: {
+                AgentVisibility.isLocalCostCatalogId($0) && !AgentVisibility.isProviderHidden($0, hidden: hidden)
+            })
     }
 
     // MARK: - Overview Section

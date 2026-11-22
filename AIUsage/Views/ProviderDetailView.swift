@@ -149,11 +149,23 @@ struct ProviderDetailView: View {
             Spacer(minLength: 0)
 
             Menu {
+                if provider.baseProviderId == "antigravity" {
+                    Button {
+                        AntigravityAccountSwitcher.openAntigravityApp()
+                    } label: {
+                        Label(L("Open Antigravity Settings", "打开 Antigravity 设置"), systemImage: "arrow.up.forward.app")
+                    }
+                }
+
                 Button {
                     Task { await refreshCoordinator.refreshProviderCardNow(provider) }
                 } label: {
                     Label(
-                        isRefreshing ? L("Refreshing…", "刷新中…") : L("Refresh Account", "刷新账号"),
+                        isRefreshing
+                            ? L("Refreshing…", "刷新中…")
+                            : (provider.baseProviderId == "antigravity"
+                                ? L("Reload Saved Snapshot", "重载已存快照")
+                                : L("Refresh Account", "刷新账号")),
                         systemImage: "arrow.clockwise"
                     )
                 }
@@ -229,7 +241,7 @@ struct ProviderDetailView: View {
                     badge(text: membership, tint: membershipBadgeTint(for: membership))
                 }
                 if shouldShowStatusBadge {
-                    badge(text: localizedStatusLabel(provider.statusLabel), tint: statusColor)
+                    badge(text: localizedProviderStatusLabel(provider.statusLabel, language: appState.language), tint: statusColor)
                 }
                 Spacer(minLength: 0)
                 if let refreshTimestamp {
@@ -256,6 +268,26 @@ struct ProviderDetailView: View {
                 Text(supporting)
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if provider.status != .error,
+               provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex",
+               let healthBanner = QuotaResetFormatter.snapshotHealthBannerText(
+                for: QuotaResetFormatter.snapshotHealth(for: provider),
+                language: appState.language
+               ) {
+                Label(healthBanner, systemImage: "clock.badge.exclamationmark")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(.orange)
+            }
+
+            if let checkError = refreshCoordinator.lastCheckError(for: provider) {
+                Label(
+                    L("Last check failed · \(checkError.message)", "上次检查失败 · \(checkError.message)"),
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(.orange)
             }
 
             if let copiedMessage {
@@ -410,24 +442,6 @@ struct ProviderDetailView: View {
         )
     }
     
-    private func localizedStatusLabel(_ label: String) -> String {
-        guard appState.language == "zh" else { return label }
-        switch label {
-        case "Healthy":  return "正常"
-        case "Watch":    return "偏低"
-        case "Critical": return "告急"
-        case "Error":    return "错误"
-        case "Tracking": return "追踪中"
-        case "Idle":     return "空闲"
-        case "Active":   return "活跃"
-        case "Snapshot": return "额度快照"
-        case "Waiting": return "等待同步"
-        case "Proxy session": return "代理会话"
-        case "Feedback disconnected": return "同步已断开"
-        default: return label
-        }
-    }
-
     private var accentColor: Color {
         switch provider.providerId {
         case "antigravity", "antigravity-cost": return .cyan

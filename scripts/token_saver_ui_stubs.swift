@@ -1,4 +1,4 @@
-// Isolated SwiftUI fixture only; never launches CPA or uses real account stores.
+// Isolated SwiftUI fixture only; uses temporary homes and stubbed HTTP/RTK clients.
 import SwiftUI
 import AppKit
 import PDFKit
@@ -7,33 +7,22 @@ import QuotaBackend
 import CryptoKit
 
 var fixtureForceChinese = false
-func L(_ en: String, _ zh: String) -> String {
-    (fixtureForceChinese || ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "zh") ? zh : en
+func L(_ en: String, _ zh: String, _ vi: String? = nil, key: String? = nil, file: String = #fileID) -> String {
+    if fixtureForceChinese || ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "zh" {
+        return zh
+    }
+    if ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_LANG"] == "vi", let vi {
+        return vi
+    }
+    return en
 }
-struct CLIProxyGatewaySettings: Equatable {
-    var autoStart = false, allowLANAccess = false, accountModelProbeEnabled = false, enablePlugins = false
-    var port = 14420, accountModelProbeIntervalSeconds = 60, maxRetryCredentials = 0, requestRetry = 3, maxRetryInterval = 30
-    var proxyURL = ""
-    var routingStrategy = CLIProxyRoutingStrategy.roundRobin
-    var normalized: Self { self }
-    func requiresCPAProcessRestart(comparedTo: Self) -> Bool { self != comparedTo }
-}
-enum CLIProxyRoutingStrategy { case roundRobin, fillFirst }
-struct FixtureRuntimeState { var isRunning = false; var isTransitioning = false }
-@MainActor final class CLIProxyRuntimeController: ObservableObject {
-    @Published var settings = CLIProxyGatewaySettings()
-    var state = FixtureRuntimeState()
-    func detectedLANBaseURLs(port: Int) -> [URL] { [] }
-}
-struct GatewayCard<Content: View>: View {
-    var padding: CGFloat = 14
-    @ViewBuilder var content: () -> Content
-    var body: some View { content().padding(padding).background(.quaternary.opacity(0.3), in: RoundedRectangle(cornerRadius: 12)) }
-}
-struct GatewayQuietBadge: View {
-    let text: String
-    var tint: Color = .secondary
-    var body: some View { Text(text).foregroundStyle(tint) }
+struct QuotaWindow { let label: String; let remainingPercent: Double?; let resetAt: String? }
+struct ProviderData { let accountId: String?; let sourceFilePath: String?; let baseProviderId: String; let accountLabel: String?; let fetchedAt: String?; let windows: [QuotaWindow] }
+func aiusageDefaultCLIPath() -> String { "/usr/bin:/bin" }
+func aiusageCodexExecutable() -> String? { nil }
+func aiusageResolvedExecutable(named: String) -> String? { nil }
+enum ClaudeSubscriptionManager {
+    static func authStatus(directory: String, executable: String) async throws -> ClaudeAuthStatus { .init(loggedIn: false) }
 }
 private func fixtureHome() -> URL {
     URL(fileURLWithPath: ProcessInfo.processInfo.environment["TOKEN_SAVER_FIXTURE_HOME"] ?? Bundle.main.bundleURL.deletingLastPathComponent().appendingPathComponent("home").path)
@@ -145,17 +134,17 @@ private func runHeadlessUIVerification() async throws {
     try fm.createDirectory(at: homeB, withIntermediateDirectories: true)
     defer { try? fm.removeItem(at: tempRoot) }
 
-    // 1. Verify REAL extracted MenuBarView.openTokenSaverSettings -> CLIProxyGatewayNavigation -> SubscriptionGatewaySettingsView.consumeSettingsDestination
-    let menuRouter = ProductionMenuBarRouting()
-    let settingsRouter = ProductionGatewaySettingsRouting()
-    precondition(settingsRouter.selectedCategory == .runtime)
+    // 1. Verify REAL extracted MenuBarView.openTokenSaverSettings -> AppState.requestedSettingsCategory -> SettingsView.consumeRequestedSettingsCategory
+    let appState = ProductionAppStateRoutingStub()
+    let menuRouter = ProductionMenuBarRouting(appState: appState)
+    let settingsRouter = ProductionSettingsRouting(appState: appState)
+    precondition(settingsRouter.selectedCategory == .general)
     menuRouter.openTokenSaverSettings()
-    precondition(menuRouter.revealedSection == .subscriptionGateway, "Expected MenuBarView.openTokenSaverSettings to reveal .subscriptionGateway")
-    precondition(CLIProxyGatewayNavigation.shared.selectedSection == .settings, "Expected navigation section .settings")
-    precondition(CLIProxyGatewayNavigation.shared.settingsDestination == .tokenSaver, "Expected pending destination .tokenSaver")
-    settingsRouter.consumeSettingsDestination()
-    precondition(settingsRouter.selectedCategory == .tokenSaver, "Expected consumeSettingsDestination() to select .tokenSaver")
-    precondition(CLIProxyGatewayNavigation.shared.settingsDestination == nil, "Expected destination to be cleared after consumption")
+    precondition(menuRouter.revealedSection == .settings, "Expected MenuBarView.openTokenSaverSettings to reveal .settings")
+    precondition(appState.requestedSettingsCategory == .tokenSaver, "Expected pending destination .tokenSaver")
+    settingsRouter.consumeRequestedSettingsCategory()
+    precondition(settingsRouter.selectedCategory == .tokenSaver, "Expected consumeRequestedSettingsCategory() to select .tokenSaver")
+    precondition(appState.requestedSettingsCategory == nil, "Expected requestedSettingsCategory to be cleared after consumption")
 
     // 2. Verify unconstrained & 420pt offscreen NSHostingView layout + rendered text/accessibility state in EN & ZH across all Caveman modes
     for useZH in [false, true] {
@@ -167,14 +156,12 @@ private func runHeadlessUIVerification() async throws {
                 $0.cavemanMode = mode
                 $0.ponytailEnabled = true
             }
-            // Check unconstrained natural width fits inside 420pt without forcing .frame(width: 420)
             let naturalHost = NSHostingView(rootView: TokenSaverMenuBarSection(home: homeA, rtk: fixtureRTK(), onOpenSettings: { menuRouter.openTokenSaverSettings() }))
             naturalHost.layoutSubtreeIfNeeded()
             let naturalSize = naturalHost.fittingSize
             precondition(naturalSize.width <= 420.0 && naturalSize.height >= 40 && naturalSize.height <= 160,
                          "Unconstrained MenuBar section width exceeds 420pt (\(naturalSize)) for zh=\(useZH) mode=\(mode.rawValue)")
 
-            // Also host inside a 420pt offscreen window and verify child bounds & rendered strings
             let (_, strings) = inspectOffscreen(
                 TokenSaverMenuBarSection(home: homeA, rtk: fixtureRTK(), onOpenSettings: { menuRouter.openTokenSaverSettings() }).frame(width: 420),
                 width: 420,
@@ -189,7 +176,6 @@ private func runHeadlessUIVerification() async throws {
                          "Missing tool pills in rendered MenuBar strings: \(joined)")
         }
 
-        // Verify TokenSaverUpdatesSection renders read-only Caveman/Ponytail built-in copy and no reference download buttons
         let (_, updateStringList) = inspectOffscreen(
             TokenSaverUpdatesSection(manager: fixtureReleaseManager(), onOpenRuntime: {}).frame(width: 680),
             width: 680
@@ -222,53 +208,87 @@ private func runHeadlessUIVerification() async throws {
     precondition(pasteController.copyBrewInstallCommand() && pasteController.copiedBrewCommand)
     precondition(testPasteboard.string(forType: .string) == "brew install rtk")
     try? await Task.sleep(nanoseconds: 80_000_000)
-    // Repeat click at 80ms cancels the first 140ms timer and restarts a new 140ms window
     precondition(pasteController.copyDiagnostic() && pasteController.copiedDiagnostic)
     precondition(pasteController.copyBrewInstallCommand() && pasteController.copiedBrewCommand)
     try? await Task.sleep(nanoseconds: 85_000_000)
-    // At 165ms (past the first 140ms deadline), both must still be true
     precondition(pasteController.copiedDiagnostic && pasteController.copiedBrewCommand,
                  "Expected repeat click to cancel first timer and keep copied state true across first deadline")
     try? await Task.sleep(nanoseconds: 100_000_000)
-    // At 265ms (past the second timer deadline), both must reset to false
     precondition(!pasteController.copiedDiagnostic && !pasteController.copiedBrewCommand,
                  "Expected copied state to reset to false after replacement timer expires")
 
-    // 4. Verify offscreen rendering of SubscriptionGatewaySettingsTokenSaverPane
-    let (_, runtimeStringList) = inspectOffscreen(
-        SubscriptionGatewaySettingsTokenSaverPane(home: homeA, rtk: fixtureRTK()).frame(width: 680),
+    // 4. Verify offscreen rendering of TokenSaverSettingsPane (runtime controls, RTK versions, and updates)
+    let (_, paneStringList) = inspectOffscreen(
+        TokenSaverSettingsPane(home: homeA, rtk: fixtureRTK(), releases: fixtureReleaseManager()).frame(width: 680),
         width: 680
     )
-    let runtimeStrings = runtimeStringList.joined(separator: " | ")
-    precondition(runtimeStrings.contains("Enabled 3/3"), "Expected Enabled 3/3 badge in TokenSaverRuntimeSection: \(runtimeStrings)")
+    let paneStrings = paneStringList.joined(separator: " | ")
+    precondition(paneStrings.contains("Enabled 3/3"), "Expected Enabled 3/3 badge in TokenSaverSettingsPane: \(paneStrings)")
+    precondition(paneStrings.contains("RTK — Versions & rollback"), "Expected RTK versions view in TokenSaverSettingsPane: \(paneStrings)")
+    precondition(paneStrings.contains("Built-in compact rules · Enable in Token Saver"), "Expected updates section in TokenSaverSettingsPane: \(paneStrings)")
 
-    print("PASS TokenSaverUIFixture headless verification (unconstrained <=420pt EN/ZH layout, real production .tokenSaver routing, timer cancellation/expiry on isolated NSPasteboard, Runtime & read-only Updates views)")
+    // Banner sheet and settings reuse one observable model; removing a candidate clears its observers.
+    let overrideHome = homeA.appendingPathComponent("override-model")
+    try FileManager.default.createDirectory(at: overrideHome, withIntermediateDirectories: true)
+    let overrideFile = overrideHome.appendingPathComponent(".zshrc")
+    try Data("export OPENAI_API_KEY='fixture-only'\n".utf8).write(to: overrideFile)
+    let overrideModel = EnvironmentOverrideModel(home: overrideHome)
+    overrideModel.scan()
+    precondition(overrideModel.findings.count == 1)
+    _ = inspectOffscreen(EnvironmentOverrideView(model: overrideModel).frame(width: 680), width: 680)
+    overrideModel.remove(overrideModel.findings[0])
+    precondition(overrideModel.findings.isEmpty, "Shared banner model kept a stale file candidate after removal")
+    overrideModel.restore()
+    precondition(overrideModel.findings.count == 1, "Shared model Undo did not restore its candidate")
+
+    // Master-plan surfaces render real production views, isolated from user homes/Keychain.
+    let toolHome = homeA.appendingPathComponent("master-tools")
+    let codexConfig = toolHome.appendingPathComponent(".codex/config.toml")
+    try FileManager.default.createDirectory(at: codexConfig.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data(#"[mcp_servers.fixture]"#.utf8).write(to: codexConfig)
+    let (_, tools) = inspectOffscreen(AgentToolsSettingsView(home: toolHome).frame(width: 680), width: 680)
+    let toolText = tools.joined(separator: " | ")
+    precondition(toolText.contains("Scheduled 5h-Window Warmup"), "Missing warmup surface")
+    precondition(toolText.contains("Environment Overrides"), "Missing environment surface")
+    precondition(toolText.contains("Config Sets"), "Missing config sets surface")
+    let (_, rtkVersions) = inspectOffscreen(RTKVersionsView(store: RTKVersionStore(home: toolHome, cellarRoots: [])).frame(width: 680), width: 680)
+    precondition(rtkVersions.joined(separator: " | ").contains("RTK — Versions & rollback"), "Missing RTK version surface")
+    try prepareLinkedMCPFixture(toolHome)
+    let (_, linkedLabels) = inspectOffscreen(AgentConfigToolsView(home: toolHome, platform: .antigravity).frame(width: 680), width: 680)
+    let linkedText = linkedLabels.joined(separator: " | ")
+    precondition(linkedText.contains("Read-only") && linkedText.contains("fixture-linked"), "Linked MCP config should remain visible as read-only")
+    precondition(!linkedText.contains("Token Saver will not replace"), "Read-only MCP is not a load failure")
+
+    print("PASS TokenSaverUIFixture headless verification (unconstrained <=420pt EN/ZH layout, real SettingsView .tokenSaver routing, timer cancellation/expiry on isolated NSPasteboard, TokenSaverSettingsPane, warmup/env/config-sets & linked MCP read-only)")
+}
+
+private func prepareLinkedMCPFixture(_ home: URL) throws {
+    let fm = FileManager.default
+    let config = home.appendingPathComponent(".gemini/antigravity/mcp_config.json")
+    let source = home.appendingPathComponent(".gemini/config/mcp_config.json")
+    try fm.createDirectory(at: config.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try fm.createDirectory(at: source.deletingLastPathComponent(), withIntermediateDirectories: true)
+    if !fm.fileExists(atPath: config.path) {
+        try Data(#"{"mcpServers":{"fixture-linked":{"command":"/usr/bin/true"}}}"#.utf8).write(to: source)
+        try fm.createSymbolicLink(at: config, withDestinationURL: source)
+    }
 }
 
 struct TokenSaverUIFixtureApp: App {
-    @StateObject var runtime = CLIProxyRuntimeController()
-    @State var draft = CLIProxyGatewaySettings()
     @StateObject private var releases = fixtureReleaseManager()
     @State private var tab = 0
     var body: some Scene {
         WindowGroup("AIUsage Token Saver — isolated fixture") {
             TabView(selection: $tab) {
-                SubscriptionGatewaySettingsRuntimePane(runtime:runtime,draftSettings:$draft,onApply:{},tokenSaverHome:fixtureHome(),tokenSaverRTK:fixtureRTK())
-                    .tabItem { Text("Runtime") }.tag(0)
-                SubscriptionGatewaySettingsTokenSaverPane(home:fixtureHome(),rtk:fixtureRTK())
-                    .tabItem { Text("Token Saver") }.tag(1)
                 ScrollView {
-                    if tab == 2 {
-                        VStack(alignment: .leading, spacing: 20) {
-                            FixtureCPAUpdatesSection()
-                            TokenSaverUpdatesSection(manager:releases, onOpenRuntime: { tab = 1 })
-                        }.padding(20)
-                    }
+                    TokenSaverSettingsPane(home: fixtureHome(), rtk: fixtureRTK(), releases: releases).padding(20)
                 }
-                    .tabItem { Text("Updates (offline fixtures)") }.tag(2)
+                .tabItem { Text("Token Saver") }.tag(0)
+                ScrollView { AgentConfigToolsView(home: fixtureHome(), platform: .antigravity).padding(20) }
+                    .tabItem { Text("Linked MCP (read-only)") }.tag(1)
             }
-            .padding(20).frame(minWidth:760,minHeight:920)
-            .onAppear { NSApp.activate(ignoringOtherApps:true) }
+            .padding(20).frame(minWidth: 760, minHeight: 920)
+            .onAppear { NSApp.activate(ignoringOtherApps: true) }
         }
     }
 }
@@ -280,6 +300,7 @@ struct TokenSaverUIFixtureEntry {
             try await runHeadlessUIVerification()
             return
         }
+        try prepareLinkedMCPFixture(fixtureHome())
         TokenSaverUIFixtureApp.main()
     }
 }

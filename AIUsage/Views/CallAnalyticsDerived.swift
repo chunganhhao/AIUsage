@@ -7,7 +7,7 @@ import QuotaBackend
 
 /// 来源筛选。
 enum CallScope: String, CaseIterable, Identifiable {
-    case all, claude, codex, opencode
+    case all, claude, codex, opencode, antigravity
     var id: String { rawValue }
 
     var sourceKind: CallSourceKind? {
@@ -16,6 +16,7 @@ enum CallScope: String, CaseIterable, Identifiable {
         case .claude: return .claude
         case .codex: return .codex
         case .opencode: return .opencode
+        case .antigravity: return .antigravity
         }
     }
 
@@ -25,6 +26,7 @@ enum CallScope: String, CaseIterable, Identifiable {
         case .claude: return "Claude Code"
         case .codex: return "Codex"
         case .opencode: return "OpenCode"
+        case .antigravity: return "Antigravity"
         }
     }
 }

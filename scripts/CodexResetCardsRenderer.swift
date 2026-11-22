@@ -16,6 +16,7 @@ struct CodexResetCardsRenderer {
         try FileManager.default.createDirectory(at: output, withIntermediateDirectories: true)
         let directory = scratch.appendingPathComponent("reset-ui-fixture-" + UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        FixtureResetEnvironment.home = directory
         StubURLProtocol.install(hosts: ["chatgpt.com"])
         defer { StubURLProtocol.uninstall(); try? FileManager.default.removeItem(at: directory) }
 

@@ -22,6 +22,14 @@ struct SubscriptionGatewayView: View {
     var body: some View {
         VStack(spacing: 0) {
             header
+            if !CLIProxyRuntimeController.managedRuntimeAvailable {
+                GatewayErrorBanner(message: L(
+                    CLIProxyRuntimeController.managedRuntimeHoldMessage + " Stop any older instance and check existing client routes before using them.",
+                    "为保护账号，托管 CPA 已暂停；原生账号监控与独立 API Key 路由不受影响。请先停止旧实例并检查现有客户端路由。",
+                    "CPA do AIUsage quản lý đang tạm dừng để bảo vệ tài khoản. Hãy dừng phiên bản cũ và kiểm tra các route đã cấu hình trước khi dùng."
+                ))
+                .padding(.horizontal, 18)
+            }
             sectionNavigation
             sectionContent
         }

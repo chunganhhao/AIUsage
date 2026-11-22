@@ -83,12 +83,17 @@ struct CLIProxyAddUpstreamSheet: View {
                         GatewayErrorBanner(message: error)
                     }
 
-                    switch section {
-                    case .oauth: oauthSection
-                    case .plugins: pluginSection
-                    case .aiusage: aiusageSection
-                    case .apiKey: apiKeySection
-                    case .migration: migrationSection
+                    if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+                        apiKeyOnlyNoticeBanner
+                        apiKeySection
+                    } else {
+                        switch section {
+                        case .oauth: oauthSection
+                        case .plugins: pluginSection
+                        case .aiusage: aiusageSection
+                        case .apiKey: apiKeySection
+                        case .migration: migrationSection
+                        }
                     }
                 }
                 .padding(22)
@@ -98,7 +103,9 @@ struct CLIProxyAddUpstreamSheet: View {
                minHeight: 500, idealHeight: 640, maxHeight: 720)
         .interactiveDismissDisabled(manager.oauthFlowState.isActive)
         .task {
-            if runtime.state.isRunning {
+            if !CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild {
+                section = .apiKey
+            } else if runtime.state.isRunning {
                 await manager.refreshProviderPlugins(includeStore: true)
             }
         }
@@ -140,10 +147,15 @@ struct CLIProxyAddUpstreamSheet: View {
             ProviderIconView("cliproxyapi", size: 42)
             VStack(alignment: .leading, spacing: 3) {
                 Text(L("Add an upstream", "添加上游")).font(.title2.weight(.bold))
-                Text(L(
-                    "Choose how the upstream reaches CPA: sign-in, plugin, AIUsage copy, API key, or file migration.",
-                    "选择上游进入 CPA 的方式：登录、插件、AIUsage 副本、API Key 或文件迁移。"
-                ))
+                Text(CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+                     ? L(
+                        "Choose how the upstream reaches CPA: sign-in, plugin, AIUsage copy, API key, or file migration.",
+                        "选择上游进入 CPA 的方式：登录、插件、AIUsage 副本、API Key 或文件迁移。"
+                     )
+                     : L(
+                        "This build runs CPA in API-key-only mode for official OpenAI-compatible upstreams.",
+                        "当前构建以仅 API Key 模式运行 CPA，仅支持官方 OpenAI 兼容上游。"
+                     ))
                 .font(.subheadline)
                 .foregroundStyle(.secondary)
             }
@@ -158,9 +170,37 @@ struct CLIProxyAddUpstreamSheet: View {
         .padding(22)
     }
 
+    private var visibleSections: [GatewayUpstreamSection] {
+        CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild
+            ? GatewayUpstreamSection.allCases
+            : [.apiKey]
+    }
+
+    private var apiKeyOnlyNoticeBanner: some View {
+        GatewayCard {
+            HStack(alignment: .top, spacing: 11) {
+                Image(systemName: "checkmark.shield.fill")
+                    .font(.title3)
+                    .foregroundStyle(.orange)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(L("CPA subscription accounts unavailable in this build", "当前构建不提供 CPA 订阅账号接入"))
+                        .font(.subheadline.weight(.semibold))
+                    Text(L(
+                        "Consumer subscription sign-in, sync, plugins, and auth-file migration are disabled here. Native Codex monitoring in AIUsage and official OpenAI-compatible API-key upstreams below remain available separately.",
+                        "消费者订阅登录、同步、插件与认证文件迁移在此构建中已停用；AIUsage 原生 Codex 与下方官方 OpenAI 兼容 API Key 上游仍可独立使用。"
+                    ))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+                Spacer(minLength: 0)
+            }
+        }
+    }
+
     private var sectionPicker: some View {
         HStack(spacing: 4) {
-            ForEach(GatewayUpstreamSection.allCases) { candidate in
+            ForEach(visibleSections) { candidate in
                 Button {
                     section = candidate
                 } label: {
@@ -186,17 +226,40 @@ struct CLIProxyAddUpstreamSheet: View {
 
     // MARK: - Core OAuth
 
+    private var allowedOAuthProviders: [CLIProxyOAuthProvider] {
+        CLIProxyOAuthProvider.allCases.filter {
+            CLIProxyCapabilityMatrix.directOAuthRejectionReason(for: $0.rawValue) == nil
+        }
+    }
+
     private var oauthSection: some View {
         addSection(
             title: L("Sign in with a subscription account", "订阅账号登录"),
             subtitle: L(
-                "These five providers are built into the installed official CPA runtime and authorize directly inside CPA.",
-                "以下五种登录由当前安装的官方 CPA 运行时内置支持，授权在 CPA 内独立完成。"
+                "Direct CPA sidecar OAuth sign-in is disabled so unverified accounts cannot enter the active routing pool before ChatGPT Go/Free plan verification. Connect your Codex account in AIUsage Subscriptions or import a verified Codex Go/Free auth file.",
+                "为防止未经校验的账号在套餐验证前进入活动路由池，已禁用 CPA 直接 OAuth 登录。请先在 AIUsage「订阅监测」中登录 Codex，或在「高级迁移」中导入已验证的 ChatGPT Go / ChatGPT Free 认证文件。"
             )
         ) {
-            LazyVGrid(columns: providerColumns, alignment: .leading, spacing: 11) {
-                ForEach(CLIProxyOAuthProvider.allCases) { provider in
-                    oauthProviderCard(provider)
+            if allowedOAuthProviders.isEmpty {
+                HStack(spacing: 10) {
+                    Button(L("Connect from AIUsage", "从 AIUsage 接入")) {
+                        section = .aiusage
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
+
+                    Button(L("Import Codex Auth File", "导入 Codex 认证文件")) {
+                        section = .migration
+                    }
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+                }
+                .padding(.vertical, 4)
+            } else {
+                LazyVGrid(columns: providerColumns, alignment: .leading, spacing: 11) {
+                    ForEach(allowedOAuthProviders) { provider in
+                        oauthProviderCard(provider)
+                    }
                 }
             }
         }
@@ -397,8 +460,8 @@ struct CLIProxyAddUpstreamSheet: View {
             addSection(
                 title: L("Connect an existing AIUsage account", "接入现有 AIUsage 账号"),
                 subtitle: L(
-                    "Only accounts with a verified conversion adapter appear here (currently Codex and Antigravity). Login material is written into CPA; the Subscription account itself is unchanged.",
-                    "此处只显示有已验证转换适配器的账号（当前为 Codex 与 Antigravity）。会把登录材料写入 CPA；订阅账号本身不变。"
+                    "Only eligible Codex accounts (ChatGPT Go / ChatGPT Free) with a verified conversion adapter appear here. Login material is written into CPA; the Subscription account itself is unchanged.",
+                    "此处仅显示通过校验的 Codex（ChatGPT Go / ChatGPT Free）账号。会把登录材料写入 CPA；订阅账号本身不变。"
                 )
             ) {
                 if manager.syncCandidates.isEmpty {

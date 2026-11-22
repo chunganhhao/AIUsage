@@ -79,6 +79,7 @@ extension ProxyViewModel {
                 do {
                     try runtimeService.clearCodexRuntime()
                 } catch {
+                    reportOperationError(error)
                     proxyRuntimeLog.error("Failed to clear Codex runtime while restoring empty activation state: \(String(describing: error), privacy: .public)")
                 }
             }
@@ -127,6 +128,7 @@ extension ProxyViewModel {
             do {
                 try runtimeService.clearRuntime()
             } catch {
+                reportOperationError(error)
                 proxyRuntimeLog.error("Failed to clear proxy runtime while restoring empty activation state: \(String(describing: error), privacy: .public)")
             }
             return
@@ -144,6 +146,7 @@ extension ProxyViewModel {
             do {
                 try runtimeService.clearRuntime()
             } catch {
+                reportOperationError(error)
                 proxyRuntimeLog.error("Failed to clear proxy runtime for missing restored node: \(String(describing: error), privacy: .public)")
             }
             return
