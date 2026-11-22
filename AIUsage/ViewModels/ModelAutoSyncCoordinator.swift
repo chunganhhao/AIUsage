@@ -43,18 +43,27 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         var refreshedPrices = 0
         /// 首次同步记录为基线的上游模型数（这些模型不会被自动加入）。
         var baselineRecorded = 0
-        var fetchError: String?
+        var error: String?
         var pricingUnavailable = false
         /// 模型由所链接的 API 提供商托管（只同步了价格）。
         var managedByProvider = false
 
         var changed: Bool { !addedModels.isEmpty || filledPrices > 0 || refreshedPrices > 0 }
 
+        static var saveFailure: Report {
+            Report(error: L(
+                "Could not save models and prices. Try again.",
+                "无法保存模型与价格，请重试。",
+                "Không thể lưu mô hình và bảng giá. Hãy thử lại."
+            ))
+        }
+
         mutating func absorb(_ other: Report) {
             addedModels += other.addedModels
             filledPrices += other.filledPrices
             refreshedPrices += other.refreshedPrices
             baselineRecorded += other.baselineRecorded
+            error = error ?? other.error
         }
     }
 
@@ -130,17 +139,17 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         for id in providers {
             let report = await syncProvider(id, priceCatalog: priceCatalog)
             total.absorb(report)
-            if report.fetchError != nil { failures += 1 }
+            if report.error != nil { failures += 1 }
         }
         for id in profiles {
             let report = await syncProfile(id, priceCatalog: priceCatalog, interactive: false)
             total.absorb(report)
-            if report.fetchError != nil { failures += 1 }
+            if report.error != nil { failures += 1 }
         }
         for id in openCodeNodes {
             let report = await syncOpenCode(id, priceCatalog: priceCatalog)
             total.absorb(report)
-            if report.fetchError != nil { failures += 1 }
+            if report.error != nil { failures += 1 }
         }
 
         let preservedOpenCodeKeys = isOpenCodeVisible
@@ -190,7 +199,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             }
             report.pricingUnavailable = priceCatalog == nil
             saveState()
-            show(summaryFlash(for: report, failures: report.fetchError == nil ? 0 : 1, subject: displayName(for: target)))
+            show(summaryFlash(for: report, failures: report.error == nil ? 0 : 1, subject: displayName(for: target)))
         }
     }
 
@@ -228,7 +237,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.baselineRecorded = decision.isFirstSync ? upstream.count : 0
             pendingEntry = decision.entry
         case .failure(let message):
-            report.fetchError = message
+            report.error = message
         case .skipped:
             break
         }
@@ -259,10 +268,11 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.pricingUnavailable = true
         }
 
-        if let pendingEntry { state.entries[target.stateKey] = pendingEntry }
+        guard commitCatalogSync(pendingEntry, for: target, save: {
+            provider == original || APIProviderStore.shared.saveCatalogUpdate(provider)
+        }) else { return .saveFailure }
         guard provider != original else { return report }
 
-        APIProviderStore.shared.upsert(provider)
         await APIProviderDistributor.shared.propagateCatalog(
             from: provider,
             modelNamesChanged: !report.addedModels.isEmpty
@@ -304,7 +314,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.baselineRecorded = decision.isFirstSync && decision.newModels.isEmpty ? upstream.count : 0
             pendingEntry = decision.entry
         case .failure(let message):
-            report.fetchError = message
+            report.error = message
         case .skipped:
             break
         }
@@ -328,10 +338,9 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.pricingUnavailable = true
         }
 
-        if let pendingEntry { state.entries[target.stateKey] = pendingEntry }
-        if catalog != original {
-            ProxyViewModel.shared.applyModelCatalogUpdate(nodeID: id, catalog: catalog)
-        }
+        guard commitCatalogSync(pendingEntry, for: target, save: {
+            catalog == original || ProxyViewModel.shared.applyModelCatalogUpdate(nodeID: id, catalog: catalog)
+        }) else { return .saveFailure }
         return report
     }
 
@@ -370,7 +379,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.baselineRecorded = decision.isFirstSync ? upstream.count : 0
             pendingEntry = decision.entry
         case .failure(let message):
-            report.fetchError = message
+            report.error = message
         case .skipped:
             break
         }
@@ -402,11 +411,16 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             report.pricingUnavailable = true
         }
 
-        if let pendingEntry { state.entries[target.stateKey] = pendingEntry }
-        if node != original {
-            OpenCodeNodeStore.shared.upsert(node)
-        }
+        guard commitCatalogSync(pendingEntry, for: target, save: {
+            node == original || OpenCodeNodeStore.shared.saveCatalogUpdate(node)
+        }) else { return .saveFailure }
         return report
+    }
+
+    private func commitCatalogSync(_ entry: StateFile.Entry?, for target: Target, save: () -> Bool) -> Bool {
+        guard save() else { return false }
+        if let entry { state.entries[target.stateKey] = entry }
+        return true
     }
 
     // MARK: - Upstream Fetch
@@ -597,7 +611,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         }
 
         if parts.isEmpty {
-            if let error = report.fetchError, subject != nil {
+            if let error = report.error {
                 return .error(prefix + error)
             }
             if report.managedByProvider, subject != nil {
@@ -622,7 +636,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
 
         var message = prefix + parts.joined(separator: L(", ", "，", ", "))
         if failures > 0 {
-            message += L(" (\(failures) upstreams unreachable)", "（\(failures) 个上游读取失败）", " (\(failures) nguồn không thể kết nối)")
+            message += L(" (\(failures) sync failures)", "（\(failures) 项同步失败）", " (\(failures) mục đồng bộ thất bại)")
         }
         return .success(message)
     }

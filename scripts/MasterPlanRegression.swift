@@ -40,9 +40,47 @@ private actor Attempts {
         try mcp(root.appendingPathComponent("mcp"))
         try priority(root.appendingPathComponent("priority"))
         try burnRate()
+        try catalogSyncAndQuotaShare()
         try await warmup(root.appendingPathComponent("warmup"))
         try await reviewRegressions(root.appendingPathComponent("review"))
         print("Master plan regression: \(assertions) assertions passed; temporary homes, fake vault, no paid requests")
+    }
+
+    static func catalogSyncAndQuotaShare() throws {
+        let catalog = CatalogSyncFixture()
+        try check(catalog.sync(upstream: ["existing"], existing: ["existing"], save: { true }).isEmpty,
+                  "first catalog sync records the baseline")
+        let upstream = ["existing", "new"]
+        try check(catalog.sync(upstream: upstream, existing: ["existing"], save: { false }) == ["new"],
+                  "new model is detected before failed catalog save")
+        try check(catalog.sync(upstream: upstream, existing: ["existing"], save: { true }) == ["new"],
+                  "failed catalog save leaves new model eligible for retry")
+        try check(catalog.sync(upstream: upstream, existing: ["existing"], save: { true }).isEmpty,
+                  "successfully saved model is now known to the baseline")
+
+        let oldHost = "100.64.1.2"
+        let https = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://mini.example.test/", savedHost: oldHost, savedPort: 4318, portInput: "4318"
+        )
+        try check(AppSettingsAddressFixture.remoteBaseURL(host: https.host, port: https.port) == "https://mini.example.test:443",
+                  "pasted HTTPS URL defaults to 443, not the previous HTTP port")
+        let explicit = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://mini.example.test:8443", savedHost: oldHost, savedPort: 4318, portInput: "9443"
+        )
+        try check(explicit.port == 8443, "pasted explicit HTTPS port wins")
+        let reapplied = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            explicit.host, savedHost: explicit.host, savedPort: explicit.port, portInput: "\(explicit.port)"
+        )
+        try check(reapplied.port == 8443, "reapplying normalized settings preserves the custom port")
+        let editedPort = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://mini.example.test", savedHost: oldHost, savedPort: 4318, portInput: "9443"
+        )
+        try check(editedPort.port == 9443, "an edited port field overrides the HTTPS default")
+        let http = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "127.0.0.1", savedHost: oldHost, savedPort: 4318, portInput: "4319"
+        )
+        try check(AppSettingsAddressFixture.remoteBaseURL(host: http.host, port: http.port) == "http://127.0.0.1:4319",
+                  "loopback HTTP still uses the configured port")
     }
     static func analytics(_ home: URL) async throws {
         let actual = home.appendingPathComponent("archive")

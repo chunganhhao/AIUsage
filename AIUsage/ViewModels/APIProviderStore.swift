@@ -60,6 +60,15 @@ final class APIProviderStore: ObservableObject {
         return updated
     }
 
+    func saveCatalogUpdate(_ provider: APIProvider) -> Bool {
+        guard let index = providers.firstIndex(where: { $0.id == provider.id }) else { return false }
+        var updated = providers
+        updated[index] = provider
+        guard save(updated) else { return false }
+        providers = updated
+        return true
+    }
+
     func delete(id: String) {
         providers.removeAll { $0.id == id }
         save()
@@ -97,6 +106,10 @@ final class APIProviderStore: ObservableObject {
     }
 
     private func save() {
+        _ = save(providers)
+    }
+
+    private func save(_ providers: [APIProvider]) -> Bool {
         let file = StoreFile(version: Self.storeVersion, providers: providers)
         do {
             let dir = (Self.storePath as NSString).deletingLastPathComponent
@@ -104,8 +117,10 @@ final class APIProviderStore: ObservableObject {
             let data = try JSONEncoder.profileEncoder.encode(file)
             try data.write(to: URL(fileURLWithPath: Self.storePath), options: .atomic)
             try? fileManager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: Self.storePath)
+            return true
         } catch {
             apiProviderStoreLog.error("Failed to save API providers: \(String(describing: error), privacy: .public)")
+            return false
         }
     }
 

@@ -143,7 +143,20 @@ final class OpenCodeNodeStore: ObservableObject {
             sortNodes()
         }
         save()
+        reapplyIfRunning(updated)
+    }
 
+    func saveCatalogUpdate(_ node: OpenCodeNode) -> Bool {
+        guard let index = nodes.firstIndex(where: { $0.id == node.id }) else { return false }
+        var updated = nodes
+        updated[index] = node
+        guard save(nodes: updated) else { return false }
+        nodes = updated
+        reapplyIfRunning(node)
+        return true
+    }
+
+    private func reapplyIfRunning(_ updated: OpenCodeNode) {
         // 编辑当前激活节点后立即重新激活（重写受管层；代理参数未变时进程原地复用）。
         if activeNodeIds.contains(updated.id) {
             Task { [weak self] in
@@ -691,6 +704,10 @@ final class OpenCodeNodeStore: ObservableObject {
 
     @discardableResult
     func save() -> Bool {
+        save(nodes: nodes)
+    }
+
+    private func save(nodes: [OpenCodeNode]) -> Bool {
         lastSaveError = nil
         let file = StoreFile(
             version: Self.storeVersion,
