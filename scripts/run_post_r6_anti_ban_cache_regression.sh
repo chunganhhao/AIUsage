@@ -2839,6 +2839,7 @@ oc_error_enum = function(opencode_src, 'enum OpenCodeNodeStoreError: LocalizedEr
 oc_blocks = "\n\n".join([
     function(opencode_src, '    func delete(_ node: OpenCodeNode)'),
     function(opencode_src, '    func upsert(_ node: OpenCodeNode)'),
+    function(opencode_src, '    private func reapplyIfRunning('),
     function(opencode_src, '    func activate(_ node: OpenCodeNode)'),
     function(opencode_src, '    func activate(_ nodes: [OpenCodeNode])'),
     function(opencode_src, '    func deactivate(_ node: OpenCodeNode)'),
@@ -2848,6 +2849,7 @@ oc_blocks = "\n\n".join([
     function(opencode_src, '    func stopProxyOnly(_ node: OpenCodeNode)'),
     function(opencode_src, '    private func load()'),
     function(opencode_src, '    @discardableResult\n    func save()'),
+    function(opencode_src, '    private func save(nodes: [OpenCodeNode])'),
 ])
 
 legacy_upgrade_swift = f"""import Foundation

@@ -280,11 +280,17 @@ final class APIProviderDistributor {
     /// - OpenCode：模型与价格条目跟随主配置（保留本地 modalities），需要重写 opencode.json；
     /// - CPA：仅在模型名单变化时更新上游池。
     /// 已局部覆盖模型字段的链接节点不受影响。
-    func propagateCatalog(from provider: APIProvider, modelNamesChanged: Bool) async {
-        guard !containmentFencedProviderIds.contains(provider.id) else { return }
+    @discardableResult
+    func propagateCatalog(
+        from provider: APIProvider,
+        modelNamesChanged: Bool,
+        includeOpenCode: Bool = true
+    ) async -> Bool {
+        guard !containmentFencedProviderIds.contains(provider.id) else { return true }
         let writeGeneration = providerWriteGeneration[provider.id, default: 0]
-        await withProviderSerialization(for: provider.id) {
-            guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return }
+        return await withProviderSerialization(for: provider.id) {
+            guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return true }
+            var allSaved = true
             let providerNames = ProxyConfiguration.ModelCatalog(mappedModels: provider.models).models
             let nameSet = Set(providerNames)
 
@@ -296,12 +302,14 @@ final class APIProviderDistributor {
                     pricingOverrides: local.pricingOverrides.filter { nameSet.contains($0.key) },
                     supports1MModels: local.supports1MModels.filter(nameSet.contains)
                 )
-                if updated != local {
-                    proxyVM.applyModelCatalogUpdate(nodeID: child.id, catalog: updated)
+                if updated != local, !proxyVM.applyModelCatalogUpdate(nodeID: child.id, catalog: updated) {
+                    allSaved = false
                 }
             }
 
-            if let child = openCodeChild(for: provider.id),
+            if includeOpenCode,
+               AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections),
+               let child = openCodeChild(for: provider.id),
                !(child.overriddenKeys?.contains(APIProviderSharedKey.models) ?? false) {
                 let previousByID = Dictionary(child.modelEntries.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
                 var updated = child
@@ -314,8 +322,8 @@ final class APIProviderDistributor {
                     return merged
                 }
                 updated.pricingCurrency = updated.modelEntries.contains { $0.hasPricing } ? .usd : child.pricingCurrency
-                if updated != child {
-                    openCodeStore.upsert(updated)
+                if updated != child, !openCodeStore.saveCatalogUpdate(updated) {
+                    allSaved = false
                 }
             }
 
@@ -324,6 +332,7 @@ final class APIProviderDistributor {
                APIProviderCPALoopGuard.blockReason(for: provider) == nil {
                 await upsertCPAChild(provider, writeGeneration: writeGeneration)
             }
+            return allSaved
         }
     }
 

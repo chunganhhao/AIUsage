@@ -57,18 +57,25 @@ struct AlertBanner: View {
 private struct ShimmerModifier: ViewModifier {
     @State private var phase: CGFloat = -1
 
+    static let gradientStops: [Gradient.Stop] = [
+        .init(color: .clear, location: 0),
+        .init(color: .white.opacity(0.12), location: 0.5),
+        .init(color: .clear, location: 1)
+    ]
+
+    static func gradientPoints(for phase: CGFloat) -> (start: UnitPoint, end: UnitPoint) {
+        (UnitPoint(x: phase - 0.3, y: phase - 0.3), UnitPoint(x: phase + 0.3, y: phase + 0.3))
+    }
+
     func body(content: Content) -> some View {
+        let points = Self.gradientPoints(for: phase)
         content
             .overlay(
-                AnyView(LinearGradient(
-                    stops: [
-                        .init(color: .clear, location: max(0, phase - 0.3)),
-                        .init(color: .white.opacity(0.12), location: phase),
-                        .init(color: .clear, location: min(1, phase + 0.3))
-                    ],
-                    startPoint: .topLeading,
-                    endPoint: .bottomTrailing
-                ))
+                LinearGradient(
+                    stops: Self.gradientStops,
+                    startPoint: points.start,
+                    endPoint: points.end
+                )
                 .blendMode(.screen)
             )
             .clipShape(RoundedRectangle(cornerRadius: 8))

@@ -152,9 +152,11 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             if report.error != nil { failures += 1 }
         }
 
-        let preservedOpenCodeKeys = isOpenCodeVisible
-            ? []
-            : Array(state.entries.keys.filter { $0.hasPrefix("opencode:") })
+        let preserveOpenCodeState = !isOpenCodeVisible
+            || !AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+        let preservedOpenCodeKeys = preserveOpenCodeState
+            ? Array(state.entries.keys.filter { $0.hasPrefix("opencode:") })
+            : []
         pruneState(validKeys: Set(
             providers.map { Target.provider($0).stateKey }
                 + profiles.map { Target.profile($0).stateKey }
@@ -195,7 +197,9 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             case .profile(let id):
                 report = await syncProfile(id, priceCatalog: priceCatalog, interactive: true)
             case .openCode(let id):
+                guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections) else { return }
                 report = await syncOpenCode(id, priceCatalog: priceCatalog)
+                guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections) else { return }
             }
             report.pricingUnavailable = priceCatalog == nil
             saveState()
@@ -271,12 +275,16 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         guard commitCatalogSync(pendingEntry, for: target, save: {
             provider == original || APIProviderStore.shared.saveCatalogUpdate(provider)
         }) else { return .saveFailure }
-        guard provider != original else { return report }
 
-        await APIProviderDistributor.shared.propagateCatalog(
+        let isOpenCodeVisible = AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+        let propagated = await APIProviderDistributor.shared.propagateCatalog(
             from: provider,
-            modelNamesChanged: !report.addedModels.isEmpty
+            modelNamesChanged: !report.addedModels.isEmpty,
+            includeOpenCode: isOpenCodeVisible
         )
+        if !propagated {
+            report.error = report.error ?? Report.saveFailure.error
+        }
         return report
     }
 
@@ -350,10 +358,14 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         _ id: String,
         priceCatalog: ModelsDevPricingService.Catalog?
     ) async -> Report {
+        guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections) else {
+            return Report()
+        }
         let target = Target.openCode(id)
         let fetched = await fetchUpstream(for: target)
 
-        guard var node = OpenCodeNodeStore.shared.nodes.first(where: { $0.id == id }) else { return Report() }
+        guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections),
+              var node = OpenCodeNodeStore.shared.nodes.first(where: { $0.id == id }) else { return Report() }
         var report = Report()
         // 模型与价格条目都随所链接的提供商传播，这里不重复处理。
         if linkedProvider(node.linkedProviderId) != nil,
@@ -460,7 +472,8 @@ final class ModelAutoSyncCoordinator: ObservableObject {
             }
             return make(meta.proxy.normalizedUpstreamBaseURL, meta.proxy.upstreamAPIKey, .openAICompatible, requiresKey: true)
         case .openCode(let id):
-            guard let node = OpenCodeNodeStore.shared.nodes.first(where: { $0.id == id }) else { return nil }
+            guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections),
+                  let node = OpenCodeNodeStore.shared.nodes.first(where: { $0.id == id }) else { return nil }
             if linkedProvider(node.linkedProviderId) != nil,
                !(node.overriddenKeys?.contains(APIProviderSharedKey.models) ?? false) {
                 return nil
@@ -593,6 +606,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         case .profile(let id):
             return NodeProfileStore.shared.profile(for: id)?.metadata.name ?? ""
         case .openCode(let id):
+            guard AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections) else { return "" }
             return OpenCodeNodeStore.shared.nodes.first { $0.id == id }?.displayName ?? ""
         }
     }
@@ -637,6 +651,7 @@ final class ModelAutoSyncCoordinator: ObservableObject {
         var message = prefix + parts.joined(separator: L(", ", "，", ", "))
         if failures > 0 {
             message += L(" (\(failures) sync failures)", "（\(failures) 项同步失败）", " (\(failures) mục đồng bộ thất bại)")
+            return .error(message)
         }
         return .success(message)
     }

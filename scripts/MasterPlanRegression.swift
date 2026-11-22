@@ -40,13 +40,13 @@ private actor Attempts {
         try mcp(root.appendingPathComponent("mcp"))
         try priority(root.appendingPathComponent("priority"))
         try burnRate()
-        try catalogSyncAndQuotaShare()
+        try await catalogSyncAndQuotaShare()
         try await warmup(root.appendingPathComponent("warmup"))
         try await reviewRegressions(root.appendingPathComponent("review"))
         print("Master plan regression: \(assertions) assertions passed; temporary homes, fake vault, no paid requests")
     }
 
-    static func catalogSyncAndQuotaShare() throws {
+    static func catalogSyncAndQuotaShare() async throws {
         let catalog = CatalogSyncFixture()
         try check(catalog.sync(upstream: ["existing"], existing: ["existing"], save: { true }).isEmpty,
                   "first catalog sync records the baseline")
@@ -72,6 +72,19 @@ private actor Attempts {
             explicit.host, savedHost: explicit.host, savedPort: explicit.port, portInput: "\(explicit.port)"
         )
         try check(reapplied.port == 8443, "reapplying normalized settings preserves the custom port")
+        let trailingSlash = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://mini.example.test/", savedHost: "https://mini.example.test", savedPort: 8443, portInput: "8443"
+        )
+        try check(trailingSlash.port == 8443, "equivalent HTTPS URL with trailing slash preserves custom port")
+        let ipv6Bracket = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fd7a::1]", savedHost: "https://fd7a::1", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6Bracket.port == 8443 && AppSettingsAddressFixture.remoteBaseURL(host: ipv6Bracket.host, port: ipv6Bracket.port) == "https://[fd7a::1]:8443",
+                  "equivalent bracketed IPv6 HTTPS URL preserves custom port")
+        let httpToHTTPS = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://mini.example.test", savedHost: "mini.example.test", savedPort: 4318, portInput: "4318"
+        )
+        try check(httpToHTTPS.port == 443, "upgrading same host from HTTP to HTTPS still defaults to 443")
         let editedPort = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
             "https://mini.example.test", savedHost: oldHost, savedPort: 4318, portInput: "9443"
         )
@@ -81,6 +94,352 @@ private actor Attempts {
         )
         try check(AppSettingsAddressFixture.remoteBaseURL(host: http.host, port: http.port) == "http://127.0.0.1:4319",
                   "loopback HTTP still uses the configured port")
+
+        // Finding #1: Quota Share client never attaches Authorization over plaintext non-loopback HTTP or redirects
+        final class RecordedRequests: @unchecked Sendable {
+            private let lock = NSLock()
+            private var items: [URLRequest] = []
+            func append(_ req: URLRequest) { lock.withLock { items.append(req) } }
+            func snapshot() -> [URLRequest] { lock.withLock { items } }
+            func clear() { lock.withLock { items.removeAll() } }
+        }
+        let sentRequests = RecordedRequests()
+        let healthData = Data(#"{"ok":true,"generatedAt":"2026-11-22T00:00:00Z"}"#.utf8)
+        let dashboardData = Data(#"{"providers":[]}"#.utf8)
+        for badURL in [
+            "http://100.64.1.2:4318",
+            "http://192.168.1.10:4318",
+            "http://stats.example.test:4318",
+            "http://localhost:4318",
+        ] {
+            sentRequests.clear()
+            let client = await MainActor.run {
+                APIService(baseURL: badURL, accessToken: "aiu-fixture-secret") { req in
+                    sentRequests.append(req)
+                    return (healthData, HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+            }
+            var threwInsecure = false
+            do {
+                _ = try await client.checkHealth()
+            } catch APIError.insecureTransport {
+                threwInsecure = true
+            }
+            try check(threwInsecure && sentRequests.snapshot().isEmpty, "reject plaintext non-loopback \(badURL) before transport")
+        }
+
+        for okURL in [
+            ("http://127.0.0.1:4318", "/api/dashboard", dashboardData),
+            ("http://[::1]:4318", "/api/dashboard", dashboardData),
+            ("http://[::ffff:127.0.0.1]:4318", "/api/dashboard", dashboardData),
+            ("https://stats.example.test:8443", "/api/dashboard", dashboardData),
+        ] {
+            sentRequests.clear()
+            let client = await MainActor.run {
+                APIService(baseURL: okURL.0, accessToken: "aiu-fixture-secret") { req in
+                    sentRequests.append(req)
+                    return (okURL.2, HTTPURLResponse(url: req.url!, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+                }
+            }
+            _ = try await client.fetchDashboard()
+            let captured = sentRequests.snapshot()
+            try check(captured.count == 1
+                        && captured[0].value(forHTTPHeaderField: "Authorization") == "Bearer aiu-fixture-secret",
+                      "allowed transport \(okURL.0) sends Bearer token")
+        }
+
+        // Cross-origin / downgrade response URL or 3xx blocked redirect fails closed
+        let downgradedClient = await MainActor.run {
+            APIService(baseURL: "https://stats.example.test:8443", accessToken: "aiu-fixture-secret") { req in
+                let wrongOrigin = URL(string: "http://stats.example.test:80/api/dashboard")!
+                return (dashboardData, HTTPURLResponse(url: wrongOrigin, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        var caughtDowngrade = false
+        do { _ = try await downgradedClient.fetchDashboard() } catch APIError.insecureTransport { caughtDowngrade = true }
+        try check(caughtDowngrade, "response with mismatched origin rejects before decoding")
+
+        let redirect302Client = await MainActor.run {
+            APIService(baseURL: "https://stats.example.test:8443", accessToken: "aiu-fixture-secret") { req in
+                return (Data(), HTTPURLResponse(url: req.url!, statusCode: 302, httpVersion: nil, headerFields: ["Location": "http://100.64.1.2/leak"])!)
+            }
+        }
+        var caught302 = false
+        do { _ = try await redirect302Client.fetchDashboard() } catch APIError.insecureTransport { caught302 = true }
+        try check(caught302, "blocked 3xx redirect surfaces insecureTransport error")
+
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://stats.example.test:443/health"),
+            to: URL(string: "http://stats.example.test:443/health")
+        ), "redirect downgrading https to http is blocked")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://stats.example.test:443/health"),
+            to: URL(string: "https://evil.example.test:443/health")
+        ), "cross-host redirect is blocked")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://stats.example.test:443/health"),
+            to: URL(string: "https://stats.example.test:8443/health")
+        ), "cross-port redirect is blocked")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "http://127.0.0.1:4318/health"),
+            to: URL(string: "http://100.64.1.2:4318/health")
+        ), "loopback-to-non-loopback HTTP redirect is blocked")
+        try check(APIService.shouldFollowRedirect(
+            from: URL(string: "https://stats.example.test:443/health"),
+            to: URL(string: "https://stats.example.test/health/")
+        ), "same-origin HTTPS redirect with implicit 443 is allowed")
+
+        // Finding #2 & #3: Child propagation errors, unchanged-master reconciliation, and hidden OpenCode isolation
+        await MainActor.run {
+            OpenCodeNodeStore.resetForTest()
+            APIProviderStore.shared.providers.removeAll()
+            ProxyViewModel.shared.profiles.removeAll()
+            ProxyViewModel.shared.failingIDs.removeAll()
+            ProxyViewModel.shared.updateCalls.removeAll()
+            AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+        }
+        let masterID = "prov-1"
+        await MainActor.run {
+            APIProviderStore.shared.providers[masterID] = APIProvider(
+                id: masterID,
+                models: [.init(name: "m1")]
+            )
+            ProxyViewModel.shared.profiles["codex-child"] = NodeProfile(
+                metadata: .init(
+                    id: "codex-child",
+                    nodeType: .codexProxy,
+                    linkedProviderId: masterID,
+                    proxy: .init(modelCatalog: .init(models: ["m1"]))
+                )
+            )
+            ProxyViewModel.shared.profiles["claude-child"] = NodeProfile(
+                metadata: .init(
+                    id: "claude-child",
+                    nodeType: .anthropicDirect,
+                    linkedProviderId: masterID,
+                    proxy: .init(modelCatalog: .init(models: ["m1"]))
+                )
+            )
+            ProxyViewModel.shared.failingIDs = ["codex-child"]
+        }
+        let harness = await MainActor.run { ModelSyncHarness() }
+        // First sync establishes baseline ["m1"] while OpenCode is hidden
+        await MainActor.run { harness.nextUpstreamModels = ["m1"] }
+        _ = await harness.runProviderSync(masterID)
+        let initCountWhileHidden = await MainActor.run { OpenCodeNodeStore.initCount }
+        try check(initCountWhileHidden == 0, "hidden OpenCode is never initialized during background sync")
+
+        // Round 1: upstream adds m2; master saves, claude saves, codex fails
+        await MainActor.run { harness.nextUpstreamModels = ["m1", "m2"] }
+        let failReport = await harness.runProviderSync(masterID)
+        let failFlash = await MainActor.run { harness.flash(for: failReport, failures: 1, subject: "Master") }
+        let claudeModelsAfterFail = await MainActor.run { ProxyViewModel.shared.profiles["claude-child"]?.metadata.proxy.modelCatalog.models ?? [] }
+        let codexModelsAfterFail = await MainActor.run { ProxyViewModel.shared.profiles["codex-child"]?.metadata.proxy.modelCatalog.models ?? [] }
+        try check(failReport.error != nil && failFlash.kind == .error,
+                  "child catalog save failure surfaces error report and error flash even when master added models")
+        try check(claudeModelsAfterFail == ["m1", "m2"] && codexModelsAfterFail == ["m1"],
+                  "healthy sibling keeps saved models while failing child preserves prior catalog")
+
+        // Round 2: master unchanged (m1, m2), codex save recovers
+        await MainActor.run {
+            ProxyViewModel.shared.failingIDs.removeAll()
+            ProxyViewModel.shared.updateCalls.removeAll()
+        }
+        let retryReport = await harness.runProviderSync(masterID)
+        let codexModelsAfterRetry = await MainActor.run { ProxyViewModel.shared.profiles["codex-child"]?.metadata.proxy.modelCatalog.models ?? [] }
+        let callsOnRetry = await MainActor.run { ProxyViewModel.shared.updateCalls }
+        try check(retryReport.error == nil && codexModelsAfterRetry == ["m1", "m2"] && callsOnRetry == ["codex-child"],
+                  "retry with unchanged master heals only the drifted child without rewriting healthy sibling")
+
+        // Round 3: un-hide OpenCode with failing disk write, verify no memory mutation/reapply, then recover
+        await MainActor.run {
+            AppSettings.shared.hiddenSidebarSections.remove(AppSection.opencodeManagement.rawValue)
+            OpenCodeNodeStore.shared.nodes = [
+                OpenCodeNode(id: "oc-child", linkedProviderId: masterID, modelEntries: [.init(id: "m1")])
+            ]
+            OpenCodeNodeStore.shared.failingIDs = ["oc-child"]
+        }
+        let ocFailReport = await harness.runProviderSync(masterID)
+        let ocStateAfterFail = await MainActor.run {
+            (OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id), OpenCodeNodeStore.shared.reapplyCount)
+        }
+        try check(ocFailReport.error != nil && ocStateAfterFail.0 == ["m1"] && ocStateAfterFail.1 == 0,
+                  "failed OpenCode catalog propagation reports error without mutating memory or scheduling reapply")
+
+        await MainActor.run { OpenCodeNodeStore.shared.failingIDs.removeAll() }
+        let ocRetryReport = await harness.runProviderSync(masterID)
+        let ocStateAfterRetry = await MainActor.run {
+            (OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id), OpenCodeNodeStore.shared.reapplyCount)
+        }
+        try check(ocRetryReport.error == nil && ocStateAfterRetry.0 == ["m1", "m2"] && ocStateAfterRetry.1 == 1,
+                  "OpenCode child heals on next sync even when master provider did not change")
+
+        // Round 4 (Codex Round-2 race): Hide OpenCode while propagateCatalog waits on withProviderSerialization lock
+        @MainActor
+        final class ProviderLockGate {
+            private var acquiredCont: CheckedContinuation<Void, Never>?
+            private var releaseCont: CheckedContinuation<Void, Never>?
+            private var didAcquire = false
+            private var didRelease = false
+
+            func signalAcquired() {
+                didAcquire = true
+                acquiredCont?.resume()
+                acquiredCont = nil
+            }
+            func waitAcquired() async {
+                if didAcquire { return }
+                await withCheckedContinuation { acquiredCont = $0 }
+            }
+            func waitRelease() async {
+                if didRelease { return }
+                await withCheckedContinuation { releaseCont = $0 }
+            }
+            func release() {
+                didRelease = true
+                releaseCont?.resume()
+                releaseCont = nil
+            }
+        }
+        let lockGate = await MainActor.run {
+            OpenCodeNodeStore.shared.saveCalls = 0
+            OpenCodeNodeStore.shared.reapplyCount = 0
+            harness.nextUpstreamModels = ["m1", "m2", "m3"]
+            return ProviderLockGate()
+        }
+        let lockHolder = Task { @MainActor in
+            await APIProviderDistributor.shared.holdProviderLock(
+                for: masterID,
+                onAcquired: { lockGate.signalAcquired() },
+                waitRelease: { await lockGate.waitRelease() }
+            )
+        }
+        await lockGate.waitAcquired()
+        let queuedSync = Task { @MainActor in
+            await harness.runProviderSync(masterID)
+        }
+        while !(await MainActor.run { APIProviderDistributor.shared.hasWaiter(for: masterID) }) {
+            await Task.yield()
+        }
+        await MainActor.run {
+            AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+            lockGate.release()
+        }
+        await lockHolder.value
+        let queuedReport = await queuedSync.value
+        let ocStateDuringHiddenRace = await MainActor.run {
+            (
+                OpenCodeNodeStore.shared.saveCalls,
+                OpenCodeNodeStore.shared.reapplyCount,
+                OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id),
+                ProxyViewModel.shared.profiles["codex-child"]?.metadata.proxy.modelCatalog.models ?? [],
+                ProxyViewModel.shared.profiles["claude-child"]?.metadata.proxy.modelCatalog.models ?? []
+            )
+        }
+        try check(queuedReport.error == nil
+                    && ocStateDuringHiddenRace.0 == 0
+                    && ocStateDuringHiddenRace.1 == 0
+                    && ocStateDuringHiddenRace.2 == ["m1", "m2"]
+                    && ocStateDuringHiddenRace.3 == ["m1", "m2", "m3"]
+                    && ocStateDuringHiddenRace.4 == ["m1", "m2", "m3"],
+                  "hiding OpenCode while propagateCatalog waits for lock skips OpenCode writes and reapply")
+
+        await MainActor.run {
+            _ = AppSettings.shared.hiddenSidebarSections.remove(AppSection.opencodeManagement.rawValue)
+        }
+        let catchUpReport = await harness.runProviderSync(masterID)
+        let ocStateAfterCatchUp = await MainActor.run {
+            (
+                OpenCodeNodeStore.shared.saveCalls,
+                OpenCodeNodeStore.shared.reapplyCount,
+                OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id)
+            )
+        }
+        try check(catchUpReport.error == nil
+                    && ocStateAfterCatchUp.0 == 1
+                    && ocStateAfterCatchUp.1 == 1
+                    && ocStateAfterCatchUp.2 == ["m1", "m2", "m3"],
+                  "un-hiding OpenCode heals queued-race skipped child on next sync")
+
+        // Round 5 (Codex Round-2 race): Standalone syncOpenCode re-checks visibility after upstream fetch
+        await MainActor.run {
+            OpenCodeNodeStore.shared.nodes = [
+                OpenCodeNode(id: "oc-standalone", linkedProviderId: nil, modelEntries: [.init(id: "m1")])
+            ]
+            OpenCodeNodeStore.shared.saveCalls = 0
+            OpenCodeNodeStore.shared.reapplyCount = 0
+            harness.nextUpstreamModels = ["m1"]
+            harness.onFetchUpstream = nil
+        }
+        let baselineOC = await harness.runOpenCodeSync("oc-standalone")
+        try check(baselineOC.error == nil && baselineOC.addedModels.isEmpty && baselineOC.baselineRecorded == 1,
+                  "standalone OpenCode baseline established while visible")
+
+        await MainActor.run {
+            OpenCodeNodeStore.shared.saveCalls = 0
+            OpenCodeNodeStore.shared.reapplyCount = 0
+            harness.nextUpstreamModels = ["m1", "m2"]
+            harness.onFetchUpstream = {
+                AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+            }
+        }
+        let hiddenMidFetchOC = await harness.runOpenCodeSync("oc-standalone")
+        let midFetchState = await MainActor.run {
+            (
+                OpenCodeNodeStore.shared.saveCalls,
+                OpenCodeNodeStore.shared.reapplyCount,
+                OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id)
+            )
+        }
+        try check(hiddenMidFetchOC.error == nil
+                    && hiddenMidFetchOC.addedModels.isEmpty
+                    && midFetchState.0 == 0
+                    && midFetchState.1 == 0
+                    && midFetchState.2 == ["m1"],
+                  "hiding OpenCode mid-fetch aborts syncOpenCode before reading/saving or committing baseline")
+
+        await MainActor.run {
+            harness.onFetchUpstream = nil
+            _ = AppSettings.shared.hiddenSidebarSections.remove(AppSection.opencodeManagement.rawValue)
+        }
+        let resumedOC = await harness.runOpenCodeSync("oc-standalone")
+        let resumedOCState = await MainActor.run {
+            (
+                OpenCodeNodeStore.shared.saveCalls,
+                OpenCodeNodeStore.shared.reapplyCount,
+                OpenCodeNodeStore.shared.nodes[0].modelEntries.map(\.id)
+            )
+        }
+        try check(resumedOC.error == nil
+                    && resumedOC.addedModels == ["m2"]
+                    && resumedOCState.0 == 1
+                    && resumedOCState.1 == 1
+                    && resumedOCState.2 == ["m1", "m2"],
+                  "un-hiding OpenCode picks up m2 on next sync because aborted run did not commit baseline")
+
+        // Round 6: Hidden OpenCode before syncOpenCode skips both upstream fetch and OpenCodeNodeStore init
+        await MainActor.run {
+            OpenCodeNodeStore.resetForTest()
+            AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+            harness.onFetchUpstream = { preconditionFailure("hidden syncOpenCode must not fetch upstream") }
+        }
+        let preHiddenOC = await harness.runOpenCodeSync("oc-standalone")
+        let preHiddenInitCount = await MainActor.run {
+            harness.onFetchUpstream = nil
+            return OpenCodeNodeStore.initCount
+        }
+        try check(preHiddenOC.error == nil && preHiddenOC.addedModels.isEmpty && preHiddenInitCount == 0,
+                  "already-hidden OpenCode skips both upstream fetch and OpenCodeNodeStore initialization")
+
+        // Finding #6: ShimmerModifier gradient stops stay strictly ordered within 0...1 across animation phases
+        let stopLocations = ShimmerRegressionProbe.stops.map(\.location)
+        try check(stopLocations == [0, 0.5, 1] && zip(stopLocations, stopLocations.dropFirst()).allSatisfy(<),
+                  "ShimmerModifier stops are strictly ordered inside 0...1")
+        for phase in [-1.0, 0.0, 0.5, 2.0] as [CGFloat] {
+            let pts = ShimmerRegressionProbe.points(for: phase)
+            try check(pts.start.x < pts.end.x && pts.start.y < pts.end.y,
+                      "ShimmerModifier gradient sweeps monotonically at phase \(phase)")
+        }
     }
     static func archiveRescanMetrics(_ home: URL) throws {
         let archive = CallAnalyticsArchiveStore(homeDirectory: home.path)
@@ -104,6 +463,32 @@ private actor Attempts {
                   "use the better-sampled 50 ms rescan; without call IDs the 287.5 ms union cannot be reconstructed")
         try check(merged?.outcomeKnownCount == 2 && merged?.successRate == 0,
                   "keep both archived outcome values when the archive has better coverage")
+
+        // Finding #4: Equal-sample tie with partial (fewer total calls) rescan keeps archived metrics
+        let tieArchive = CallAnalyticsArchiveStore(homeDirectory: home.appendingPathComponent("tie").path)
+        let fullDay = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 5,
+            outcomeKnownCount: 2, successCount: 2, durationSampleCount: 2, durationMsTotal: 1000
+        )
+        let partialTie = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 3,
+            outcomeKnownCount: 2, successCount: 0, durationSampleCount: 2, durationMsTotal: 80
+        )
+        _ = tieArchive.freeze(computed: [pastDay: .init(entries: [fullDay], agentInvocations: [])],
+                              todayKey: today, completedFullHistory: true)
+        let tieMerged = tieArchive.freeze(computed: [pastDay: .init(entries: [partialTie], agentInvocations: [])],
+                                          todayKey: today, completedFullHistory: true, backfill: true)[pastDay]?.entries.first
+        try check(tieMerged?.count == 5 && tieMerged?.successRate == 1.0 && tieMerged?.avgDurationMs == 500,
+                  "equal sample count with fewer rescanned calls retains archived outcome and duration")
+
+        let largerTie = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 6,
+            outcomeKnownCount: 2, successCount: 1, durationSampleCount: 2, durationMsTotal: 300
+        )
+        let largerMerged = tieArchive.freeze(computed: [pastDay: .init(entries: [largerTie], agentInvocations: [])],
+                                             todayKey: today, completedFullHistory: true, backfill: true)[pastDay]?.entries.first
+        try check(largerMerged?.count == 6 && largerMerged?.successRate == 0.5 && largerMerged?.avgDurationMs == 150,
+                  "equal sample count with strictly more rescanned calls accepts the new metrics")
     }
 
     static func analytics(_ home: URL) async throws {
@@ -1432,9 +1817,11 @@ private actor Attempts {
                     return lock.withLock { currentStatus }
                 }
                 func waitForStatusRead() async -> Bool {
-                    await Task.detached { [self] in
-                        statusReadStarted.wait(timeout: .now() + 10) == .success
-                    }.value
+                    await withCheckedContinuation { continuation in
+                        DispatchQueue.global(qos: .userInitiated).async { [self] in
+                            continuation.resume(returning: statusReadStarted.wait(timeout: .now() + 10) == .success)
+                        }
+                    }
                 }
                 func finishStatusRead() { statusReadMayFinish.signal() }
                 func register() throws {

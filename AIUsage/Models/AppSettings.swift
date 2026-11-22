@@ -296,10 +296,15 @@ final class AppSettings: ObservableObject {
         let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
         let usesHTTPS = trimmed.lowercased().hasPrefix("https://")
         let parsed = parseRemoteAddress(trimmed)
-        let enteredPort = Int(portInput.trimmingCharacters(in: .whitespaces))
-        let shouldDefaultHTTPSPort = usesHTTPS && trimmed != savedHost && (enteredPort == nil || enteredPort == savedPort)
-        let port = parsed.port ?? (shouldDefaultHTTPSPort ? 443 : enteredPort) ?? (usesHTTPS ? 443 : 4318)
         let host = parsed.host.isEmpty ? "127.0.0.1" : (usesHTTPS ? "https://\(parsed.host)" : parsed.host)
+        let savedTrimmed = savedHost.trimmingCharacters(in: .whitespacesAndNewlines)
+        let savedUsesHTTPS = savedTrimmed.lowercased().hasPrefix("https://")
+        let savedParsedHost = parseRemoteAddress(savedTrimmed).host
+        let normalizedSaved = savedParsedHost.isEmpty ? "127.0.0.1" : (savedUsesHTTPS ? "https://\(savedParsedHost)" : savedParsedHost)
+        let isSameEndpoint = host.caseInsensitiveCompare(normalizedSaved) == .orderedSame
+        let enteredPort = Int(portInput.trimmingCharacters(in: .whitespaces))
+        let shouldDefaultHTTPSPort = usesHTTPS && !isSameEndpoint && (enteredPort == nil || enteredPort == savedPort)
+        let port = parsed.port ?? (shouldDefaultHTTPSPort ? 443 : enteredPort) ?? (usesHTTPS ? 443 : 4318)
         return (host, port)
     }
 

@@ -1,19 +1,44 @@
+import Darwin
 import Foundation
 import QuotaBackend
 
+private final class SameOriginRedirectDelegate: NSObject, URLSessionTaskDelegate {
+    nonisolated override init() { super.init() }
+
+    nonisolated func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        let allowed = APIService.shouldFollowRedirect(from: task.originalRequest?.url, to: request.url)
+        completionHandler(allowed ? request : nil)
+    }
+}
+
 class APIService {
+    typealias Transport = @Sendable (URLRequest) async throws -> (Data, URLResponse)
+
     static let shared = APIService()
     
     private var baseURL: String
     private var accessToken: String?
-    private let session: URLSession
+    private let transport: Transport
+
+    init(baseURL: String, accessToken: String?, transport: @escaping Transport) {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.baseURL = trimmed.hasSuffix("/") ? String(trimmed.dropLast()) : trimmed
+        self.accessToken = accessToken?.nilIfBlank
+        self.transport = transport
+    }
     
-    private init() {
+    private convenience init() {
         let defaults = UserDefaults.standard
         let host = defaults.string(forKey: DefaultsKey.remoteHost) ?? "127.0.0.1"
         let port = defaults.integer(forKey: DefaultsKey.remotePort) == 0 ? 4318 : defaults.integer(forKey: DefaultsKey.remotePort)
-        self.baseURL = AppSettings.remoteBaseURL(host: host, port: port)
-        self.accessToken = QuotaShareTokenStore.load(.remote)
+        let initialURL = AppSettings.remoteBaseURL(host: host, port: port)
+        let initialToken = QuotaShareTokenStore.load(.remote)
         
         // 远程主机是 Tailscale / 局域网直连地址：必须绕过系统 HTTP 代理（Clash 等），
         // 否则代理连不上 100.x 地址会回一个误导性的 502。快照也不能走 URLCache。
@@ -23,7 +48,65 @@ class APIService {
         config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 15
         config.timeoutIntervalForResource = 30
-        self.session = URLSession(configuration: config)
+        let session = URLSession(configuration: config, delegate: SameOriginRedirectDelegate(), delegateQueue: nil)
+        self.init(baseURL: initialURL, accessToken: initialToken) { try await session.data(for: $0) }
+    }
+
+    nonisolated static func isAllowedRemoteURL(_ url: URL) -> Bool {
+        guard let scheme = url.scheme?.lowercased(),
+              let host = url.host,
+              !host.isEmpty else {
+            return false
+        }
+        if scheme == "https" { return true }
+        if scheme == "http" { return isLoopbackHost(host) }
+        return false
+    }
+
+    nonisolated static func isLoopbackHost(_ rawHost: String?) -> Bool {
+        guard var host = rawHost?.trimmingCharacters(in: .whitespacesAndNewlines), !host.isEmpty else {
+            return false
+        }
+        if host.hasPrefix("[") && host.hasSuffix("]") {
+            host = String(host.dropFirst().dropLast())
+        }
+        var addr4 = in_addr()
+        if host.withCString({ inet_pton(AF_INET, $0, &addr4) }) == 1 {
+            return withUnsafeBytes(of: addr4.s_addr) { $0[0] == 127 }
+        }
+        var addr6 = in6_addr()
+        if host.withCString({ inet_pton(AF_INET6, $0, &addr6) }) == 1 {
+            let bytes = withUnsafeBytes(of: addr6) { Array($0) }
+            let isIPv6Loopback = bytes.count == 16 && bytes[0..<15].allSatisfy { $0 == 0 } && bytes[15] == 1
+            let isMappedIPv4Loopback = bytes.count == 16
+                && bytes[0..<10].allSatisfy { $0 == 0 }
+                && bytes[10] == 0xff && bytes[11] == 0xff
+                && bytes[12] == 127
+            return isIPv6Loopback || isMappedIPv4Loopback
+        }
+        return false
+    }
+
+    nonisolated static func shouldFollowRedirect(from originalURL: URL?, to redirectURL: URL?) -> Bool {
+        guard let originalURL,
+              let redirectURL,
+              isAllowedRemoteURL(redirectURL),
+              isSameOrigin(originalURL, redirectURL) else {
+            return false
+        }
+        return true
+    }
+
+    nonisolated static func isSameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
+        guard let lScheme = lhs.scheme?.lowercased(),
+              let rScheme = rhs.scheme?.lowercased(),
+              let lHost = lhs.host?.lowercased(),
+              let rHost = rhs.host?.lowercased() else {
+            return false
+        }
+        let lPort = lhs.port ?? (lScheme == "https" ? 443 : 80)
+        let rPort = rhs.port ?? (rScheme == "https" ? 443 : 80)
+        return lScheme == rScheme && lHost == rHost && lPort == rPort
     }
 
     func updateBaseURL(_ url: String) {
@@ -83,6 +166,10 @@ class APIService {
     }
 
     private func requestData(from url: URL) async throws -> Data {
+        guard Self.isAllowedRemoteURL(url) else {
+            throw APIError.insecureTransport
+        }
+
         var request = URLRequest(url: url)
         if let accessToken {
             request.setValue("Bearer \(accessToken)", forHTTPHeaderField: "Authorization")
@@ -91,7 +178,7 @@ class APIService {
         let data: Data
         let response: URLResponse
         do {
-            (data, response) = try await session.data(for: request)
+            (data, response) = try await transport(request)
         } catch let error as URLError {
             throw APIError.networkError(error, host: url.host.map { "\($0):\(url.port ?? 80)" } ?? baseURL)
         }
@@ -99,10 +186,15 @@ class APIService {
         guard let httpResponse = response as? HTTPURLResponse else {
             throw APIError.invalidResponse
         }
+        if let finalURL = httpResponse.url, !Self.isSameOrigin(url, finalURL) {
+            throw APIError.insecureTransport
+        }
 
         switch httpResponse.statusCode {
         case 200...299:
             return data
+        case 300...399:
+            throw APIError.insecureTransport
         case 401, 403:
             throw APIError.unauthorized
         case 503:
@@ -153,6 +245,7 @@ enum APIError: LocalizedError {
     case unauthorized
     case hostNotReady
     case notQuotaShare
+    case insecureTransport
     
     var errorDescription: String? {
         switch self {
@@ -181,6 +274,12 @@ enum APIError: LocalizedError {
             return AppSettings.localized(
                 "Something answered on this port, but it is not AIUsage quota sharing. Check the port shown on the host.",
                 "该端口有服务响应，但不是 AIUsage 额度共享。请核对主机上显示的端口。"
+            )
+        case .insecureTransport:
+            return AppSettings.localized(
+                "Plaintext HTTP is only allowed for loopback addresses (127.0.0.1 / ::1). Use https:// (such as Tailscale Serve) or a loopback tunnel for remote hosts.",
+                "明文 HTTP 仅允许用于本机回环地址（127.0.0.1 / ::1）。远程主机请使用 https://（例如 Tailscale Serve）或回环隧道。",
+                "HTTP không mã hóa chỉ được phép cho địa chỉ loopback (127.0.0.1 / ::1). Hãy dùng https:// (như Tailscale Serve) hoặc đường hầm loopback cho máy chủ từ xa."
             )
         case .networkError(let error, let host):
             switch error.code {
