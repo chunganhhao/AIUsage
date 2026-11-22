@@ -4,7 +4,9 @@ import QuotaBackend
 
 var testUseChinese = false
 func L(_ en: String, _ zh: String, _ vi: String? = nil, key: String? = nil, file: StaticString = #fileID) -> String { testUseChinese ? zh : en }
-private func check(_ value: Bool) { precondition(value) }
+private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #line) {
+    precondition(value, file: file, line: line)
+}
 
 @main struct ControllerRegression {
     @MainActor static func main() async throws {

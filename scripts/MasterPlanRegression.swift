@@ -1388,14 +1388,23 @@ private actor Attempts {
             enum Status { case enabled, notRegistered }
             final class FakeMainApp: @unchecked Sendable {
                 private let lock = NSLock()
-                var delaySeconds: TimeInterval = 0.06
+                private let statusReadStarted = DispatchSemaphore(value: 0)
+                private let statusReadMayFinish = DispatchSemaphore(value: 0)
                 var currentStatus: Status = .enabled
                 var registerCount = 0
                 var unregisterCount = 0
                 var status: Status {
-                    Thread.sleep(forTimeInterval: delaySeconds)
+                    statusReadStarted.signal()
+                    precondition(statusReadMayFinish.wait(timeout: .now() + 10) == .success,
+                                 "test did not release the pending status read")
                     return lock.withLock { currentStatus }
                 }
+                func waitForStatusRead() async -> Bool {
+                    await Task.detached { [self] in
+                        statusReadStarted.wait(timeout: .now() + 10) == .success
+                    }.value
+                }
+                func finishStatusRead() { statusReadMayFinish.signal() }
                 func register() throws {
                     lock.withLock {
                         registerCount += 1
@@ -1431,11 +1440,13 @@ private actor Attempts {
                 let hydrate = Task { @MainActor in
                     await harness.runHydrationTask()
                 }
-                try await Task.sleep(nanoseconds: 15_000_000)
+                let statusReadStarted = await SMAppService.mainApp.waitForStatusRead()
+                precondition(statusReadStarted, "hydration must start reading the OS status")
                 precondition(!harness.isLaunchAtLoginLoaded, "toggle must stay disabled while SMAppService read is pending")
                 harness.setLaunchAtLogin(!harness.launchAtLogin)
                 precondition(SMAppService.mainApp.registerCount == 0 && SMAppService.mainApp.unregisterCount == 0,
                              "pre-hydration click must never call register/unregister")
+                SMAppService.mainApp.finishStatusRead()
                 await hydrate.value
                 precondition(harness.isLaunchAtLoginLoaded && harness.launchAtLogin,
                              "hydration populates authoritative enabled OS status and unlocks toggle")
