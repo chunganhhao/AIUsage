@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SwiftUI
 import Combine
@@ -300,12 +301,26 @@ final class AppSettings: ObservableObject {
         let savedTrimmed = savedHost.trimmingCharacters(in: .whitespacesAndNewlines)
         let savedUsesHTTPS = savedTrimmed.lowercased().hasPrefix("https://")
         let savedParsedHost = parseRemoteAddress(savedTrimmed).host
-        let normalizedSaved = savedParsedHost.isEmpty ? "127.0.0.1" : (savedUsesHTTPS ? "https://\(savedParsedHost)" : savedParsedHost)
-        let isSameEndpoint = host.caseInsensitiveCompare(normalizedSaved) == .orderedSame
+        let isSameEndpoint = usesHTTPS == savedUsesHTTPS
+            && remoteHostsMatch(
+                parsed.host.isEmpty ? "127.0.0.1" : parsed.host,
+                savedParsedHost.isEmpty ? "127.0.0.1" : savedParsedHost
+            )
         let enteredPort = Int(portInput.trimmingCharacters(in: .whitespaces))
         let shouldDefaultHTTPSPort = usesHTTPS && !isSameEndpoint && (enteredPort == nil || enteredPort == savedPort)
         let port = parsed.port ?? (shouldDefaultHTTPSPort ? 443 : enteredPort) ?? (usesHTTPS ? 443 : 4318)
         return (host, port)
+    }
+
+    private static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        if lhs.caseInsensitiveCompare(rhs) == .orderedSame { return true }
+        var lhsAddress = in6_addr()
+        var rhsAddress = in6_addr()
+        guard lhs.withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
+              rhs.withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 else { return false }
+        return withUnsafeBytes(of: lhsAddress) { lhsBytes in
+            withUnsafeBytes(of: rhsAddress) { rhsBytes in lhsBytes.elementsEqual(rhsBytes) }
+        }
     }
 
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。

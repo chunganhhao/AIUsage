@@ -90,6 +90,12 @@ final class OpenCodeNodeStore: ObservableObject {
         return file.nodes.contains { $0.proxyEnabled && candidateIds.contains($0.id) }
     }
 
+    static func hasPersistedLink(to providerId: String) -> Bool {
+        guard let data = FileManager.default.contents(atPath: storePath),
+              let file = try? JSONDecoder.profileDecoder.decode(StoreFile.self, from: data) else { return false }
+        return file.nodes.contains { $0.linkedProviderId == providerId }
+    }
+
     private(set) var lastSaveError: String?
 
     init() {
@@ -129,7 +135,7 @@ final class OpenCodeNodeStore: ObservableObject {
 
     // MARK: - CRUD
 
-    func upsert(_ node: OpenCodeNode) {
+    func upsert(_ node: OpenCodeNode, respectVisibility: Bool = false) {
         var updated = node
         ensureProviderSlug(&updated)
         if let index = nodes.firstIndex(where: { $0.id == node.id }) {
@@ -143,7 +149,7 @@ final class OpenCodeNodeStore: ObservableObject {
             sortNodes()
         }
         save()
-        reapplyIfRunning(updated)
+        reapplyIfRunning(updated, respectVisibility: respectVisibility)
     }
 
     func saveCatalogUpdate(_ node: OpenCodeNode) -> Bool {
@@ -152,26 +158,32 @@ final class OpenCodeNodeStore: ObservableObject {
         updated[index] = node
         guard save(nodes: updated) else { return false }
         nodes = updated
-        reapplyIfRunning(node)
+        reapplyIfRunning(node, respectVisibility: true)
         return true
     }
 
-    private func reapplyIfRunning(_ updated: OpenCodeNode) {
+    @discardableResult
+    private func reapplyIfRunning(_ updated: OpenCodeNode, respectVisibility: Bool) -> Task<Void, Never>? {
         // 编辑当前激活节点后立即重新激活（重写受管层；代理参数未变时进程原地复用）。
+        let shouldContinue: @MainActor () -> Bool = {
+            !respectVisibility || AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+        }
         if activeNodeIds.contains(updated.id) {
-            Task { [weak self] in
-                try? await self?.activate(updated)
+            return Task { [weak self] in
+                try? await self?.activate(updated, shouldContinue: shouldContinue)
             }
         } else if proxyOnlyNodeIds.contains(updated.id) {
             // 仅代理运行中的节点被编辑：按新参数滚动重启（关掉代理模式则直接停止）。
-            Task { [weak self] in
+            return Task { [weak self] in
+                guard shouldContinue() else { return }
                 if updated.proxyEnabled {
-                    try? await self?.startProxyOnly(updated)
+                    try? await self?.startProxyOnly(updated, shouldContinue: shouldContinue)
                 } else {
                     self?.stopProxyOnly(updated)
                 }
             }
         }
+        return nil
     }
 
     func delete(_ node: OpenCodeNode) throws {
@@ -310,7 +322,8 @@ final class OpenCodeNodeStore: ObservableObject {
 
     // MARK: - Activation
 
-    func activate(_ node: OpenCodeNode) async throws {
+    func activate(_ node: OpenCodeNode, shouldContinue: @MainActor () -> Bool = { true }) async throws {
+        guard shouldContinue() else { return }
         // 与全局统一代理互斥：全局启用时由它独占受管层，每节点激活会覆盖全局受管块。
         if GlobalProxyManager.opencode.config.isEnabled {
             throw OpenCodeNodeStoreError.managedByGlobalProxy
@@ -327,6 +340,7 @@ final class OpenCodeNodeStore: ObservableObject {
             }
             // 代理模式：先拉起本地透传进程，再把受管层指向它；写配置失败则回收进程并回滚激活状态。
             try await proxyRuntime.start(node: node)
+            guard shouldContinue() else { return }
             let previousIds = activeNodeIds
             activeNodeIds.removeAll { $0 == node.id }
             activeNodeIds.append(node.id)
@@ -487,12 +501,13 @@ final class OpenCodeNodeStore: ObservableObject {
         }
     }
 
-    func startProxyOnly(_ node: OpenCodeNode) async throws {
-        guard node.proxyEnabled, !activeNodeIds.contains(node.id) else { return }
+    func startProxyOnly(_ node: OpenCodeNode, shouldContinue: @MainActor () -> Bool = { true }) async throws {
+        guard shouldContinue(), node.proxyEnabled, !activeNodeIds.contains(node.id) else { return }
         if node.protocolType == .openAIResponses, node.apiKey.nilIfBlank == nil {
             throw OpenCodeNodeStoreError.proxyRequiresAPIKey
         }
         try await proxyRuntime.start(node: node)
+        guard shouldContinue() else { return }
         proxyOnlyNodeIds.insert(node.id)
         save()
     }

@@ -22,6 +22,7 @@ settings = (root / "AIUsage/Models/AppSettings.swift").read_text()
 visibility = (root / "AIUsage/Models/AgentVisibility.swift").read_text()
 sync = (root / "AIUsage/ViewModels/ModelAutoSyncCoordinator.swift").read_text()
 distributor = (root / "AIUsage/ViewModels/APIProviderDistributor.swift").read_text()
+open_code = (root / "AIUsage/ViewModels/OpenCodeNodeStore.swift").read_text()
 cards = (root / "AIUsage/Views/DashboardStateCards.swift").read_text()
 flash = (root / "AIUsage/Views/AppFlashBanner.swift").read_text()
 api_src = (root / "AIUsage/Services/APIService.swift").read_text()
@@ -29,7 +30,8 @@ for imp in ("import Darwin\n", "import Foundation\n", "import QuotaBackend\n"):
     api_src = api_src.replace(imp, "")
 
 address = "\n".join(declaration(settings, marker) for marker in (
-    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "static func parseRemoteAddress(",
+    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "private static func remoteHostsMatch(",
+    "static func parseRemoteAddress(",
 ))
 catalog = "\n".join(declaration(sync, marker) for marker in (
     "struct Report", "private func commitCatalogSync(", "private struct BaselineDecision",
@@ -39,6 +41,13 @@ sync_provider_fn = declaration(sync, "private func syncProvider(")
 sync_opencode_fn = declaration(sync, "private func syncOpenCode(")
 propagate_fn = declaration(distributor, "@discardableResult\n    func propagateCatalog(")
 serialize_fn = declaration(distributor, "private func withProviderSerialization<T>(")
+distribution = "\n\n".join(declaration(distributor, marker) for marker in (
+    "private func reconcileDistribution(", "@discardableResult\n    func setDistribution(",
+    "private func canUpdateOpenCode(", "private func canProceedWrite(", "private func upsertCPAChild(",
+))
+reapply = "\n\n".join(declaration(open_code, marker) for marker in (
+    "private func reapplyIfRunning(", "func activate(_ node: OpenCodeNode,", "func startProxyOnly(_ node: OpenCodeNode,",
+))
 shimmer_struct = declaration(cards, "private struct ShimmerModifier: ViewModifier", indent="")
 app_flash_struct = declaration(flash, "struct AppFlash: Equatable, Identifiable", indent="")
 visibility_src = visibility.replace("import Foundation\nimport QuotaBackend\n", "")
@@ -171,6 +180,7 @@ struct OpenCodeModelEntry: Equatable {{
 
 struct OpenCodeNode: Equatable {{
     enum Currency: Equatable {{ case none, usd }}
+    enum ProtocolType {{ case openAICompatible, openAIResponses }}
     let id: String
     var baseURL: String = "https://api.example.test/v1"
     var linkedProviderId: String?
@@ -178,6 +188,10 @@ struct OpenCodeNode: Equatable {{
     var defaultModel: String = ""
     var modelEntries: [OpenCodeModelEntry] = []
     var pricingCurrency: Currency = .none
+    var proxyEnabled = false
+    var protocolType: ProtocolType = .openAICompatible
+    var apiKey = "fixture"
+    var lastUsedAt: Date?
     var models: [String] {{ modelEntries.map(\\.id) }}
 }}
 
@@ -220,6 +234,12 @@ enum PublicPriceUpdate {{
 }}
 enum APIProviderCPALoopGuard {{
     static func blockReason(for _: APIProvider) -> String? {{ nil }}
+}}
+
+enum ProxyTarget: CaseIterable {{
+    case codex, claude, openCode, cpa
+    var displayName: String {{ String(describing: self) }}
+    func supports(_: APIProvider.Format) -> Bool {{ true }}
 }}
 
 @MainActor
@@ -282,14 +302,35 @@ final class OpenCodeNodeStore {{
 @MainActor
 final class APIProviderDistributor {{
     static let shared = APIProviderDistributor()
-    struct CPALinks {{ func hasLink(for _: String) -> Bool {{ false }} }}
+    struct CPALinks {{
+        var names: [String: String] = [:]
+        func hasLink(for id: String) -> Bool {{ names[id] != nil }}
+        func cpaName(for id: String) -> String? {{ names[id] }}
+        mutating func setLink(providerId: String, cpaName: String) {{ names[providerId] = cpaName }}
+    }}
+    @MainActor final class Gateway {{
+        enum Failure: Error {{ case unavailable }}
+        var lastError: String?
+        var cpaUnavailable = false
+        var cpaUpserts: [[String]] = []
+        func upsertOpenAICompatibleProvider(fromAPIProvider provider: APIProvider,
+                                           existingCPAName: String?) async throws -> String {{
+            cpaUpserts.append(provider.models.map(\.name))
+            if cpaUnavailable {{ throw Failure.unavailable }}
+            return existingCPAName ?? "fixture"
+        }}
+    }}
     var containmentFencedProviderIds: Set<String> = []
     var providerWriteGeneration: [String: UInt64] = [:]
+    private var pendingCPACatalogProviderIds: Set<String> = []
     private var lockedProviderIds: Set<String> = []
     private var providerWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     var proxyVM: ProxyViewModel {{ ProxyViewModel.shared }}
     var openCodeStore: OpenCodeNodeStore {{ OpenCodeNodeStore.shared }}
     var cpaLinks = CPALinks()
+    var gateway = Gateway()
+    var distributionWrites: [ProxyTarget] = []
+    var distributionRemovals: [ProxyTarget] = []
     private func isWriteAuthorized(for _: String, generation _: UInt64) -> Bool {{ true }}
     func hasWaiter(for providerId: String) -> Bool {{
         !(providerWaiters[providerId]?.isEmpty ?? true)
@@ -316,11 +357,56 @@ final class APIProviderDistributor {{
     private static func openCodeEntries(from models: [ProxyConfiguration.MappedModel]) -> [OpenCodeModelEntry] {{
         models.map {{ OpenCodeModelEntry(id: $0.name) }}
     }}
-    private func upsertCPAChild(_: APIProvider, writeGeneration _: UInt64?) async {{}}
+    private func upsertChild(_: APIProvider, target: ProxyTarget, writeGeneration _: UInt64?,
+                             respectOpenCodeVisibility _: Bool) async {{ distributionWrites.append(target) }}
+    private func removeChild(for _: String, target: ProxyTarget, deactivateActiveConsumers _: Bool) async -> String? {{
+        distributionRemovals.append(target)
+        return nil
+    }}
 
 {serialize_fn}
 
 {propagate_fn}
+
+{distribution}
+}}
+
+@MainActor
+final class OpenCodeReapplyHarness {{
+    enum OpenCodeNodeStoreError: Error {{ case managedByGlobalProxy, proxyRequiresAPIKey }}
+    @MainActor enum GlobalProxyManager {{
+        struct Config {{ let isEnabled = false }}
+        struct Proxy {{ let config = Config() }}
+        static let opencode = Proxy()
+    }}
+    @MainActor final class Runtime {{
+        var onStart: (@MainActor () async -> Void)?
+        var starts = 0
+        func start(node _: OpenCodeNode) async throws {{
+            starts += 1
+            await onStart?()
+        }}
+        func stop(nodeId _: String) {{}}
+    }}
+    struct Publisher {{ func send() {{}} }}
+    let proxyRuntime = Runtime()
+    let objectWillChange = Publisher()
+    var nodes: [OpenCodeNode] = []
+    var activeNodeIds: [String] = []
+    var proxyOnlyNodeIds: Set<String> = []
+    var saves = 0
+    var rewrites = 0
+    func save() {{ saves += 1 }}
+    func stopProxyOnly(_ node: OpenCodeNode) {{
+        proxyOnlyNodeIds.remove(node.id)
+        save()
+    }}
+    func rewriteManagedConfig() throws {{ rewrites += 1 }}
+    func scheduleCatalogReapply(_ node: OpenCodeNode) -> Task<Void, Never>? {{
+        reapplyIfRunning(node, respectVisibility: true)
+    }}
+
+{reapply}
 }}
 
 @MainActor

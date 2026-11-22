@@ -81,6 +81,14 @@ private actor Attempts {
         )
         try check(ipv6Bracket.port == 8443 && AppSettingsAddressFixture.remoteBaseURL(host: ipv6Bracket.host, port: ipv6Bracket.port) == "https://[fd7a::1]:8443",
                   "equivalent bracketed IPv6 HTTPS URL preserves custom port")
+        let ipv6Expanded = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            " HTTPS://[FD7A:0:0:0:0:0:0:1]/ ", savedHost: "https://fd7a::1", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6Expanded.port == 8443, "equivalent expanded IPv6 HTTPS URL preserves custom port")
+        let ipv6Upgrade = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fd7a::1]/", savedHost: "fd7a:0:0:0:0:0:0:1", savedPort: 4318, portInput: "4318"
+        )
+        try check(ipv6Upgrade.port == 443, "equivalent IPv6 hosts do not override an HTTPS upgrade")
         let httpToHTTPS = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
             "https://mini.example.test", savedHost: "mini.example.test", savedPort: 4318, portInput: "4318"
         )
@@ -431,6 +439,8 @@ private actor Attempts {
         try check(preHiddenOC.error == nil && preHiddenOC.addedModels.isEmpty && preHiddenInitCount == 0,
                   "already-hidden OpenCode skips both upstream fetch and OpenCodeNodeStore initialization")
 
+        try await catalogReconciliation(harness, masterID: masterID)
+
         // Finding #6: ShimmerModifier gradient stops stay strictly ordered within 0...1 across animation phases
         let stopLocations = ShimmerRegressionProbe.stops.map(\.location)
         try check(stopLocations == [0, 0.5, 1] && zip(stopLocations, stopLocations.dropFirst()).allSatisfy(<),
@@ -440,6 +450,63 @@ private actor Attempts {
             try check(pts.start.x < pts.end.x && pts.start.y < pts.end.y,
                       "ShimmerModifier gradient sweeps monotonically at phase \(phase)")
         }
+    }
+
+    @MainActor
+    static func catalogReconciliation(_ harness: ModelSyncHarness, masterID: String) async throws {
+        let distributor = APIProviderDistributor.shared
+        distributor.cpaLinks.setLink(providerId: masterID, cpaName: "linked-cpa")
+        distributor.gateway.cpaUnavailable = true
+        let expandedModels = ["m1", "m2", "m3", "m4"]
+        harness.nextUpstreamModels = expandedModels
+        let failure = await harness.runProviderSync(masterID)
+        try check(failure.error != nil && distributor.gateway.cpaUpserts == [expandedModels],
+                  "CPA upsert failure surfaces as a catalog sync error")
+        distributor.gateway.cpaUnavailable = false
+        let retry = await harness.runProviderSync(masterID)
+        try check(retry.error == nil && retry.addedModels.isEmpty
+                    && distributor.gateway.cpaUpserts == [expandedModels, expandedModels],
+                  "next unchanged master sync retries the CPA upsert")
+        _ = await harness.runProviderSync(masterID)
+        try check(distributor.gateway.cpaUpserts.count == 2, "successful CPA retry clears pending reconciliation")
+
+        let provider = APIProvider(id: "cpa-gateway")
+        await distributor.setDistribution(provider, targets: [.openCode, .codex], respectOpenCodeVisibility: true)
+        try check(distributor.distributionWrites == [.codex] && !distributor.distributionRemovals.contains(.openCode),
+                  "automatic CPA reconciliation neither writes nor removes hidden OpenCode")
+
+        let store = OpenCodeReapplyHarness()
+        let node = OpenCodeNode(id: "active", linkedProviderId: nil, proxyEnabled: true)
+        store.nodes = [node]
+        store.activeNodeIds = [node.id]
+        AppSettings.shared.hiddenSidebarSections = []
+        let queuedReapply = store.scheduleCatalogReapply(node)
+        AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+        await queuedReapply?.value
+        try check(store.proxyRuntime.starts == 0 && store.rewrites == 0 && store.saves == 0,
+                  "queued catalog reapply does not start when OpenCode becomes hidden")
+
+        AppSettings.shared.hiddenSidebarSections = []
+        store.proxyRuntime.onStart = {
+            await Task.yield()
+            AppSettings.shared.hiddenSidebarSections = [AppSection.opencodeManagement.rawValue]
+        }
+        await store.scheduleCatalogReapply(node)?.value
+        try check(store.proxyRuntime.starts == 1 && store.rewrites == 0 && store.saves == 0,
+                  "catalog reapply does not rewrite or save after hiding during proxy start")
+
+        store.activeNodeIds = []
+        store.proxyOnlyNodeIds = [node.id]
+        AppSettings.shared.hiddenSidebarSections = []
+        await store.scheduleCatalogReapply(node)?.value
+        try check(store.proxyRuntime.starts == 2 && store.saves == 0 && store.proxyOnlyNodeIds == [node.id],
+                  "proxy-only catalog reapply does not save after hiding during proxy start")
+
+        store.activeNodeIds = [node.id]
+        store.proxyOnlyNodeIds = []
+        store.proxyRuntime.onStart = nil
+        try await store.activate(node)
+        try check(store.rewrites == 1 && store.saves == 1, "explicit activation is not gated by sidebar visibility")
     }
     static func archiveRescanMetrics(_ home: URL) throws {
         let archive = CallAnalyticsArchiveStore(homeDirectory: home.path)
@@ -480,6 +547,16 @@ private actor Attempts {
                                           todayKey: today, completedFullHistory: true, backfill: true)[pastDay]?.entries.first
         try check(tieMerged?.count == 5 && tieMerged?.successRate == 1.0 && tieMerged?.avgDurationMs == 500,
                   "equal sample count with fewer rescanned calls retains archived outcome and duration")
+
+        let partialHigherCoverage = CallAnalyticsEntry(
+            source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 3,
+            outcomeKnownCount: 3, successCount: 0, durationSampleCount: 3, durationMsTotal: 150
+        )
+        let partialMerged = tieArchive.freeze(computed: [pastDay: .init(entries: [partialHigherCoverage], agentInvocations: [])],
+                                              todayKey: today, completedFullHistory: true, backfill: true)[pastDay]?.entries.first
+        try check(partialMerged?.count == 5 && partialMerged?.outcomeKnownCount == 2 && partialMerged?.successCount == 2
+                    && partialMerged?.durationSampleCount == 2 && partialMerged?.durationMsTotal == 1000,
+                  "five archived calls keep both pairs against a three-call rescan with more measured samples")
 
         let largerTie = CallAnalyticsEntry(
             source: .codex, kind: .mcp, name: "docs/search", server: "docs", dayKey: pastDay, count: 6,

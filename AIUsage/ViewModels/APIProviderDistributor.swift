@@ -24,6 +24,7 @@ final class APIProviderDistributor {
     private var providerWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var containmentFencedProviderIds: Set<String> = []
     private var providerWriteGeneration: [String: UInt64] = [:]
+    private var pendingCPACatalogProviderIds: Set<String> = []
 
     func beginContainment(for providerId: String) {
         containmentFencedProviderIds.insert(providerId)
@@ -72,11 +73,11 @@ final class APIProviderDistributor {
     // MARK: - Distribution State
 
     /// 该主配置当前已在哪些目标生成了链接。
-    func currentTargets(for providerId: String) -> Set<ProxyTarget> {
+    func currentTargets(for providerId: String, includeOpenCode: Bool = true) -> Set<ProxyTarget> {
         var result: Set<ProxyTarget> = []
         if codexChild(for: providerId) != nil { result.insert(.codex) }
         if claudeChild(for: providerId) != nil { result.insert(.claude) }
-        if openCodeChild(for: providerId) != nil { result.insert(.openCode) }
+        if includeOpenCode, openCodeChild(for: providerId) != nil { result.insert(.openCode) }
         if cpaLinks.hasLink(for: providerId) { result.insert(.cpa) }
         return result
     }
@@ -84,7 +85,7 @@ final class APIProviderDistributor {
     /// Used by the CPA credential repair path to detect a partially completed
     /// rotation. Missing targets are ignored; every linked local child must use
     /// the current runtime-owned client key.
-    func linkedChildrenUseAPIKey(providerId: String, apiKey: String) -> Bool {
+    func linkedChildrenUseAPIKey(providerId: String, apiKey: String, includeOpenCode: Bool = true) -> Bool {
         if let child = codexChild(for: providerId),
            child.metadata.proxy.upstreamAPIKey != apiKey { return false }
         if let child = claudeChild(for: providerId) {
@@ -93,7 +94,7 @@ final class APIProviderDistributor {
                 : child.metadata.proxy.upstreamAPIKey
             if childKey != apiKey { return false }
         }
-        if let child = openCodeChild(for: providerId), child.apiKey != apiKey { return false }
+        if includeOpenCode, let child = openCodeChild(for: providerId), child.apiKey != apiKey { return false }
         return true
     }
 
@@ -111,14 +112,15 @@ final class APIProviderDistributor {
     /// 未选中（或不兼容）的目标若有链接节点则删除。
     /// 主配置内容变更后，把变更同步到所有已存在的链接；返回失败原因（成功为 nil）。
     @discardableResult
-    func syncFromMaster(_ provider: APIProvider) async -> String? {
+    func syncFromMaster(_ provider: APIProvider, respectOpenCodeVisibility: Bool = false) async -> String? {
         guard !containmentFencedProviderIds.contains(provider.id) else { return nil }
         let writeGeneration = providerWriteGeneration[provider.id, default: 0]
         return await withProviderSerialization(for: provider.id) {
             guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
             gateway.lastError = nil
             var errors: [String] = []
-            let activeTargets = ProxyTarget.allCases.filter { currentTargets(for: provider.id).contains($0) }
+            let targets = currentTargets(for: provider.id, includeOpenCode: canUpdateOpenCode(respectOpenCodeVisibility))
+            let activeTargets = ProxyTarget.allCases.filter(targets.contains)
             for target in activeTargets {
                 guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
                 if target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
@@ -136,7 +138,8 @@ final class APIProviderDistributor {
                     continue
                 }
                 gateway.lastError = nil
-                await upsertChild(provider, target: target, writeGeneration: writeGeneration)
+                await upsertChild(provider, target: target, writeGeneration: writeGeneration,
+                                  respectOpenCodeVisibility: respectOpenCodeVisibility)
                 guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return nil }
                 if let err = gateway.lastError {
                     errors.append("\(target.displayName): \(err)")
@@ -151,7 +154,8 @@ final class APIProviderDistributor {
 
     private func reconcileDistribution(
         _ provider: APIProvider,
-        targets: Set<ProxyTarget>
+        targets: Set<ProxyTarget>,
+        respectOpenCodeVisibility: Bool
     ) async -> [ProxyTarget: String] {
         if !targets.isEmpty, containmentFencedProviderIds.contains(provider.id) {
             return [:]
@@ -166,6 +170,8 @@ final class APIProviderDistributor {
                 gateway.lastError = nil
             }
             for target in ProxyTarget.allCases {
+                if target == .openCode, respectOpenCodeVisibility,
+                   !targets.contains(target) || !canUpdateOpenCode(respectOpenCodeVisibility) { continue }
                 var want = targets.contains(target) && target.supports(provider.format)
                 if want, target == .cpa, let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
                     targetErrors[.cpa] = reason
@@ -174,7 +180,8 @@ final class APIProviderDistributor {
                 if want {
                     guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return [:] }
                     gateway.lastError = nil
-                    await upsertChild(provider, target: target, writeGeneration: writeGeneration)
+                    await upsertChild(provider, target: target, writeGeneration: writeGeneration,
+                                      respectOpenCodeVisibility: respectOpenCodeVisibility)
                     guard isWriteAuthorized(for: provider.id, generation: writeGeneration) else { return [:] }
                     if let err = gateway.lastError {
                         targetErrors[target] = err
@@ -199,9 +206,13 @@ final class APIProviderDistributor {
 
     /// 对齐分发集合；返回失败原因（成功为 nil）。
     @discardableResult
-    func setDistribution(_ provider: APIProvider, targets: Set<ProxyTarget>) async -> String? {
+    func setDistribution(
+        _ provider: APIProvider,
+        targets: Set<ProxyTarget>,
+        respectOpenCodeVisibility: Bool = false
+    ) async -> String? {
         guard targets.isEmpty || !containmentFencedProviderIds.contains(provider.id) else { return nil }
-        _ = await reconcileDistribution(provider, targets: targets)
+        _ = await reconcileDistribution(provider, targets: targets, respectOpenCodeVisibility: respectOpenCodeVisibility)
         guard !containmentFencedProviderIds.contains(provider.id) else { return nil }
         return gateway.lastError
     }
@@ -327,10 +338,15 @@ final class APIProviderDistributor {
                 }
             }
 
-            if modelNamesChanged, cpaLinks.hasLink(for: provider.id),
-               isWriteAuthorized(for: provider.id, generation: writeGeneration),
-               APIProviderCPALoopGuard.blockReason(for: provider) == nil {
-                await upsertCPAChild(provider, writeGeneration: writeGeneration)
+            if !cpaLinks.hasLink(for: provider.id) {
+                pendingCPACatalogProviderIds.remove(provider.id)
+            } else if modelNamesChanged || pendingCPACatalogProviderIds.contains(provider.id),
+                      isWriteAuthorized(for: provider.id, generation: writeGeneration),
+                      APIProviderCPALoopGuard.blockReason(for: provider) == nil {
+                pendingCPACatalogProviderIds.insert(provider.id)
+                if !(await upsertCPAChild(provider, writeGeneration: writeGeneration)) {
+                    allSaved = false
+                }
             }
             return allSaved
         }
@@ -345,10 +361,15 @@ final class APIProviderDistributor {
         return !Task.isCancelled && !containmentFencedProviderIds.contains(providerId)
     }
 
+    private func canUpdateOpenCode(_ respectVisibility: Bool) -> Bool {
+        !respectVisibility || AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+    }
+
     private func upsertChild(
         _ provider: APIProvider,
         target: ProxyTarget,
-        writeGeneration: UInt64? = nil
+        writeGeneration: UInt64? = nil,
+        respectOpenCodeVisibility: Bool = false
     ) async {
         guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
         switch target {
@@ -367,12 +388,13 @@ final class APIProviderDistributor {
                 await reapplyRunningClaudeTracks(for: profile.metadata.id)
             }
         case .openCode:
+            guard canUpdateOpenCode(respectOpenCodeVisibility) else { return }
             let existing = openCodeChild(for: provider.id)
             let node = makeOpenCodeNode(provider, existing: existing)
-            openCodeStore.upsert(node)
+            openCodeStore.upsert(node, respectVisibility: respectOpenCodeVisibility)
             if provider.id == CLIProxyGatewayManager.managedProviderID,
                canProceedWrite(for: provider.id, writeGeneration: writeGeneration) {
-                await reapplyRunningOpenCodeTrack(for: node.id)
+                await reapplyRunningOpenCodeTrack(for: node.id, respectVisibility: respectOpenCodeVisibility)
             }
         case .cpa:
             if let reason = APIProviderCPALoopGuard.blockReason(for: provider) {
@@ -381,23 +403,27 @@ final class APIProviderDistributor {
                 }
                 return
             }
-            await upsertCPAChild(provider, writeGeneration: writeGeneration)
+            _ = await upsertCPAChild(provider, writeGeneration: writeGeneration)
         }
     }
 
-    private func upsertCPAChild(_ provider: APIProvider, writeGeneration: UInt64? = nil) async {
-        guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
+    private func upsertCPAChild(_ provider: APIProvider, writeGeneration: UInt64? = nil) async -> Bool {
+        guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return false }
         let existingName = cpaLinks.cpaName(for: provider.id)
         do {
             let name = try await gateway.upsertOpenAICompatibleProvider(
                 fromAPIProvider: provider,
                 existingCPAName: existingName
             )
-            guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
+            guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return false }
             cpaLinks.setLink(providerId: provider.id, cpaName: name)
+            pendingCPACatalogProviderIds.remove(provider.id)
+            return true
         } catch {
-            guard canProceedWrite(for: provider.id, writeGeneration: writeGeneration) else { return }
-            gateway.lastError = error.localizedDescription
+            if canProceedWrite(for: provider.id, writeGeneration: writeGeneration) {
+                gateway.lastError = error.localizedDescription
+            }
+            return false
         }
     }
 
@@ -413,10 +439,11 @@ final class APIProviderDistributor {
         }
     }
 
-    private func reapplyRunningOpenCodeTrack(for nodeId: String) async {
+    private func reapplyRunningOpenCodeTrack(for nodeId: String, respectVisibility: Bool) async {
+        guard canUpdateOpenCode(respectVisibility) else { return }
         let opencode = GlobalProxyManager.opencode
         if opencode.isEnabled, opencode.isProxyRunning, opencode.activeNodeId == nodeId {
-            await opencode.reapplyActiveUpstream()
+            await opencode.reapplyActiveUpstream { self.canUpdateOpenCode(respectVisibility) }
         }
     }
 
@@ -533,6 +560,7 @@ final class APIProviderDistributor {
             do {
                 try await gateway.deleteOpenAICompatibleProviderLinked(cpaName: name)
                 cpaLinks.removeLink(providerId: providerId)
+                pendingCPACatalogProviderIds.remove(providerId)
             } catch {
                 return error.localizedDescription
             }
@@ -600,6 +628,7 @@ final class APIProviderDistributor {
         case .cpa:
             // 解除链接：保留 CPA 上游条目，仅丢掉本地映射。
             cpaLinks.removeLink(providerId: providerId)
+            pendingCPACatalogProviderIds.remove(providerId)
         }
     }
 

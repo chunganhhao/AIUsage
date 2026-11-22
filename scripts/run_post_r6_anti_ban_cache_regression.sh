@@ -609,6 +609,10 @@ agy_candidates_fn = function(discovery_src, '    internal static func antigravit
 agy_stage_fn = function(discovery_src, '    static func stageAntigravityIDECandidate(')
 auth_cand_fn = function(auth_src, '    static func authenticateCandidate(')
 auth_stage_helper = function(auth_src, '    private static func stageDeferredAuthFileIfNeeded(')
+auth_stage_helper = auth_stage_helper.replace(
+    'expectedWorkspaceId: expectedWorkspace\n        )',
+    'expectedWorkspaceId: expectedWorkspace,\n            homeDirectory: homeOverride\n        )',
+)
 auth_copy_fn = function(auth_src, '    private static func copyImportedAuthFile(')
 auth_dir_fn = function(auth_src, '    private static func managedImportDirectory(')
 auth_validate_fn = function(auth_src, '    private static func validate(')
@@ -618,6 +622,7 @@ sanitized_stem_fn = function(parsing_src, '    static func sanitizedFilenameStem
 # Extract MenuBar §9.5 pieces
 row_perform_activation = function(row_src, '    private func performActivation()').replace('private func performActivation()', 'func performActivation()', 1)
 feedback_enum = function(row_src, '@MainActor\nenum MenuBarActivationFeedback')
+agent_vis_body = agent_vis_src.replace('import Foundation\nimport QuotaBackend\n', '')
 
 harness = f"""import AppKit
 import Combine
@@ -641,7 +646,7 @@ enum SensitiveDataRedactor {{
 
 {function(settings_src, 'enum AppSection: String, Hashable')}
 
-{agent_vis_src.replace('import Foundation\nimport QuotaBackend\n', '')}
+{agent_vis_body}
 
 @MainActor final class AppSettings {{
     static let shared = AppSettings()
@@ -972,7 +977,7 @@ enum ProviderAuthManager {{
 {agy_candidates_fn}
 {agy_stage_fn}
 {auth_cand_fn}
-{auth_stage_helper.replace('expectedWorkspaceId: expectedWorkspace\n        )', 'expectedWorkspaceId: expectedWorkspace,\n            homeDirectory: homeOverride\n        )')}
+{auth_stage_helper}
 {auth_copy_fn}
 {auth_dir_fn}
 {auth_validate_fn.replace('private static func validate(', 'private static func originalValidate(')}
@@ -2838,14 +2843,14 @@ profile_store_blocks = "\n\n".join([
 oc_error_enum = function(opencode_src, 'enum OpenCodeNodeStoreError: LocalizedError')
 oc_blocks = "\n\n".join([
     function(opencode_src, '    func delete(_ node: OpenCodeNode)'),
-    function(opencode_src, '    func upsert(_ node: OpenCodeNode)'),
-    function(opencode_src, '    private func reapplyIfRunning('),
-    function(opencode_src, '    func activate(_ node: OpenCodeNode)'),
+    function(opencode_src, '    func upsert(_ node: OpenCodeNode,'),
+    function(opencode_src, '    @discardableResult\n    private func reapplyIfRunning('),
+    function(opencode_src, '    func activate(_ node: OpenCodeNode,'),
     function(opencode_src, '    func activate(_ nodes: [OpenCodeNode])'),
     function(opencode_src, '    func deactivate(_ node: OpenCodeNode)'),
     function(opencode_src, '    func deactivate(_ ids: [String])'),
     function(opencode_src, '    private func rewriteManagedConfig('),
-    function(opencode_src, '    func startProxyOnly(_ node: OpenCodeNode)'),
+    function(opencode_src, '    func startProxyOnly(_ node: OpenCodeNode,'),
     function(opencode_src, '    func stopProxyOnly(_ node: OpenCodeNode)'),
     function(opencode_src, '    private func load()'),
     function(opencode_src, '    @discardableResult\n    func save()'),
@@ -2866,7 +2871,13 @@ enum Section8LegacyUpgradeEnv {{
 final class AppSettings {{
     static let shared = AppSettings()
     var proxyAutoRestoreOnLaunch = true
+    let hiddenSidebarSections: Set<String> = []
     func t(_ en: String, _ zh: String) -> String {{ en }}
+}}
+
+enum AgentVisibility {{
+    enum Agent {{ case opencode }}
+    static func isVisible(_: Agent, hidden: Set<String>) -> Bool {{ !hidden.contains("opencodeManagement") }}
 }}
 
 extension JSONEncoder {{
@@ -3249,6 +3260,7 @@ final class APIProviderDistributor {{
     private var providerWaiters: [String: [CheckedContinuation<Void, Never>]] = [:]
     private var containmentFencedProviderIds: Set<String> = []
     private var providerWriteGeneration: [String: UInt64] = [:]
+    private var pendingCPACatalogProviderIds: Set<String> = []
 
 {dist_blocks}
 }}

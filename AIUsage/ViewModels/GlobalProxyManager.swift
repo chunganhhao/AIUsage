@@ -781,8 +781,8 @@ final class GlobalProxyManager: ObservableObject {
     }
 
     /// 节点配置已变时，对当前激活节点强制再推上游。
-    func reapplyActiveUpstream() async {
-        guard !Task.isCancelled, !isBusy else { return }
+    func reapplyActiveUpstream(shouldContinue: @MainActor () -> Bool = { true }) async {
+        guard shouldContinue(), !Task.isCancelled, !isBusy else { return }
         guard isRuntimeEnabled, runtime.isProcessRunning,
               let nodeId = config.activeNodeId else { return }
         isBusy = true
@@ -798,6 +798,7 @@ final class GlobalProxyManager: ObservableObject {
                 nodeId: node.id,
                 nodeName: node.name
             )
+            guard shouldContinue() else { return }
             if isEnabled {
                 try adapter.activateCLIConfig(config)
             }

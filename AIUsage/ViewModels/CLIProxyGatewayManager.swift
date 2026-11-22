@@ -2006,7 +2006,7 @@ final class CLIProxyGatewayManager: ObservableObject {
         APIProviderDistributor.shared.endContainment(for: Self.managedProviderID)
     }
 
-    func upsertManagedProvider(targets: Set<ProxyTarget>) async {
+    func upsertManagedProvider(targets: Set<ProxyTarget>, respectOpenCodeVisibility: Bool = false) async {
         guard canMutateManagedDistribution() else { return }
         let taskID = UUID()
         // 分发会同时修改持久配置和运行中上游，开始后必须完成；离开 CPA 页面只取消刷新，
@@ -2020,14 +2020,14 @@ final class CLIProxyGatewayManager: ObservableObject {
                     self.managedDistributionTaskID = nil
                 }
             }
-            await self.applyManagedProvider(targets: targets)
+            await self.applyManagedProvider(targets: targets, respectOpenCodeVisibility: respectOpenCodeVisibility)
         }
         managedDistributionTaskID = taskID
         managedDistributionTask = task
         await task.value
     }
 
-    private func applyManagedProvider(targets: Set<ProxyTarget>) async {
+    private func applyManagedProvider(targets: Set<ProxyTarget>, respectOpenCodeVisibility: Bool) async {
         let generation = containmentGeneration
         guard canMutateManagedDistribution(generation: generation),
               !isApplyingDistribution,
@@ -2062,7 +2062,9 @@ final class CLIProxyGatewayManager: ObservableObject {
             )
             guard canMutateManagedDistribution(generation: generation) else { return }
             let saved = APIProviderStore.shared.upsert(provider)
-            _ = await APIProviderDistributor.shared.setDistribution(saved, targets: targets)
+            _ = await APIProviderDistributor.shared.setDistribution(
+                saved, targets: targets, respectOpenCodeVisibility: respectOpenCodeVisibility
+            )
             guard canMutateManagedDistribution(generation: generation) else { return }
             refreshDistributionState()
         } catch {
@@ -2074,10 +2076,19 @@ final class CLIProxyGatewayManager: ObservableObject {
 
     func refreshDistributionState() {
         managedProviderExists = APIProviderStore.shared.provider(id: Self.managedProviderID) != nil
-        currentDistributionTargets = managedProviderExists
-            ? APIProviderDistributor.shared.currentTargets(for: Self.managedProviderID)
-            : []
+        currentDistributionTargets = managedProviderExists ? managedDistributionTargets() : []
         reconcileManagedProviderCredentialIfNeeded()
+    }
+
+    private func managedDistributionTargets() -> Set<ProxyTarget> {
+        let isOpenCodeVisible = AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
+        var targets = APIProviderDistributor.shared.currentTargets(
+            for: Self.managedProviderID, includeOpenCode: isOpenCodeVisible
+        )
+        if !isOpenCodeVisible, OpenCodeNodeStore.hasPersistedLink(to: Self.managedProviderID) {
+            targets.insert(.openCode)
+        }
+        return targets
     }
 
     /// CPA owns this credential. When Keychain is rebuilt or the managed client
@@ -2093,7 +2104,8 @@ final class CLIProxyGatewayManager: ObservableObject {
 
         let childrenAreCurrent = APIProviderDistributor.shared.linkedChildrenUseAPIKey(
             providerId: Self.managedProviderID,
-            apiKey: clientKey
+            apiKey: clientKey,
+            includeOpenCode: AgentVisibility.isVisible(.opencode, hidden: AppSettings.shared.hiddenSidebarSections)
         )
         guard provider.apiKey != clientKey || !childrenAreCurrent else { return }
 
@@ -2111,12 +2123,10 @@ final class CLIProxyGatewayManager: ObservableObject {
             }
             guard let self,
                   self.canMutateManagedDistribution(generation: generation) else { return }
-            _ = await APIProviderDistributor.shared.syncFromMaster(saved)
+            _ = await APIProviderDistributor.shared.syncFromMaster(saved, respectOpenCodeVisibility: true)
             guard self.canMutateManagedDistribution(generation: generation) else { return }
             self.managedProviderExists = APIProviderStore.shared.provider(id: Self.managedProviderID) != nil
-            self.currentDistributionTargets = APIProviderDistributor.shared.currentTargets(
-                for: Self.managedProviderID
-            )
+            self.currentDistributionTargets = self.managedProviderExists ? self.managedDistributionTargets() : []
         }
     }
 
@@ -2836,7 +2846,7 @@ final class CLIProxyGatewayManager: ObservableObject {
         refreshDistributionState()
         guard managedProviderExists else { return }
         let targets = currentDistributionTargets
-        await upsertManagedProvider(targets: targets)
+        await upsertManagedProvider(targets: targets, respectOpenCodeVisibility: true)
     }
 
     func refreshModelCatalogAndDistribution(using client: CLIProxyManagementClient) async {
