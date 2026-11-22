@@ -43,6 +43,7 @@ propagate_fn = declaration(distributor, "@discardableResult\n    func propagateC
 serialize_fn = declaration(distributor, "private func withProviderSerialization<T>(")
 distribution = "\n\n".join(declaration(distributor, marker) for marker in (
     "private func reconcileDistribution(", "@discardableResult\n    func setDistribution(",
+    "func reconcileLinkedOpenCode(",
     "private func canUpdateOpenCode(", "private func canProceedWrite(", "private func upsertCPAChild(",
 ))
 reapply = "\n\n".join(declaration(open_code, marker) for marker in (
@@ -331,6 +332,7 @@ final class APIProviderDistributor {{
     var gateway = Gateway()
     var distributionWrites: [ProxyTarget] = []
     var distributionRemovals: [ProxyTarget] = []
+    var openCodeTrackReapplies: [String] = []
     private func isWriteAuthorized(for _: String, generation _: UInt64) -> Bool {{ true }}
     func hasWaiter(for providerId: String) -> Bool {{
         !(providerWaiters[providerId]?.isEmpty ?? true)
@@ -353,6 +355,15 @@ final class APIProviderDistributor {{
     }}
     private func openCodeChild(for providerId: String) -> OpenCodeNode? {{
         openCodeStore.nodes.first {{ $0.linkedProviderId == providerId }}
+    }}
+    private func makeOpenCodeNode(_ provider: APIProvider, existing: OpenCodeNode) -> OpenCodeNode {{
+        var node = existing
+        node.baseURL = provider.baseURL
+        node.apiKey = provider.apiKey
+        return node
+    }}
+    private func reapplyRunningOpenCodeTrack(for nodeId: String, respectVisibility: Bool) async {{
+        if canUpdateOpenCode(respectVisibility) {{ openCodeTrackReapplies.append(nodeId) }}
     }}
     private static func openCodeEntries(from models: [ProxyConfiguration.MappedModel]) -> [OpenCodeModelEntry] {{
         models.map {{ OpenCodeModelEntry(id: $0.name) }}

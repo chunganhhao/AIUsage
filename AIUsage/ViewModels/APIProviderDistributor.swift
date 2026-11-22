@@ -217,6 +217,20 @@ final class APIProviderDistributor {
         return gateway.lastError
     }
 
+    func reconcileLinkedOpenCode(for providerId: String, currentProvider: @MainActor () -> APIProvider?) async {
+        guard !containmentFencedProviderIds.contains(providerId) else { return }
+        let writeGeneration = providerWriteGeneration[providerId, default: 0]
+        await withProviderSerialization(for: providerId) {
+            guard isWriteAuthorized(for: providerId, generation: writeGeneration),
+                  canUpdateOpenCode(true),
+                  let provider = currentProvider(),
+                  let existing = openCodeChild(for: providerId) else { return }
+            let node = makeOpenCodeNode(provider, existing: existing)
+            guard node != existing, openCodeStore.saveCatalogUpdate(node) else { return }
+            await reapplyRunningOpenCodeTrack(for: node.id, respectVisibility: true)
+        }
+    }
+
     /// Containment teardown: close admission immediately, drain any serialized in-flight
     /// writes for this provider, safely deactivate active AIUsage-managed consumers without
     /// overwriting unrelated config, delete children even if the master provider record is

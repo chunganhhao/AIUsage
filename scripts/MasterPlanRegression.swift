@@ -475,6 +475,25 @@ private actor Attempts {
         try check(distributor.distributionWrites == [.codex] && !distributor.distributionRemovals.contains(.openCode),
                   "automatic CPA reconciliation neither writes nor removes hidden OpenCode")
 
+        let linked = OpenCodeNode(id: "linked-cpa-open-code", baseURL: "http://127.0.0.1:8317/v1",
+                                  linkedProviderId: provider.id)
+        let linkedStore = OpenCodeNodeStore.shared
+        linkedStore.nodes.append(linked)
+        let saves = linkedStore.saveCalls
+        var restartedProvider = provider
+        restartedProvider.baseURL = "http://127.0.0.1:8318/v1"
+        await distributor.reconcileLinkedOpenCode(for: provider.id) { restartedProvider }
+        try check(linkedStore.saveCalls == saves && linkedStore.nodes.contains(linked)
+                    && distributor.openCodeTrackReapplies.isEmpty,
+                  "CPA port change does not write, unlink, or reapply hidden OpenCode")
+        AppSettings.shared.hiddenSidebarSections = []
+        await distributor.reconcileLinkedOpenCode(for: provider.id) { restartedProvider }
+        try check(linkedStore.saveCalls == saves + 1
+                    && linkedStore.nodes.first(where: { $0.id == linked.id })?.baseURL == restartedProvider.baseURL
+                    && linkedStore.nodes.first(where: { $0.id == linked.id })?.linkedProviderId == provider.id
+                    && distributor.openCodeTrackReapplies == [linked.id],
+                  "showing OpenCode reconciles the stale inherited port and reapplies the linked node")
+
         let store = OpenCodeReapplyHarness()
         let node = OpenCodeNode(id: "active", linkedProviderId: nil, proxyEnabled: true)
         store.nodes = [node]

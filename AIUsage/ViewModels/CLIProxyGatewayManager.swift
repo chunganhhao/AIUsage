@@ -232,6 +232,20 @@ final class CLIProxyGatewayManager: ObservableObject {
                 self.refreshDistributionState()
             }
             .store(in: &accountProbeCancellables)
+        Publishers.CombineLatest3(
+            AppSettings.shared.$hiddenSidebarSections.map { AgentVisibility.isVisible(.opencode, hidden: $0) },
+            self.runtime.$state.map(\.isRunning),
+            self.runtime.$isLifecycleBusy
+        )
+        .map { visible, running, busy in visible && running && !busy }
+        .removeDuplicates()
+        .dropFirst()
+        .filter { $0 }
+        .receive(on: RunLoop.main)
+        .sink { [weak self] _ in
+            Task { await self?.reconcileVisibleOpenCode() }
+        }
+        .store(in: &accountProbeCancellables)
     }
 
     /// 设置开启且 CPA 在跑时，按间隔刷新账号池与本地模型目录。
@@ -2089,6 +2103,18 @@ final class CLIProxyGatewayManager: ObservableObject {
             targets.insert(.openCode)
         }
         return targets
+    }
+
+    private func reconcileVisibleOpenCode() async {
+        let generation = containmentGeneration
+        await APIProviderDistributor.shared.reconcileLinkedOpenCode(for: Self.managedProviderID) {
+            guard canMutateManagedDistribution(generation: generation),
+                  let clientKey = runtime.managedProviderClientAPIKey,
+                  var provider = APIProviderStore.shared.provider(id: Self.managedProviderID) else { return nil }
+            provider.baseURL = runtime.baseURL.appendingPathComponent("v1").absoluteString
+            provider.apiKey = clientKey
+            return provider
+        }
     }
 
     /// CPA owns this credential. When Keychain is rebuilt or the managed client
