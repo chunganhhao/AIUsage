@@ -29,7 +29,8 @@ for imp in ("import Darwin\n", "import Foundation\n", "import QuotaBackend\n"):
     api_src = api_src.replace(imp, "")
 
 address = "\n".join(declaration(settings, marker) for marker in (
-    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "static func parseRemoteAddress(",
+    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "private static func remoteHostsMatch(",
+    "static func parseRemoteAddress(",
 ))
 catalog = "\n".join(declaration(sync, marker) for marker in (
     "struct Report", "private func commitCatalogSync(", "private struct BaselineDecision",

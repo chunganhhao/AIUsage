@@ -81,6 +81,26 @@ private actor Attempts {
         )
         try check(ipv6Bracket.port == 8443 && AppSettingsAddressFixture.remoteBaseURL(host: ipv6Bracket.host, port: ipv6Bracket.port) == "https://[fd7a::1]:8443",
                   "equivalent bracketed IPv6 HTTPS URL preserves custom port")
+        let ipv6Expanded = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            " HTTPS://[FD7A:0:0:0:0:0:0:1]/ ", savedHost: "https://fd7a::1", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6Expanded.port == 8443, "equivalent expanded IPv6 HTTPS URL preserves custom port")
+        let ipv6LoopbackExpanded = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[0:0:0:0:0:0:0:1]/", savedHost: "https://::1", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6LoopbackExpanded.port == 8443, "equivalent expanded loopback IPv6 HTTPS URL preserves custom port")
+        let ipv6ZoneMatch = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80:0:0:0:0:0:0:1%en0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6ZoneMatch.port == 8443, "equivalent zone-scoped IPv6 HTTPS URL preserves custom port")
+        let ipv6ZoneMismatch = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%en1]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6ZoneMismatch.port == 443, "mismatched IPv6 zone ID treats endpoint as changed")
+        let ipv6Upgrade = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fd7a::1]/", savedHost: "fd7a:0:0:0:0:0:0:1", savedPort: 4318, portInput: "4318"
+        )
+        try check(ipv6Upgrade.port == 443, "equivalent IPv6 hosts do not override an HTTPS upgrade")
         let httpToHTTPS = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
             "https://mini.example.test", savedHost: "mini.example.test", savedPort: 4318, portInput: "4318"
         )
