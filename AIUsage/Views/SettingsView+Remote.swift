@@ -107,19 +107,13 @@ extension SettingsView {
     }
 
     func applyRemoteSettings(refreshDashboard: Bool = true) {
-        let trimmedInput = remoteHostInput.trimmingCharacters(in: .whitespacesAndNewlines)
-        let usesHTTPS = trimmedInput.lowercased().hasPrefix("https://")
-        let parsed = AppSettings.parseRemoteAddress(trimmedInput)
-        if let pastedPort = parsed.port {
-            remotePortInput = "\(pastedPort)"
-        }
-        let port = Int(remotePortInput.trimmingCharacters(in: .whitespaces)) ?? 4318
-        let normalizedHost = parsed.host.isEmpty
-            ? "127.0.0.1"
-            : (usesHTTPS ? "https://\(parsed.host)" : parsed.host)
-        remoteHostInput = normalizedHost
-        settings.remoteHost = normalizedHost
-        settings.remotePort = port
+        let address = AppSettings.resolveRemoteSettingsAddress(
+            remoteHostInput, savedHost: settings.remoteHost, savedPort: settings.remotePort, portInput: remotePortInput
+        )
+        remoteHostInput = address.host
+        remotePortInput = "\(address.port)"
+        settings.remoteHost = address.host
+        settings.remotePort = address.port
 
         let token = remoteTokenInput.trimmingCharacters(in: .whitespacesAndNewlines)
         remoteTokenInput = token

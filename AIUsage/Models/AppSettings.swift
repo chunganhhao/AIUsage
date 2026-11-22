@@ -290,6 +290,19 @@ final class AppSettings: ObservableObject {
         return "\(scheme)://\(formattedHost):\(port)"
     }
 
+    static func resolveRemoteSettingsAddress(
+        _ input: String, savedHost: String, savedPort: Int, portInput: String
+    ) -> (host: String, port: Int) {
+        let trimmed = input.trimmingCharacters(in: .whitespacesAndNewlines)
+        let usesHTTPS = trimmed.lowercased().hasPrefix("https://")
+        let parsed = parseRemoteAddress(trimmed)
+        let enteredPort = Int(portInput.trimmingCharacters(in: .whitespaces))
+        let shouldDefaultHTTPSPort = usesHTTPS && trimmed != savedHost && (enteredPort == nil || enteredPort == savedPort)
+        let port = parsed.port ?? (shouldDefaultHTTPSPort ? 443 : enteredPort) ?? (usesHTTPS ? 443 : 4318)
+        let host = parsed.host.isEmpty ? "127.0.0.1" : (usesHTTPS ? "https://\(parsed.host)" : parsed.host)
+        return (host, port)
+    }
+
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。
     static func parseRemoteAddress(_ raw: String) -> (host: String, port: Int?) {
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
