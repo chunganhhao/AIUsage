@@ -608,8 +608,7 @@ norm_agy_ws_fn = function(discovery_src, '    static func normalizedAntigravityW
 agy_candidates_fn = function(discovery_src, '    internal static func antigravityCandidates(')
 agy_stage_fn = function(discovery_src, '    static func stageAntigravityIDECandidate(')
 auth_cand_fn = function(auth_src, '    static func authenticateCandidate(')
-auth_stage_helper = function(auth_src, '    private static func stageDeferredAuthFileIfNeeded(')
-auth_stage_helper = auth_stage_helper.replace(
+auth_stage_helper = function(auth_src, '    private static func stageDeferredAuthFileIfNeeded(').replace(
     'expectedWorkspaceId: expectedWorkspace\n        )',
     'expectedWorkspaceId: expectedWorkspace,\n            homeDirectory: homeOverride\n        )',
 )

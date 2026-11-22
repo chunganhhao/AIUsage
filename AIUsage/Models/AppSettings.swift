@@ -314,10 +314,13 @@ final class AppSettings: ObservableObject {
 
     private static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {
         if lhs.caseInsensitiveCompare(rhs) == .orderedSame { return true }
+        let lhsParts = lhs.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        let rhsParts = rhs.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        guard lhsParts.dropFirst().first == rhsParts.dropFirst().first else { return false }
         var lhsAddress = in6_addr()
         var rhsAddress = in6_addr()
-        guard lhs.withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
-              rhs.withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 else { return false }
+        guard String(lhsParts[0]).withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
+              String(rhsParts[0]).withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 else { return false }
         return withUnsafeBytes(of: lhsAddress) { lhsBytes in
             withUnsafeBytes(of: rhsAddress) { rhsBytes in lhsBytes.elementsEqual(rhsBytes) }
         }
