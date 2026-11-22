@@ -78,7 +78,7 @@ private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #li
             precondition(args == ["list", "--versions", "rtk"], "Onboarding must not install, upgrade or contact GitHub")
             return .init(status: 0, text: "rtk 1.1.0")
         }
-        let setup = TokenSaverSettingsController(home: setupHome, rtk: rtk)
+        let setup = TokenSaverSettingsController(home: setupHome, rtk: rtk) { _ in true }
         setup.apply(value)
         await setup.checkOnboarding()
         check(!setup.isCheckingSetup && setup.setupError == nil)
@@ -95,6 +95,12 @@ private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #li
         check(setup.localizedRulesStatus == "3. 托管规则：当前匹配")
         check(setup.localizedHistoryStatus == "4. 默认 RTK 历史记录：不可用 / 未验证")
         testUseChinese = false
+        check(setup.copyDiagnostic())
+        setup.reloadFromExternalNotification()
+        check(setup.isRefreshingRules && setup.onboarding == nil)
+        check(!setup.copyDiagnostic() && !setup.copiedDiagnostic)
+        await setup.waitForPendingInspection()
+        check(!setup.isRefreshingRules && setup.copyDiagnostic())
         // Verify Caveman-only and Ponytail-only configurations enable diagnostic copy without RTK/wrapper (F1)
         var cavemanOnly = TokenSaverSettings(); cavemanOnly.cavemanEnabled = true
         setup.apply(cavemanOnly)
@@ -234,6 +240,7 @@ private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #li
         print("PASS suspended Homebrew check never blocks toggles/harness and retains installation status")
 
         // Check 12: Clipboard feedback checks return value, restarts timer on repeat clicks, expires to false, and observer teardown leaves zero retain cycle
+        await controllerA.waitForPendingInspection()
         allowCopy = false
         check(!controllerA.copyDiagnostic() && !controllerA.copiedDiagnostic)
         check(!controllerA.copyBrewInstallCommand() && !controllerA.copiedBrewCommand)

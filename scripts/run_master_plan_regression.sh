@@ -12,12 +12,14 @@ import sys
 
 root, temp = map(Path, sys.argv[1:])
 
-def declaration(source, marker):
-    start = source.index("\n    " + marker) + 1
-    end = source.index("\n    }", start) + len("\n    }")
+def declaration(source, marker, indent="    "):
+    start = source.index("\n" + indent + marker) + 1
+    closing = "\n" + indent + "}"
+    end = source.index(closing, start) + len(closing)
     return source[start:end]
 
 settings = (root / "AIUsage/Models/AppSettings.swift").read_text()
+visibility = (root / "AIUsage/Models/AgentVisibility.swift").read_text()
 sync = (root / "AIUsage/ViewModels/ModelAutoSyncCoordinator.swift").read_text()
 address = "\n".join(declaration(settings, marker) for marker in (
     "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "static func parseRemoteAddress(",
@@ -27,7 +29,9 @@ catalog = "\n".join(declaration(sync, marker) for marker in (
     "private func baselineDecision(", "struct StateFile",
 ))
 (temp / "AppRegressionFixture.swift").write_text(f"""
-import Foundation
+{visibility}
+
+{declaration(settings, "enum AppSection:", indent="")}
 
 enum AppSettingsAddressFixture {{
 {address}
