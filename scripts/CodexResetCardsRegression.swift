@@ -418,8 +418,14 @@ struct CodexResetCardsRegression {
               "[AGY #1A] Stored-only delete clears the owning banner without waiting for async purge")
     }
 
+    private static func makeFixtureDirectory() throws -> URL {
+        let base = TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.appendingPathComponent(UUID().uuidString)
+    }
+
     @MainActor static func testRetryRefreshOrdering() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try makeFixtureDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory); StubURLProtocol.uninstall() }
         var credentials: [String: AccountCredential] = [:]
@@ -479,7 +485,7 @@ struct CodexResetCardsRegression {
     }
 
     @MainActor static func testUICoordinator() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try makeFixtureDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory); StubURLProtocol.uninstall() }
         let claims = try JSONSerialization.data(withJSONObject: ["https://api.openai.com/auth": ["chatgpt_account_id": "workspace", "chatgpt_user_id": "a"]])
@@ -646,7 +652,7 @@ struct CodexResetCardsRegression {
         check(StubURLProtocol.requests.count == before && refreshes == 2, "Remote switch blocks local actions")
     }
     @MainActor static func testLoadConsumeOrdering() async throws {
-        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let directory = try makeFixtureDirectory()
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: directory); CoordinatorGateProtocol.clear(); QuotaHTTP.sessionOverride = nil }
         let claims = try JSONSerialization.data(withJSONObject: ["https://api.openai.com/auth": ["chatgpt_account_id": "workspace", "chatgpt_user_id": "a"]])

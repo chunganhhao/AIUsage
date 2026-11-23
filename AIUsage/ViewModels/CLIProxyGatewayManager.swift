@@ -180,10 +180,6 @@ final class CLIProxyGatewayManager: ObservableObject {
             self.latestRelease = cached.release
             self.lastCheckedAt = cached.fetchedAt
         }
-        if let cached = self.releaseClient.cachedLookup() {
-            self.latestRelease = cached.release
-            self.lastCheckedAt = cached.fetchedAt
-        }
         if let raw = UserDefaults.standard.string(forKey: Self.openCodeProtocolDefaultsKey),
            let proto = OpenCodeProtocol(rawValue: raw) {
             self.managedOpenCodeProtocol = proto

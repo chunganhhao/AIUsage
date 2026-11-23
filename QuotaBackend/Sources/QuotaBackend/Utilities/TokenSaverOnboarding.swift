@@ -86,7 +86,7 @@ public enum TokenSaverOnboarding {
               after[.modificationDate] as? Date == modified,
               after[.systemFileNumber] as? NSNumber == inode,
               !sidecars.contains(where: FileManager.default.fileExists(atPath:)) else { return nil }
-        let temporary = FileManager.default.temporaryDirectory.appendingPathComponent("aiusage-rtk-" + UUID().uuidString)
+        let temporary = TokenSaverSettingsStore.resolvedTemporaryDirectory().appendingPathComponent("aiusage-rtk-" + UUID().uuidString)
         let snapshot = temporary.appendingPathComponent("history.sqlite")
         defer { try? FileManager.default.removeItem(at: temporary) }
         do {

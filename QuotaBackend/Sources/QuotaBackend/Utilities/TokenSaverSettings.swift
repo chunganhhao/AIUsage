@@ -1,3 +1,5 @@
+import Darwin
+import Darwin.membership
 import Foundation
 
 /// Opt-in only. A corrupt file must never enable compression or broaden scope.
@@ -34,7 +36,193 @@ public extension Notification.Name {
 public enum TokenSaverSettingsStore {
     private static let lock = NSRecursiveLock()
     public static func canonicalHomePath(_ home: URL) -> String {
-        home.standardizedFileURL.resolvingSymlinksInPath().path
+        let rawPath = home.path
+        let absoluteRaw = rawPath.hasPrefix("/")
+            ? rawPath
+            : FileManager.default.currentDirectoryPath + "/" + rawPath
+        if let direct = realpath(absoluteRaw, nil) {
+            defer { free(direct) }
+            return String(cString: direct)
+        }
+        var currentPath = absoluteRaw
+        while currentPath.count > 1 && currentPath.hasSuffix("/") { currentPath.removeLast() }
+        var tail: [String] = []
+        while !currentPath.isEmpty {
+            if let pointer = realpath(currentPath, nil) {
+                defer { free(pointer) }
+                var components = String(cString: pointer).split(separator: "/").map(String.init)
+                for component in tail.reversed() {
+                    if component.isEmpty || component == "." { continue }
+                    if component == ".." {
+                        if !components.isEmpty { components.removeLast() }
+                    } else {
+                        components.append(component)
+                    }
+                }
+                return "/" + components.joined(separator: "/")
+            }
+            if currentPath == "/" || currentPath.isEmpty { break }
+            let last = (currentPath as NSString).lastPathComponent
+            var parent = (currentPath as NSString).deletingLastPathComponent
+            while parent.count > 1 && parent.hasSuffix("/") { parent.removeLast() }
+            if parent == currentPath || parent.isEmpty || parent == "/.." { break }
+            tail.append(last)
+            currentPath = parent
+        }
+        return URL(fileURLWithPath: absoluteRaw).standardized.path
+    }
+    private static let benignACLReadTraverseMask: acl_permset_mask_t = [
+        ACL_READ_DATA, ACL_EXECUTE, ACL_READ_ATTRIBUTES,
+        ACL_READ_EXTATTRIBUTES, ACL_READ_SECURITY, ACL_SYNCHRONIZE,
+    ].reduce(0) { $0 | acl_permset_mask_t($1.rawValue) }
+
+    private static func isTrustedACLPrincipal(_ entry: acl_entry_t, euid: uid_t) -> Bool {
+        guard let qualifier = acl_get_qualifier(entry) else { return false }
+        defer { acl_free(qualifier) }
+        var uuid: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        let copied = withUnsafeMutableBytes(of: &uuid) { dst -> Bool in
+            guard dst.count == MemoryLayout<uuid_t>.size, let base = dst.baseAddress else { return false }
+            memcpy(base, qualifier, dst.count)
+            return true
+        }
+        guard copied else { return false }
+        var resolvedID: id_t = 0
+        var idType: Int32 = -1
+        guard mbr_uuid_to_id(&uuid, &resolvedID, &idType) == 0 else { return false }
+        return idType == ID_TYPE_UID && (uid_t(resolvedID) == euid || uid_t(resolvedID) == 0)
+    }
+
+    private static func hasSafeExtendedACL(at path: String, isLeaf: Bool, euid: uid_t) -> Bool {
+        errno = 0
+        guard let acl = acl_get_link_np(path, ACL_TYPE_EXTENDED) else {
+            let err = errno
+            return err == ENOENT || err == ENOTSUP || err == EOPNOTSUPP
+        }
+        defer { acl_free(UnsafeMutableRawPointer(acl)) }
+        var entry: acl_entry_t?
+        var entryID = ACL_FIRST_ENTRY.rawValue
+        while true {
+            errno = 0
+            let status = acl_get_entry(acl, entryID, &entry)
+            guard status == 0, let currentEntry = entry else {
+                let err = errno
+                return entryID == ACL_NEXT_ENTRY.rawValue ? (err == EINVAL || err == ENOENT) : err == ENOENT
+            }
+            entryID = ACL_NEXT_ENTRY.rawValue
+            var tag = ACL_UNDEFINED_TAG
+            guard acl_get_tag_type(currentEntry, &tag) == 0 else { return false }
+            guard tag == ACL_EXTENDED_DENY || tag == ACL_EXTENDED_ALLOW else {
+                return false
+            }
+            var permMask: acl_permset_mask_t = 0
+            guard acl_get_permset_mask_np(currentEntry, &permMask) == 0 else { return false }
+            var fileInherit: Int32 = 0
+            var dirInherit: Int32 = 0
+            var onlyInherit: Int32 = 0
+            if isLeaf && permMask != 0 {
+                var flagset: acl_flagset_t?
+                guard acl_get_flagset_np(UnsafeMutableRawPointer(currentEntry), &flagset) == 0,
+                      let flagset else {
+                    return false
+                }
+                fileInherit = acl_get_flag_np(flagset, ACL_ENTRY_FILE_INHERIT)
+                dirInherit = acl_get_flag_np(flagset, ACL_ENTRY_DIRECTORY_INHERIT)
+                onlyInherit = acl_get_flag_np(flagset, ACL_ENTRY_ONLY_INHERIT)
+                guard fileInherit >= 0, dirInherit >= 0, onlyInherit >= 0 else { return false }
+            }
+            if tag == ACL_EXTENDED_DENY {
+                if !isLeaf || permMask == 0 {
+                    continue
+                }
+                if fileInherit != 0 || dirInherit != 0 {
+                    return false
+                }
+                if onlyInherit == 0 && (permMask & acl_permset_mask_t(ACL_DELETE_CHILD.rawValue)) != 0 {
+                    return false
+                }
+                continue
+            }
+            let hasLeafInherit = fileInherit != 0 || dirInherit != 0
+            if (permMask & ~benignACLReadTraverseMask) == 0 && !hasLeafInherit {
+                continue
+            }
+            guard isTrustedACLPrincipal(currentEntry, euid: euid) else {
+                return false
+            }
+        }
+    }
+
+    private static func verifiedTemporaryRoot(_ raw: String) -> URL? {
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard trimmed.hasPrefix("/"),
+              !trimmed.components(separatedBy: "/").contains(".."),
+              (try? rejectSymlinks(URL(fileURLWithPath: trimmed, isDirectory: true))) != nil,
+              let resolvedPtr = realpath(trimmed, nil) else {
+            return nil
+        }
+        defer { free(resolvedPtr) }
+        let canonical = String(cString: resolvedPtr)
+        let euid = geteuid()
+        var st = stat()
+        guard lstat(canonical, &st) == 0,
+              (st.st_mode & S_IFMT) == S_IFDIR,
+              st.st_uid == euid,
+              (st.st_mode & S_IRWXU) == S_IRWXU,
+              (st.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+              Darwin.access(canonical, R_OK | W_OK | X_OK) == 0,
+              hasSafeExtendedACL(at: canonical, isLeaf: true, euid: euid) else {
+            return nil
+        }
+        var currentPath = canonical
+        var currentStat = st
+        while currentPath != "/" {
+            let parentPath = (currentPath as NSString).deletingLastPathComponent
+            if parentPath.isEmpty || parentPath == currentPath { return nil }
+            var parentStat = stat()
+            guard lstat(parentPath, &parentStat) == 0,
+                  (parentStat.st_mode & S_IFMT) == S_IFDIR,
+                  parentStat.st_uid == euid || parentStat.st_uid == 0,
+                  hasSafeExtendedACL(at: parentPath, isLeaf: false, euid: euid) else {
+                return nil
+            }
+            if (parentStat.st_mode & (S_IWGRP | S_IWOTH)) != 0 {
+                guard (parentStat.st_mode & S_ISVTX) != 0,
+                      currentStat.st_uid == euid || (parentStat.st_uid == 0 && currentStat.st_uid == 0) else {
+                    return nil
+                }
+            }
+            currentPath = parentPath
+            currentStat = parentStat
+        }
+        return URL(fileURLWithPath: canonical, isDirectory: true).resolvingSymlinksInPath()
+    }
+
+    public static func resolvedTemporaryDirectory(
+        overrides: [String: String] = [:],
+        processEnvironment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> URL {
+        for sourceDict in [overrides, processEnvironment] {
+            for key in ["AIUSAGE_TEST_FIXTURE_ROOT", "TMPDIR"] {
+                if let raw = sourceDict[key], let verified = verifiedTemporaryRoot(raw) {
+                    return verified
+                }
+            }
+        }
+        if let systemTemp = verifiedTemporaryRoot(FileManager.default.temporaryDirectory.path) {
+            return systemTemp
+        }
+        for sourceDict in [overrides, processEnvironment] {
+            if let rawHome = sourceDict["HOME"], let safeHome = verifiedTemporaryRoot(rawHome) {
+                let candidate = safeHome.appendingPathComponent(".aiusage-tmp", isDirectory: true)
+                if Darwin.mkdir(candidate.path, 0o700) == 0 {
+                    _ = Darwin.chmod(candidate.path, 0o700)
+                }
+                if let verified = verifiedTemporaryRoot(candidate.path) {
+                    return verified
+                }
+            }
+        }
+        return URL(fileURLWithPath: "/var/empty/aiusage-unverified-temporary-root", isDirectory: true)
     }
     private static func notificationUserInfo(home: URL, origin: UUID?) -> [AnyHashable: Any] {
         var info: [AnyHashable: Any] = ["home": canonicalHomePath(home)]

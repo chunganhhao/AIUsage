@@ -9,8 +9,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-swift build --package-path "$ROOT_DIR/QuotaBackend" --target QuotaBackend >/dev/null
-BACKEND_BIN="$(swift build --package-path "$ROOT_DIR/QuotaBackend" --show-bin-path)"
+BUILD_ARGS=(--package-path "$ROOT_DIR/QuotaBackend")
+if [[ -n "${AIUSAGE_SWIFTPM_SCRATCH:-}" ]]; then
+  BUILD_ARGS+=(--scratch-path "$AIUSAGE_SWIFTPM_SCRATCH")
+fi
+swift build "${BUILD_ARGS[@]}" --target QuotaBackend >/dev/null
+BACKEND_BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BACKEND_BIN/description.json" > "$WORK_DIR/backend-objects.txt"
 swiftc -parse-as-library -I "$BACKEND_BIN/Modules" -Xlinker -filelist -Xlinker "$WORK_DIR/backend-objects.txt" -lsqlite3 \
   "$ROOT_DIR/AIUsage/Models/CLIProxyGatewayModels.swift" \
@@ -25,4 +29,5 @@ swiftc -parse-as-library -I "$BACKEND_BIN/Modules" -Xlinker -filelist -Xlinker "
   "$ROOT_DIR/scripts/CLIProxyUpdaterRegression.swift" \
   -o "$WORK_DIR/cliproxy-updater-regression"
 
-"$WORK_DIR/cliproxy-updater-regression" "$@"
+mkdir -p "$WORK_DIR/fixtures"
+AIUSAGE_TEST_FIXTURE_ROOT="$WORK_DIR/fixtures" "$WORK_DIR/cliproxy-updater-regression" "$WORK_DIR/fixtures" "$@"

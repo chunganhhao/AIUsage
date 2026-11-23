@@ -312,18 +312,25 @@ final class AppSettings: ObservableObject {
         return (host, port)
     }
 
-    private static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {
-        if lhs.caseInsensitiveCompare(rhs) == .orderedSame { return true }
-        let lhsParts = lhs.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
-        let rhsParts = rhs.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
-        guard lhsParts.dropFirst().first == rhsParts.dropFirst().first else { return false }
+    nonisolated static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        let left = lhs.hasPrefix("[") && lhs.hasSuffix("]") ? lhs.dropFirst().dropLast() : lhs[...]
+        let right = rhs.hasPrefix("[") && rhs.hasSuffix("]") ? rhs.dropFirst().dropLast() : rhs[...]
+        let lhsParts = left.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        let rhsParts = right.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+        let lhsZone = lhsParts.dropFirst().first
+        let rhsZone = rhsParts.dropFirst().first
+        guard lhsZone == rhsZone, lhsZone?.isEmpty != true else { return false }
         var lhsAddress = in6_addr()
         var rhsAddress = in6_addr()
-        guard String(lhsParts[0]).withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
-              String(rhsParts[0]).withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 else { return false }
-        return withUnsafeBytes(of: lhsAddress) { lhsBytes in
-            withUnsafeBytes(of: rhsAddress) { rhsBytes in lhsBytes.elementsEqual(rhsBytes) }
+        let lhsBase = String(lhsParts[0])
+        let rhsBase = String(rhsParts[0])
+        if lhsBase.withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
+           rhsBase.withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 {
+            return withUnsafeBytes(of: lhsAddress) { lhsBytes in
+                withUnsafeBytes(of: rhsAddress) { rhsBytes in lhsBytes.elementsEqual(rhsBytes) }
+            }
         }
+        return lhsZone == nil && lhsBase.caseInsensitiveCompare(rhsBase) == .orderedSame
     }
 
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。

@@ -3,7 +3,7 @@ import os.log
 import QuotaBackend
 
 // 不启动 App、不读用户配置、不访问上游。生产方法由运行器原样提取。
-let fixtureRoot = FileManager.default.temporaryDirectory.appendingPathComponent("common-config-\(UUID().uuidString)")
+let fixtureRoot = TokenSaverSettingsStore.resolvedTemporaryDirectory().appendingPathComponent("common-config-\(UUID().uuidString)")
 let storeLog = Logger(subsystem: "com.aiusage.regression", category: "Store")
 let openCodeStoreLog = storeLog
 let openCodeConfigLog = storeLog

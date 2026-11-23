@@ -3,8 +3,12 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/aiusage-master.XXXXXX")"
 trap 'rm -rf "$TEMP"' EXIT
-swift build --package-path "$ROOT/QuotaBackend" --target QuotaBackend >/dev/null
-BIN="$(swift build --package-path "$ROOT/QuotaBackend" --show-bin-path)"
+BUILD_ARGS=(--package-path "$ROOT/QuotaBackend")
+if [[ -n "${AIUSAGE_SWIFTPM_SCRATCH:-}" ]]; then
+  BUILD_ARGS+=(--scratch-path "$AIUSAGE_SWIFTPM_SCRATCH")
+fi
+swift build "${BUILD_ARGS[@]}" --target QuotaBackend >/dev/null
+BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$TEMP/objects.txt"
 python3 - "$ROOT" "$TEMP" <<'PY'
 from pathlib import Path
@@ -24,12 +28,14 @@ sync = (root / "AIUsage/ViewModels/ModelAutoSyncCoordinator.swift").read_text()
 distributor = (root / "AIUsage/ViewModels/APIProviderDistributor.swift").read_text()
 cards = (root / "AIUsage/Views/DashboardStateCards.swift").read_text()
 flash = (root / "AIUsage/Views/AppFlashBanner.swift").read_text()
+content_view = (root / "AIUsage/Views/ContentView.swift").read_text()
+sidebar_nav = (root / "AIUsage/Views/SidebarNavigation.swift").read_text().replace("import SwiftUI\n", "")
 api_src = (root / "AIUsage/Services/APIService.swift").read_text()
 for imp in ("import Darwin\n", "import Foundation\n", "import QuotaBackend\n"):
     api_src = api_src.replace(imp, "")
 
 address = "\n".join(declaration(settings, marker) for marker in (
-    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "private static func remoteHostsMatch(",
+    "static func remoteBaseURL(", "static func resolveRemoteSettingsAddress(", "nonisolated static func remoteHostsMatch(",
     "static func parseRemoteAddress(",
 ))
 catalog = "\n".join(declaration(sync, marker) for marker in (
@@ -42,10 +48,12 @@ propagate_fn = declaration(distributor, "@discardableResult\n    func propagateC
 serialize_fn = declaration(distributor, "private func withProviderSerialization<T>(")
 shimmer_struct = declaration(cards, "private struct ShimmerModifier: ViewModifier", indent="")
 app_flash_struct = declaration(flash, "struct AppFlash: Equatable, Identifiable", indent="")
+relay_src = declaration(content_view, "@MainActor\nfinal class SidebarSelectionRelay", indent="")
 visibility_src = visibility.replace("import Foundation\nimport QuotaBackend\n", "")
 app_section_src = declaration(settings, "enum AppSection:", indent="")
 
 (temp / "AppRegressionFixture.swift").write_text(f"""
+import AppKit
 import Darwin
 import Foundation
 import SwiftUI
@@ -53,9 +61,13 @@ import QuotaBackend
 
 {visibility_src}
 
+func L(_ en: String, _ _: String, _ _: String? = nil, key _: String? = nil) -> String {{ en }}
+
 {app_section_src}
 
-func L(_ en: String, _ _: String, _ _: String? = nil) -> String {{ en }}
+{sidebar_nav}
+
+{relay_src}
 
 private extension String {{
     var nilIfBlank: String? {{
@@ -79,6 +91,9 @@ final class AppSettings {{
     var hiddenSidebarSections: Set<String> = []
     static func remoteBaseURL(host: String, port: Int) -> String {{
         AppSettingsAddressFixture.remoteBaseURL(host: host, port: port)
+    }}
+    nonisolated static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {{
+        AppSettingsAddressFixture.remoteHostsMatch(lhs, rhs)
     }}
     static func localized(_ en: String, _ _: String, _ _: String? = nil) -> String {{ en }}
 }}
@@ -383,4 +398,5 @@ final class ModelSyncHarness {{
 """)
 PY
 swiftc -parse-as-library -swift-version 5 -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$TEMP/objects.txt" -lsqlite3 "$ROOT/scripts/MasterPlanRegression.swift" "$TEMP/AppRegressionFixture.swift" -o "$TEMP/regression"
-"$TEMP/regression"
+mkdir -p "$TEMP/fixtures"
+AIUSAGE_TEST_FIXTURE_ROOT="$TEMP/fixtures" "$TEMP/regression" "$TEMP/fixtures"

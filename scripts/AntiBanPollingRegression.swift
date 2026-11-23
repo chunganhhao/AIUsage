@@ -34,7 +34,10 @@ private struct PollProvider: CredentialAcceptingProvider {
     static let summary = #"{"groups":[{"displayName":"Gemini Models","buckets":[{"bucketId":"gemini-weekly","window":"weekly","remainingFraction":0.8,"resetTime":"2027-01-01T00:00:00Z"}]}]}"#
     static let tos = #"{"error":{"code":403,"status":"PERMISSION_DENIED","details":[{"@type":"type.googleapis.com/google.rpc.ErrorInfo","reason":"TOS_VIOLATION","metadata":{"appeal_url":"https://support.google.com/appeal"}}]}}"#
     static func main() async throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let root = fixtureBase.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root); StubURLProtocol.uninstall() }
         var vault: Data?

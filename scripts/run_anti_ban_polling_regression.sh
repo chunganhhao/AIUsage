@@ -3,15 +3,20 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 TEMP="$(mktemp -d "${TMPDIR:-/tmp}/aiusage-anti-ban-polling.XXXXXX")"
 trap 'rm -rf "$TEMP"' EXIT
-swift build --package-path "$ROOT/QuotaBackend" --target QuotaBackend >/dev/null
-BIN="$(swift build --package-path "$ROOT/QuotaBackend" --show-bin-path)"
+BUILD_ARGS=(--package-path "$ROOT/QuotaBackend")
+if [[ -n "${AIUSAGE_SWIFTPM_SCRATCH:-}" ]]; then
+  BUILD_ARGS+=(--scratch-path "$AIUSAGE_SWIFTPM_SCRATCH")
+fi
+swift build "${BUILD_ARGS[@]}" --target QuotaBackend >/dev/null
+BIN="$(swift build "${BUILD_ARGS[@]}" --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' "$BIN/description.json" > "$TEMP/objects.txt"
 swiftc -parse-as-library -swift-version 5 \
   -I "$BIN/Modules" -Xlinker -filelist -Xlinker "$TEMP/objects.txt" -lsqlite3 \
   "$ROOT/QuotaBackend/Tests/QuotaBackendTests/Support/StubURLProtocol.swift" \
   "$ROOT/scripts/AntiBanPollingRegression.swift" \
   -o "$TEMP/anti-ban-polling-regression"
-"$TEMP/anti-ban-polling-regression"
+mkdir -p "$TEMP/fixtures"
+AIUSAGE_TEST_FIXTURE_ROOT="$TEMP/fixtures" "$TEMP/anti-ban-polling-regression" "$TEMP/fixtures"
 
 python3 - "$ROOT" "$TEMP" <<'PY'
 from pathlib import Path
@@ -55,4 +60,4 @@ swiftc -parse-as-library -swift-version 5 \
   "$ROOT/QuotaBackend/Tests/QuotaBackendTests/Support/StubURLProtocol.swift" \
   "$TEMP/DiscoveryRegression.swift" \
   -o "$TEMP/discovery-anti-ban-regression"
-"$TEMP/discovery-anti-ban-regression"
+AIUSAGE_TEST_FIXTURE_ROOT="$TEMP/fixtures" "$TEMP/discovery-anti-ban-regression" "$TEMP/fixtures"

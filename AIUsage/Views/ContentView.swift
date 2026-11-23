@@ -1,15 +1,81 @@
 import SwiftUI
 
+@MainActor
+final class SidebarSelectionRelay {
+    private var pendingSection: AppSection?
+    private var expectedCurrentSection: AppSection?
+    private var generation: UInt64 = 0
+
+    func binding(
+        current: @escaping @MainActor () -> AppSection,
+        isSelectable: @escaping @MainActor (AppSection) -> Bool = { _ in true },
+        commit: @escaping @MainActor (AppSection) -> Void
+    ) -> Binding<AppSection> {
+        Binding(
+            get: { current() },
+            set: { [weak self] newValue in
+                self?.schedule(newValue, current: current, isSelectable: isSelectable, commit: commit)
+            }
+        )
+    }
+
+    func schedule(
+        _ newValue: AppSection,
+        current: @escaping @MainActor () -> AppSection,
+        isSelectable: @escaping @MainActor (AppSection) -> Bool = { _ in true },
+        commit: @escaping @MainActor (AppSection) -> Void
+    ) {
+        let active = current()
+        if pendingSection == nil, newValue == active {
+            return
+        }
+        if pendingSection == newValue, expectedCurrentSection == active {
+            return
+        }
+        generation &+= 1
+        if newValue == active || !isSelectable(newValue) {
+            pendingSection = nil
+            expectedCurrentSection = nil
+            return
+        }
+        pendingSection = newValue
+        expectedCurrentSection = active
+        let scheduledGeneration = generation
+        DispatchQueue.main.async { [weak self] in
+            MainActor.assumeIsolated {
+                guard let self,
+                      self.generation == scheduledGeneration,
+                      let target = self.pendingSection,
+                      let expected = self.expectedCurrentSection else {
+                    return
+                }
+                self.pendingSection = nil
+                self.expectedCurrentSection = nil
+                guard current() == expected, current() != target, isSelectable(target) else { return }
+                commit(target)
+            }
+        }
+    }
+
+    func cancelPending() {
+        generation &+= 1
+        pendingSection = nil
+        expectedCurrentSection = nil
+    }
+}
+
 struct ContentView: View {
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var sparkle: SparkleController
     @Environment(\.openWindow) private var openWindow
     @Environment(\.colorScheme) private var colorScheme
     @ObservedObject private var proxyVM = ProxyViewModel.shared
+    @State private var selectionRelay = SidebarSelectionRelay()
     private var sectionBinding: Binding<AppSection> {
-        Binding(
-            get: { appState.selectedSection },
-            set: { appState.selectedSection = $0 }
+        selectionRelay.binding(
+            current: { appState.selectedSection },
+            isSelectable: { SidebarNavigation.isVisible($0, hidden: appState.settings.hiddenSidebarSections) },
+            commit: { appState.selectedSection = $0 }
         )
     }
 
@@ -62,6 +128,7 @@ struct ContentView: View {
         hidden.insert(section.rawValue)
         appState.settings.hiddenSidebarSections = hidden
         if appState.selectedSection == section {
+            selectionRelay.cancelPending()
             appState.selectedSection = .dashboard
         }
     }
@@ -113,6 +180,7 @@ struct ContentView: View {
                 }
             }
             Button {
+                selectionRelay.cancelPending()
                 appState.selectedSection = .settings
             } label: {
                 Label(L("Manage Sidebar…", "管理侧边栏…", key: "sidebar.manage"), systemImage: "slider.horizontal.3")
@@ -161,6 +229,7 @@ struct ContentView: View {
             .onChange(of: hiddenSections) { _, hidden in
                 // 若当前分区被（在设置页等处）隐藏，回退到常驻的仪表盘，避免停在空白详情。
                 if hidden.contains(appState.selectedSection.rawValue) {
+                    selectionRelay.cancelPending()
                     appState.selectedSection = .dashboard
                 }
             }
@@ -241,6 +310,7 @@ struct ContentView: View {
         }
         .onAppear {
             appState.registerMainWindowPresenter { section in
+                selectionRelay.cancelPending()
                 appState.selectedSection = section
                 openWindow(id: AppState.mainWindowID)
                 DispatchQueue.main.async {

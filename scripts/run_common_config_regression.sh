@@ -5,8 +5,8 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 REGRESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aiusage-common-config.XXXXXX")"
 trap 'rm -rf "$REGRESSION_DIR"' EXIT
 
-swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --target QuotaBackend >/dev/null
-BACKEND_BIN="$(swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --show-bin-path)"
+swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" ${AIUSAGE_SWIFTPM_SCRATCH:+--scratch-path "$AIUSAGE_SWIFTPM_SCRATCH"} --target QuotaBackend >/dev/null
+BACKEND_BIN="$(swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" ${AIUSAGE_SWIFTPM_SCRATCH:+--scratch-path "$AIUSAGE_SWIFTPM_SCRATCH"} --show-bin-path)"
 jq -r '.swiftCommands[] | select(.moduleName == "QuotaBackend") | .objects[]' \
   "$BACKEND_BIN/description.json" > "$REGRESSION_DIR/backend-objects.txt"
 
@@ -70,6 +70,8 @@ swiftc -parse-as-library -swift-version 5 \
   "$PROJECT_DIR/scripts/CommonConfigRegression.swift" \
   "$REGRESSION_DIR/ProductionMethods.swift" \
   -o "$REGRESSION_DIR/common-config-regression"
+mkdir -p "$REGRESSION_DIR/fixtures"
+export AIUSAGE_TEST_FIXTURE_ROOT="$REGRESSION_DIR/fixtures"
 if [[ "${1:-}" == '--baseline-adapters' ]]; then
   # 三条旧适配器应各自复现漏传，不能因第一个失败而漏测其它家族。
   for TRACK in codex claude opencode; do

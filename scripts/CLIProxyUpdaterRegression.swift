@@ -1,6 +1,7 @@
 import CryptoKit
 import Darwin
 import Foundation
+import QuotaBackend
 
 nonisolated private struct NoopSigner: CLIProxyBinarySigning {
     func sign(binaryAt url: URL) throws {}
@@ -44,6 +45,7 @@ struct CLIProxyUpdaterRegression {
         try testCodexGoFreePolicy()
         try await testABARollbackCommitIdentity()
         try await testLockedVersionDelete()
+        try await testHeldBuildLeavesLegacyAuthUntouched()
         if CommandLine.arguments.contains("--live") {
             try await testLatestOfficialReleaseEndToEnd()
         }
@@ -285,9 +287,85 @@ struct CLIProxyUpdaterRegression {
         try expect(merged.enablePlugins, "three-way settings merge discarded the external plugin change")
     }
 
+    private static func makeScratchRoot(_ prefix: String) throws -> URL {
+        let base = CommandLine.arguments.dropFirst().first(where: { !$0.hasPrefix("-") })
+            .map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: base, withIntermediateDirectories: true)
+        return base.resolvingSymlinksInPath().standardizedFileURL
+            .appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+    }
+
+    private static func testHeldBuildLeavesLegacyAuthUntouched() async throws {
+        try expect(!CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+                   "[Finding #2] Test assumes subscriptions are disabled in held build")
+        let fileManager = FileManager.default
+        let absentRoot = try makeScratchRoot("AIUsage-CPA-Held-Absent")
+        defer { try? fileManager.removeItem(at: absentRoot) }
+        let absentPaths = try CLIProxyPaths(root: absentRoot)
+        try absentPaths.prepare(fileManager: fileManager)
+        try CLIProxyConfigStore(paths: absentPaths).saveSettings(.default)
+        _ = try await CLIProxyBinaryStore(paths: absentPaths).currentVersion()
+        try expect(!fileManager.fileExists(atPath: absentPaths.authDirectory.path),
+                   "[Finding #2] Held build prepare must not create missing legacy auth/")
+        for runtimeDir in [
+            absentPaths.root,
+            absentPaths.versionsDirectory,
+            absentPaths.isolatedAuthDirectory,
+            absentPaths.runtimeWorkingDirectory,
+            absentPaths.runtimeTempDirectory,
+            absentPaths.pluginsDirectory,
+            absentPaths.logsDirectory
+        ] {
+            let mode = (try fileManager.attributesOfItem(atPath: runtimeDir.path)[.posixPermissions] as? NSNumber)?.intValue
+            try expect(mode == 0o700, "[Finding #2] Active runtime directory \(runtimeDir.lastPathComponent) must have mode 0700")
+        }
+
+        let existingRoot = try makeScratchRoot("AIUsage-CPA-Held-Existing")
+        defer { try? fileManager.removeItem(at: existingRoot) }
+        let existingPaths = try CLIProxyPaths(root: existingRoot)
+        try fileManager.createDirectory(
+            at: existingPaths.authDirectory,
+            withIntermediateDirectories: true,
+            attributes: [.posixPermissions: 0o750]
+        )
+        let seedFile = existingPaths.authDirectory.appendingPathComponent("legacy.json")
+        let seedBytes = Data(#"{"type":"codex","email":"keep@example.invalid"}"#.utf8)
+        try seedBytes.write(to: seedFile)
+        try fileManager.setAttributes([.posixPermissions: 0o640], ofItemAtPath: seedFile.path)
+
+        var dirBefore = stat()
+        try expect(lstat(existingPaths.authDirectory.path, &dirBefore) == 0, "[Finding #2] lstat on seeded auth/ failed")
+        var fileBefore = stat()
+        try expect(lstat(seedFile.path, &fileBefore) == 0, "[Finding #2] lstat on seeded legacy.json failed")
+
+        try existingPaths.prepare(fileManager: fileManager)
+        try CLIProxyConfigStore(paths: existingPaths).saveSettings(.default)
+        _ = try await CLIProxyBinaryStore(paths: existingPaths).currentVersion()
+
+        var dirAfter = stat()
+        try expect(lstat(existingPaths.authDirectory.path, &dirAfter) == 0, "[Finding #2] lstat after prepare failed")
+        try expect((dirAfter.st_mode & 0o777) == 0o750, "[Finding #2] Held build prepare altered legacy auth/ permissions")
+        try expect(
+            dirAfter.st_ctimespec.tv_sec == dirBefore.st_ctimespec.tv_sec
+                && dirAfter.st_ctimespec.tv_nsec == dirBefore.st_ctimespec.tv_nsec
+                && dirAfter.st_mtimespec.tv_sec == dirBefore.st_mtimespec.tv_sec
+                && dirAfter.st_mtimespec.tv_nsec == dirBefore.st_mtimespec.tv_nsec,
+            "[Finding #2] Held build prepare touched existing legacy auth/ inode metadata"
+        )
+        var fileAfter = stat()
+        try expect(lstat(seedFile.path, &fileAfter) == 0 && (fileAfter.st_mode & 0o777) == 0o640,
+                   "[Finding #2] Legacy credential file metadata changed")
+        let seedAfterBytes = try Data(contentsOf: seedFile)
+        try expect(seedAfterBytes == seedBytes, "[Finding #2] Legacy credential bytes changed")
+
+        try absentPaths.prepare(includeLegacyAuthDirectory: true, fileManager: fileManager)
+        let optInMode = (try fileManager.attributesOfItem(atPath: absentPaths.authDirectory.path)[.posixPermissions] as? NSNumber)?.intValue
+        try expect(optInMode == 0o700, "[Finding #2] Explicit includeLegacyAuthDirectory creates auth/ with mode 0700")
+    }
+
     private static func testRuntimeConfiguration() throws {
-        let root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AIUsage-CPA-Config-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-Config")
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = try CLIProxyPaths(root: root)
         let store = CLIProxyConfigStore(paths: paths)
@@ -337,8 +415,7 @@ struct CLIProxyUpdaterRegression {
 
         // [§8.2 + §37.3 + §39.3] Persisted v1/v2/v3 state.json with retries/plugins/preview fallback
         // must normalize to v4 API-key-only zero-failover while keeping unrelated user prefs and official API upstreams intact.
-        let v1Root = FileManager.default.temporaryDirectory
-            .appendingPathComponent("AIUsage-CPA-V1-\(UUID().uuidString)")
+        let v1Root = try makeScratchRoot("AIUsage-CPA-V1")
         defer { try? FileManager.default.removeItem(at: v1Root) }
         let v1Paths = try CLIProxyPaths(root: v1Root)
         let v1Store = CLIProxyConfigStore(paths: v1Paths)
@@ -662,8 +739,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testDefaultPluginDirectoryUpgradeMigration() throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory
-            .appendingPathComponent("AIUsage-CPA-Default-Plugin-Migration-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-Default-Plugin-Migration")
         defer { try? fileManager.removeItem(at: root) }
         let paths = try CLIProxyPaths(root: root)
         try paths.prepare(fileManager: fileManager)
@@ -1562,7 +1638,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testVersionedInstallAndRollback() async throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("AIUsage-CPA-Test-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-Test")
         defer { try? fileManager.removeItem(at: root) }
         let archive = try makeArchive(root: root, duplicateBinary: false)
         let digest = try sha256(of: archive)
@@ -1616,7 +1692,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testDuplicateBinaryArchiveIsRejected() throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("AIUsage-CPA-Duplicate-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-Duplicate")
         defer { try? fileManager.removeItem(at: root) }
         let archive = try makeArchive(root: root, duplicateBinary: true)
         let destination = root.appendingPathComponent("output")
@@ -2018,7 +2094,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testABARollbackCommitIdentity() async throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("AIUsage-CPA-ABA-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-ABA")
         defer { try? fileManager.removeItem(at: root) }
         let archive = try makeArchive(root: root, duplicateBinary: false)
         let digest = try sha256(of: archive)
@@ -2099,7 +2175,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testLockedVersionDelete() async throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("AIUsage-CPA-LockedDel-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-LockedDel")
         defer { try? fileManager.removeItem(at: root) }
         let archive = try makeArchive(root: root, duplicateBinary: false)
         let digest = try sha256(of: archive)
@@ -2155,7 +2231,7 @@ struct CLIProxyUpdaterRegression {
 
     private static func testLatestOfficialReleaseEndToEnd() async throws {
         let fileManager = FileManager.default
-        let root = fileManager.temporaryDirectory.appendingPathComponent("AIUsage-CPA-Live-\(UUID().uuidString)")
+        let root = try makeScratchRoot("AIUsage-CPA-Live")
         defer { try? fileManager.removeItem(at: root) }
 
         let release = try await CLIProxyReleaseClient().latestStableRelease()

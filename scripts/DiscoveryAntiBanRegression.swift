@@ -97,7 +97,10 @@ actor ConcurrentImportGate {
 
 @main struct DiscoveryAntiBanRegression {
     @MainActor static func main() async throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let home = fixtureBase.appendingPathComponent(UUID().uuidString)
         let managedBase = home.appendingPathComponent("AppSupport")
         try FileManager.default.createDirectory(at: managedBase, withIntermediateDirectories: true)
         ProviderManagedImportStore.managedBase = managedBase

@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import SQLite3
 
@@ -164,6 +165,112 @@ func bind(_ values: [BindValue], to statement: OpaquePointer?) {
             sqlite3_bind_int64(statement, position, int)
         case .text(let str):
             sqlite3_bind_text(statement, position, str, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
+    }
+}
+
+// MARK: - Private SQLite Snapshot Isolation
+
+enum OpenCodeSnapshotIsolation {
+    @TaskLocal static var didPrepareSnapshot: (@Sendable (URL) -> Void)?
+}
+
+func makeOpenCodeDatabaseSnapshot(
+    dataDirectory: String,
+    databaseFilename: String = "opencode.db",
+    prefix: String,
+    environment: [String: String]
+) throws -> String {
+    let fm = FileManager.default
+    let parentURL = TokenSaverSettingsStore.resolvedTemporaryDirectory(overrides: environment)
+    let snapshotDirectory = parentURL.appendingPathComponent("\(prefix)-\(UUID().uuidString)", isDirectory: true)
+    let sourceDB = (dataDirectory as NSString).appendingPathComponent(databaseFilename)
+    let destinationDB = snapshotDirectory.appendingPathComponent(databaseFilename, isDirectory: false).path
+
+    do {
+        try fm.createDirectory(at: snapshotDirectory, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
+        if chmod(snapshotDirectory.path, 0o700) != 0 {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+        }
+        var dirStat = stat()
+        guard lstat(snapshotDirectory.path, &dirStat) == 0,
+              (dirStat.st_mode & S_IFMT) == S_IFDIR,
+              dirStat.st_uid == geteuid(),
+              (dirStat.st_mode & 0o777) == 0o700 else {
+            throw NSError(domain: NSPOSIXErrorDomain, code: Int(EACCES))
+        }
+
+        try copyPrivateSnapshotFile(from: sourceDB, to: destinationDB, required: true)
+        try copyPrivateSnapshotFile(from: sourceDB + "-wal", to: destinationDB + "-wal", required: false)
+        try copyPrivateSnapshotFile(from: sourceDB + "-shm", to: destinationDB + "-shm", required: false)
+    } catch {
+        try? fm.removeItem(at: snapshotDirectory)
+        throw ProviderError("db_snapshot_failed", SensitiveDataRedactor.redactedMessage(for: error))
+    }
+
+    OpenCodeSnapshotIsolation.didPrepareSnapshot?(snapshotDirectory)
+    return destinationDB
+}
+
+func cleanupOpenCodeDatabaseSnapshot(_ snapshotPath: String, expectedDirectoryPrefix: String) {
+    let fm = FileManager.default
+    try? fm.removeItem(atPath: snapshotPath)
+    try? fm.removeItem(atPath: snapshotPath + "-wal")
+    try? fm.removeItem(atPath: snapshotPath + "-shm")
+    let parent = URL(fileURLWithPath: snapshotPath, isDirectory: false).deletingLastPathComponent()
+    if parent.lastPathComponent.hasPrefix(expectedDirectoryPrefix) {
+        try? fm.removeItem(at: parent)
+    }
+}
+
+private func copyPrivateSnapshotFile(from sourcePath: String, to destinationPath: String, required: Bool) throws {
+    let srcFD = Darwin.open(sourcePath, O_RDONLY | O_NOFOLLOW | O_NONBLOCK)
+    if srcFD < 0 {
+        if !required && errno == ENOENT { return }
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    defer { _ = Darwin.close(srcFD) }
+
+    var srcStat = stat()
+    guard fstat(srcFD, &srcStat) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    guard (srcStat.st_mode & S_IFMT) == S_IFREG else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(EFTYPE))
+    }
+    let srcFlags = fcntl(srcFD, F_GETFL)
+    guard srcFlags >= 0, fcntl(srcFD, F_SETFL, srcFlags & ~O_NONBLOCK) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+
+    let dstFD = Darwin.open(destinationPath, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW, 0o600)
+    guard dstFD >= 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+    defer { _ = Darwin.close(dstFD) }
+    guard fchmod(dstFD, 0o600) == 0 else {
+        throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+    }
+
+    var buffer = [UInt8](repeating: 0, count: 65_536)
+    try buffer.withUnsafeMutableBytes { rawBuffer in
+        guard let base = rawBuffer.baseAddress else { return }
+        while true {
+            let bytesRead = Darwin.read(srcFD, base, rawBuffer.count)
+            if bytesRead == 0 { break }
+            if bytesRead < 0 {
+                if errno == EINTR { continue }
+                throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+            }
+            var offset = 0
+            while offset < bytesRead {
+                let written = Darwin.write(dstFD, base.advanced(by: offset), bytesRead - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    throw NSError(domain: NSPOSIXErrorDomain, code: Int(errno))
+                }
+                offset += written
+            }
         }
     }
 }

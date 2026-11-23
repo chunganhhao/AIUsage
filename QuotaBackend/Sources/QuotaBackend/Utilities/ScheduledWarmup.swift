@@ -407,7 +407,7 @@ public enum OfficialWarmupProcess {
         let temporary: URL
         let workdir: URL
         do {
-            temporary = FileManager.default.temporaryDirectory.appendingPathComponent("aiusage-warmup-" + UUID().uuidString)
+            temporary = TokenSaverSettingsStore.resolvedTemporaryDirectory(overrides: environment).appendingPathComponent("aiusage-warmup-" + UUID().uuidString)
             try FileManager.default.createDirectory(at: temporary, withIntermediateDirectories: false, attributes: [.posixPermissions: 0o700])
             workdir = temporary.appendingPathComponent("workdir")
             try FileManager.default.createDirectory(at: workdir, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])

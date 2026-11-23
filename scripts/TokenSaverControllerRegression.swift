@@ -11,7 +11,10 @@ private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #li
 @main struct ControllerRegression {
     @MainActor static func main() async throws {
         let fm = FileManager.default
-        let home = fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try fm.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let home = fixtureBase.appendingPathComponent("h-\(UUID().uuidString.prefix(8))")
         defer { try? fm.removeItem(at: home) }
         let profile = home.appendingPathComponent(".hermes/profiles/token-saver-test")
         let config = profile.appendingPathComponent("config.yaml")
@@ -267,6 +270,53 @@ private func check(_ value: Bool, file: StaticString = #fileID, line: UInt = #li
         }
         check(weakObserverController == nil)
         print("PASS clipboard verification and observer teardown succeed")
-        print("Token Saver native controller: 12 checks passed")
+
+        // Check 13: Nonexistent home keeps identical canonical identity before and after first save across symlinked/alias parents
+        let realAliasParent = home.appendingPathComponent("real-alias-parent", isDirectory: true)
+        let symlinkAliasParent = home.appendingPathComponent("link-alias-parent", isDirectory: true)
+        try fm.createDirectory(at: realAliasParent, withIntermediateDirectories: true)
+        try fm.createSymbolicLink(at: symlinkAliasParent, withDestinationURL: realAliasParent)
+        let linkNewHome = symlinkAliasParent.appendingPathComponent("first-save-home", isDirectory: true)
+        let realNewHome = realAliasParent.appendingPathComponent("first-save-home", isDirectory: true)
+        check(TokenSaverSettingsStore.canonicalHomePath(linkNewHome) == TokenSaverSettingsStore.canonicalHomePath(realNewHome))
+        let aliasController = TokenSaverSettingsController(home: realNewHome, rtk: rtk)
+        aliasController.mutate { $0.ponytailEnabled = true }
+        check(aliasController.lastSaveSucceeded && TokenSaverSettingsStore.canonicalHomePath(linkNewHome) == TokenSaverSettingsStore.canonicalHomePath(realNewHome))
+
+        let resolvedHomePath = TokenSaverSettingsStore.canonicalHomePath(home)
+        let systemAliasPair: (String, String)? = resolvedHomePath.hasPrefix("/private/tmp/")
+            ? ("/private/tmp/", "/tmp/")
+            : (resolvedHomePath.hasPrefix("/private/var/") ? ("/private/var/", "/var/") : nil)
+        check(systemAliasPair != nil)
+        if let (privatePrefix, aliasPrefix) = systemAliasPair {
+            let relSuffix = String(resolvedHomePath.dropFirst(privatePrefix.count))
+            let viaPrivateOnly = URL(fileURLWithPath: privatePrefix + relSuffix + "/priv-only-home", isDirectory: true)
+            let privOnlyA = TokenSaverSettingsController(home: viaPrivateOnly, rtk: rtk)
+            let privOnlyB = TokenSaverSettingsController(home: viaPrivateOnly, rtk: rtk)
+            privOnlyA.mutate { $0.rtkEnabled = true }
+            privOnlyB.mutate { $0.ponytailEnabled = true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            await privOnlyA.waitForPendingInspection()
+            await privOnlyB.waitForPendingInspection()
+            check(privOnlyA.settings.rtkEnabled && privOnlyA.settings.ponytailEnabled)
+            check(privOnlyB.settings.rtkEnabled && privOnlyB.settings.ponytailEnabled)
+
+            let viaPrivate = URL(fileURLWithPath: privatePrefix + relSuffix + "/sys-alias-home", isDirectory: true)
+            let viaAlias = URL(fileURLWithPath: aliasPrefix + relSuffix + "/sys-alias-home", isDirectory: true)
+            check(TokenSaverSettingsStore.canonicalHomePath(viaPrivate) == TokenSaverSettingsStore.canonicalHomePath(viaAlias))
+            let privCtrl = TokenSaverSettingsController(home: viaPrivate, rtk: rtk)
+            let aliasCtrl = TokenSaverSettingsController(home: viaAlias, rtk: rtk)
+            privCtrl.mutate { $0.rtkEnabled = true }
+            aliasCtrl.mutate { $0.cavemanEnabled = true }
+            try? await Task.sleep(nanoseconds: 50_000_000)
+            await privCtrl.waitForPendingInspection()
+            await aliasCtrl.waitForPendingInspection()
+            check(privCtrl.settings.rtkEnabled && privCtrl.settings.cavemanEnabled)
+            check(aliasCtrl.settings.rtkEnabled && aliasCtrl.settings.cavemanEnabled)
+            check(TokenSaverSettingsStore.canonicalHomePath(viaPrivate) == TokenSaverSettingsStore.canonicalHomePath(viaAlias))
+            check(controllerC.settings == TokenSaverSettings())
+        }
+        print("PASS symlink and macOS /private alias nonexistent-home sync stay aligned before and after first save")
+        print("Token Saver native controller: 13 checks passed")
     }
 }

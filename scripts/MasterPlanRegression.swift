@@ -1,5 +1,9 @@
+import AppKit
+import Darwin
+import Darwin.membership
 import Foundation
 import SQLite3
+import SwiftUI
 @testable import QuotaBackend
 
 private var assertions = 0
@@ -30,7 +34,10 @@ private actor Attempts {
 
 @main struct MasterPlanRegression {
     static func main() async throws {
-        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent("aiusage-master-regression-" + UUID().uuidString)
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let root = fixtureBase.resolvingSymlinksInPath().appendingPathComponent("aiusage-master-regression-" + UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try await analytics(root.appendingPathComponent("analytics"))
@@ -93,6 +100,18 @@ private actor Attempts {
             "https://[fe80:0:0:0:0:0:0:1%en0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
         )
         try check(ipv6ZoneMatch.port == 8443, "equivalent zone-scoped IPv6 HTTPS URL preserves custom port")
+        let ipv6ZoneCaseCompressed = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%EN0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6ZoneCaseCompressed.port == 443, "different-case IPv6 zone ID on compressed host treats endpoint as changed")
+        let ipv6ZoneCaseExpanded = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80:0:0:0:0:0:0:1%EN0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6ZoneCaseExpanded.port == 443, "different-case IPv6 zone ID on expanded host treats endpoint as changed")
+        let ipv6TrailingEmptyZone = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%]/", savedHost: "https://fe80::1%", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6TrailingEmptyZone.port == 443, "empty trailing IPv6 zone delimiter is never treated as matching")
         let ipv6ZoneMismatch = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
             "https://[fe80::1%en1]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
         )
@@ -208,6 +227,34 @@ private actor Attempts {
             from: URL(string: "https://stats.example.test:443/health"),
             to: URL(string: "https://stats.example.test/health/")
         ), "same-origin HTTPS redirect with implicit 443 is allowed")
+        try check(APIService.shouldFollowRedirect(
+            from: URL(string: "https://[fd7a:0:0:0:0:0:0:1]:8443/api/dashboard"),
+            to: URL(string: "https://[fd7a::1]:8443/api/dashboard")
+        ), "same-origin HTTPS redirect across equivalent IPv6 spellings is allowed")
+        try check(APIService.shouldFollowRedirect(
+            from: URL(string: "http://[0:0:0:0:0:0:0:1]:4318/health"),
+            to: URL(string: "http://[::1]:4318/health")
+        ), "same-origin loopback HTTP redirect across equivalent IPv6 spellings is allowed")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://[fd7a::1]:8443/health"),
+            to: URL(string: "https://[fd7a::2]:8443/health")
+        ), "cross-host IPv6 redirect is blocked")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://[fe80::1%25en0]:8443/health"),
+            to: URL(string: "https://[fe80::1%25en1]:8443/health")
+        ), "cross-zone IPv6 redirect is blocked")
+        try check(!APIService.shouldFollowRedirect(
+            from: URL(string: "https://[fe80::1%25en0]:8443/health"),
+            to: URL(string: "https://[fe80::1%25EN0]:8443/health")
+        ), "case-mismatched IPv6 zone redirect is blocked")
+        let ipv6CanonicalClient = await MainActor.run {
+            APIService(baseURL: "https://[fd7a:0:0:0:0:0:0:1]:8443", accessToken: "aiu-fixture-secret") { _ in
+                let compressedURL = URL(string: "https://[fd7a::1]:8443/api/dashboard")!
+                return (dashboardData, HTTPURLResponse(url: compressedURL, statusCode: 200, httpVersion: nil, headerFields: nil)!)
+            }
+        }
+        let ipv6Dashboard = try await ipv6CanonicalClient.fetchDashboard()
+        try check(ipv6Dashboard.providers.isEmpty, "APIService accepts canonicalized same-address IPv6 final response URL")
 
         // Finding #2 & #3: Child propagation errors, unchanged-master reconciliation, and hidden OpenCode isolation
         await MainActor.run {
@@ -1614,7 +1661,7 @@ private actor Attempts {
         // Verify legacy v1 call archive fixtures still migrate cleanly when written to call-analytics-archive-v1.json.
         let fm = FileManager.default
         let utc = TimeZone(secondsFromGMT: 0)!
-        let claudeLegacyRoot = fm.temporaryDirectory.appendingPathComponent("master-claude-v1-\(UUID())", isDirectory: true)
+        let claudeLegacyRoot = home.appendingPathComponent("master-claude-v1-\(UUID())", isDirectory: true)
         defer { try? fm.removeItem(at: claudeLegacyRoot) }
         let claudeDay = "2026-01-02"
         let claudeOld = CallAnalyticsEntry(source: .claude, kind: .builtin, name: "Read", server: nil, agent: "main", dayKey: claudeDay, count: 3)
@@ -1641,7 +1688,7 @@ private actor Attempts {
             try check(snap.agentInvocations.filter { $0.source == .claude }.reduce(0) { $0 + $1.count } == 3, "legacy v1 Claude residual keeps agent invocations = 3")
         }
 
-        let ocLegacyRoot = fm.temporaryDirectory.appendingPathComponent("master-opencode-v1-\(UUID())", isDirectory: true)
+        let ocLegacyRoot = home.appendingPathComponent("master-opencode-v1-\(UUID())", isDirectory: true)
         defer { try? fm.removeItem(at: ocLegacyRoot) }
         var cal = Calendar(identifier: .gregorian); cal.timeZone = utc
         let ocMillis = Int64(cal.date(from: DateComponents(year: 2026, month: 1, day: 10, hour: 12))!.timeIntervalSince1970 * 1000)
@@ -1672,7 +1719,7 @@ private actor Attempts {
         try check(ocSecond.entries.filter { $0.name == "read" }.reduce(0) { $0 + $1.count } == 1, "post-migration OpenCode retains deleted read=1")
 
         // AntigravityCostProvider in-memory transcript scan cache
-        let cacheRoot = fm.temporaryDirectory.appendingPathComponent("master-agy-scan-cache-\(UUID())", isDirectory: true)
+        let cacheRoot = home.appendingPathComponent("master-agy-scan-cache-\(UUID())", isDirectory: true)
         defer { try? fm.removeItem(at: cacheRoot) }
         let brainA = cacheRoot.appendingPathComponent("brain", isDirectory: true)
         let brainSibling = cacheRoot.appendingPathComponent("brain2", isDirectory: true)
@@ -2105,7 +2152,7 @@ private actor Attempts {
 
         // Codex §6.1, §6.2, §6.5, §6.9 regressions
         do {
-            let leanHome = fm.temporaryDirectory.appendingPathComponent("master-lean-cut-\(UUID())", isDirectory: true)
+            let leanHome = home.appendingPathComponent("master-lean-cut-\(UUID())", isDirectory: true)
             defer { try? fm.removeItem(at: leanHome) }
 
             // §6.1 AntigravityLocalQuotaReader:
@@ -2422,6 +2469,1529 @@ private actor Attempts {
                     && leanMCP == [InstalledItem(source: .codex, name: "codex_mcp")],
                 "[§6.9] CallAnalyticsInventory excludes claude and opencode before touching hidden paths or resolvers"
             )
+        }
+
+        // Finding #1 & R2-P2-1 & R2-P2-2: SidebarSelectionRelay defers genuine list writes out of view updates,
+        // drops redundant same-selection writes, prevents stale queued selections from overwriting newer selections,
+        // rechecks target visibility before commit, and preserves fresh selections after external navigation.
+        do {
+            @MainActor
+            final class DetailActivationBox {
+                var sessionsDetailActivated = false
+            }
+
+            @MainActor
+            final class SidebarRelayState: ObservableObject {
+                @Published var selected: AppSection = .dashboard
+                @Published var hiddenSections: Set<String> = []
+                var commits: [AppSection] = []
+                let relay = SidebarSelectionRelay()
+                var queuedWriteDuringRender: AppSection?
+
+                var binding: Binding<AppSection> {
+                    relay.binding(
+                        current: { self.selected },
+                        isSelectable: { SidebarNavigation.isVisible($0, hidden: self.hiddenSections) },
+                        commit: { section in
+                            self.selected = section
+                            self.commits.append(section)
+                        }
+                    )
+                }
+
+                func hideSection(_ section: AppSection) {
+                    hiddenSections.insert(section.rawValue)
+                    if selected == section {
+                        relay.cancelPending()
+                        selected = .dashboard
+                    }
+                }
+            }
+
+            struct SidebarRelayHostView: View {
+                @ObservedObject var state: SidebarRelayState
+                let tracker: DetailActivationBox
+                var body: some View {
+                    if let target = state.queuedWriteDuringRender {
+                        state.queuedWriteDuringRender = nil
+                        state.binding.wrappedValue = target
+                    }
+                    return Group {
+                        switch state.selected {
+                        case .sessions:
+                            let _ = { tracker.sessionsDetailActivated = true }()
+                            Text("sessions")
+                        default:
+                            Text(state.selected.rawValue)
+                        }
+                    }
+                    .frame(width: 120, height: 40)
+                }
+            }
+
+            @MainActor
+            func drainMainQueue() async {
+                await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                    DispatchQueue.main.async { continuation.resume() }
+                }
+            }
+
+            let tracker = await MainActor.run { DetailActivationBox() }
+            let state = await MainActor.run {
+                _ = NSApplication.shared
+                return SidebarRelayState()
+            }
+
+            // 1. Repeated same-selection write performs 0 commits
+            await MainActor.run { state.binding.wrappedValue = .dashboard }
+            await drainMainQueue()
+            let afterSameWrite = await MainActor.run { (state.selected, state.commits) }
+            try check(afterSameWrite.0 == .dashboard && afterSameWrite.1.isEmpty,
+                      "[Finding #1] redundant same-selection write must not publish")
+
+            // 2. Render-pass selection write via disposable NSHostingView commits asynchronously after body returns
+            let (window, host, immediateSelected, immediateCommits) = await MainActor.run { () -> (NSWindow, NSHostingView<SidebarRelayHostView>, AppSection, Int) in
+                state.queuedWriteDuringRender = .sessions
+                let host = NSHostingView(rootView: SidebarRelayHostView(state: state, tracker: tracker))
+                let win = NSWindow(
+                    contentRect: NSRect(x: -10000, y: -10000, width: 160, height: 60),
+                    styleMask: [.borderless],
+                    backing: .buffered,
+                    defer: false
+                )
+                win.contentView = host
+                host.layoutSubtreeIfNeeded()
+                win.displayIfNeeded()
+                win.orderFront(nil)
+                return (win, host, state.selected, state.commits.count)
+            }
+            try check(immediateSelected == .dashboard && immediateCommits == 0,
+                      "[Finding #1] selection write during NSHostingView update must defer out of the current render pass")
+            await drainMainQueue()
+            let settledAfterRender = await MainActor.run { (state.selected, state.commits) }
+            try check(settledAfterRender.0 == .sessions && settledAfterRender.1 == [.sessions],
+                      "[Finding #1] deferred selection settles cleanly on next main-queue turn")
+
+            // 3. Rapid distinct selections collapse to only the final selection
+            await MainActor.run {
+                state.commits.removeAll()
+                state.binding.wrappedValue = .costTracking
+                state.binding.wrappedValue = .inbox
+                state.binding.wrappedValue = .settings
+            }
+            await drainMainQueue()
+            let afterRapidDistinct = await MainActor.run { (state.selected, state.commits) }
+            try check(afterRapidDistinct.0 == .settings && afterRapidDistinct.1 == [.settings],
+                      "[Finding #1] rapid distinct selections must commit only the latest selection")
+
+            // 4. Rapid round-trip back to current active selection cancels pending delivery
+            await MainActor.run {
+                state.commits.removeAll()
+                state.binding.wrappedValue = .inbox
+                state.binding.wrappedValue = .settings
+            }
+            await drainMainQueue()
+            let afterRoundTrip = await MainActor.run { (state.selected, state.commits) }
+            try check(afterRoundTrip.0 == .settings && afterRoundTrip.1.isEmpty,
+                      "[Finding #1] round-trip selection returning to active cancels pending commit")
+
+            // 5. Synchronous programmatic navigation & external state changes supersede queued list writes
+            await MainActor.run {
+                state.commits.removeAll()
+                state.binding.wrappedValue = .inbox
+                state.relay.cancelPending()
+                state.selected = .providerAccounts
+            }
+            await drainMainQueue()
+            let afterProgrammaticCancel = await MainActor.run { (state.selected, state.commits) }
+            try check(afterProgrammaticCancel.0 == .providerAccounts && afterProgrammaticCancel.1.isEmpty,
+                      "[Finding #1] cancelPending + programmatic navigation drops queued sidebar write")
+
+            // 6. R2-P2-1: Queuing a section then hiding it before drain keeps Dashboard selected & never activates detail
+            await MainActor.run {
+                state.selected = .dashboard
+                state.commits.removeAll()
+                state.hiddenSections.removeAll()
+                tracker.sessionsDetailActivated = false
+                host.layoutSubtreeIfNeeded()
+                state.binding.wrappedValue = .sessions
+                state.hideSection(.sessions)
+                host.layoutSubtreeIfNeeded()
+            }
+            await drainMainQueue()
+            let afterHiddenDrain = await MainActor.run { () -> (AppSection, [AppSection], Bool) in
+                host.layoutSubtreeIfNeeded()
+                winDisplay: do { window.displayIfNeeded() }
+                return (state.selected, state.commits, tracker.sessionsDetailActivated)
+            }
+            try check(afterHiddenDrain.0 == .dashboard && afterHiddenDrain.1.isEmpty && !afterHiddenDrain.2,
+                      "[R2-P2-1] queued selection must not open a newly hidden section or construct SessionCenterView")
+
+            // 6b. R2-P2-1 control: when visible again, queuing .sessions commits and activates detail
+            await MainActor.run {
+                state.hiddenSections.removeAll()
+                tracker.sessionsDetailActivated = false
+                state.binding.wrappedValue = .sessions
+            }
+            await drainMainQueue()
+            let afterVisibleDrain = await MainActor.run { () -> (AppSection, [AppSection], Bool) in
+                host.layoutSubtreeIfNeeded()
+                window.displayIfNeeded()
+                return (state.selected, state.commits, tracker.sessionsDetailActivated)
+            }
+            try check(afterVisibleDrain.0 == .sessions && afterVisibleDrain.1 == [.sessions] && afterVisibleDrain.2,
+                      "[R2-P2-1] ordinary visible selection still commits and opens detail")
+
+            // 7. R2-P2-2: Queue Inbox -> externally select Settings -> select Inbox again -> drain commits Inbox once
+            await MainActor.run {
+                state.selected = .dashboard
+                state.commits.removeAll()
+                state.binding.wrappedValue = .inbox
+                state.selected = .settings
+                state.binding.wrappedValue = .inbox
+            }
+            await drainMainQueue()
+            let afterExternalReselect = await MainActor.run { (state.selected, state.commits) }
+            try check(afterExternalReselect.0 == .inbox && afterExternalReselect.1 == [.inbox],
+                      "[R2-P2-2] fresh selection after external navigation commits once instead of dropping")
+
+            // 7b. R2-P2-2 control: without the second Inbox selection, external Settings remains selected
+            await MainActor.run {
+                state.selected = .dashboard
+                state.commits.removeAll()
+                state.binding.wrappedValue = .inbox
+                state.selected = .settings
+                window.orderOut(nil)
+            }
+            await drainMainQueue()
+            let afterExternalNoReselect = await MainActor.run { (state.selected, state.commits) }
+            try check(afterExternalNoReselect.0 == .settings && afterExternalNoReselect.1.isEmpty,
+                      "[R2-P2-2] stale queued selection still drops when user does not re-select")
+        }
+
+        // R2-P2-3: OpenCode snapshots isolate db/-wal/-shm inside fresh 0700 subdirectories with 0600 files even under an owned 0755 temp root
+        do {
+            final class SnapshotObservationBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var recorded: [(dir: URL, mode: Int, fileModes: [String: Int], parentDirectEntries: [String])] = []
+                func record(_ dir: URL, mode: Int, fileModes: [String: Int], parentDirectEntries: [String]) {
+                    lock.withLock { recorded.append((dir, mode, fileModes, parentDirectEntries)) }
+                }
+                func items() -> [(dir: URL, mode: Int, fileModes: [String: Int], parentDirectEntries: [String])] {
+                    lock.withLock { recorded }
+                }
+                func clear() { lock.withLock { recorded.removeAll() } }
+            }
+
+            @Sendable func fileMode(_ path: String) -> Int? {
+                var st = stat()
+                guard lstat(path, &st) == 0 else { return nil }
+                return Int(st.st_mode & 0o7777)
+            }
+
+            let isolationRoot = home.appendingPathComponent("opencode-snapshot-isolation", isDirectory: true)
+            let parent0755 = isolationRoot.appendingPathComponent("owned-0755-temp", isDirectory: true)
+            let dataHome = isolationRoot.appendingPathComponent("synthetic-xdg", isDirectory: true)
+            let ocDir = dataHome.appendingPathComponent("opencode", isDirectory: true)
+            try fm.createDirectory(at: parent0755, withIntermediateDirectories: true)
+            try fm.createDirectory(at: ocDir, withIntermediateDirectories: true)
+            try check(chmod(parent0755.path, 0o755) == 0 && fileMode(parent0755.path) == 0o755,
+                      "[R2-P2-3] test parent directory must be owned 0755")
+
+            let dbURL = ocDir.appendingPathComponent("opencode.db")
+            let walURL = ocDir.appendingPathComponent("opencode.db-wal")
+            let shmURL = ocDir.appendingPathComponent("opencode.db-shm")
+            var snapDB: OpaquePointer?
+            try check(sqlite3_open_v2(dbURL.path, &snapDB, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
+                      "[R2-P2-3] create synthetic OpenCode DB")
+            let nowMs = Int64(Date().timeIntervalSince1970 * 1000)
+            let msgJSON = #"{"role":"assistant","providerID":"anthropic","modelID":"claude-sonnet-4","tokens":{"input":30,"output":20,"cache":{"read":0,"write":0}},"cost":0.02}"#
+            let partJSON = #"{"type":"tool","tool":"bash","state":{"status":"completed"}}"#
+            let setupSQL = """
+            PRAGMA journal_mode=WAL;
+            PRAGMA wal_autocheckpoint=0;
+            CREATE TABLE part (id TEXT, time_created INTEGER, data TEXT);
+            CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+            INSERT INTO part VALUES ('p1', \(nowMs), '\(partJSON)');
+            INSERT INTO message VALUES ('m1', 's1', \(nowMs), '\(msgJSON)');
+            """
+            try check(sqlite3_exec(snapDB, setupSQL, nil, nil, nil) == SQLITE_OK, "[R2-P2-3] seed WAL part and message rows")
+            chmod(dbURL.path, 0o644)
+            chmod(walURL.path, 0o644)
+            chmod(shmURL.path, 0o644)
+
+            let snapEnv = [
+                "XDG_DATA_HOME": dataHome.path,
+                "TMPDIR": parent0755.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": parent0755.path,
+            ]
+            let box = SnapshotObservationBox()
+            let observer: @Sendable (URL) -> Void = { dir in
+                let dirMode = fileMode(dir.path) ?? -1
+                let parentDirect = ((try? FileManager.default.contentsOfDirectory(atPath: parent0755.path)) ?? []).sorted()
+                var modes: [String: Int] = [:]
+                for name in ["opencode.db", "opencode.db-wal", "opencode.db-shm"] {
+                    if let m = fileMode(dir.appendingPathComponent(name).path) {
+                        modes[name] = m
+                    }
+                }
+                box.record(dir, mode: dirMode, fileModes: modes, parentDirectEntries: parentDirect)
+            }
+
+            // Success path: CallAnalytics OpenCodeCallEventSource
+            let callSnap = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                OpenCodeCallEventSource(homeDirectory: isolationRoot.path, timeZone: utc, environment: snapEnv).collect(cutoff: nil)
+            }
+            let callObserved = box.items()
+            try check(callSnap.status.errorCode == nil
+                        && callSnap.entries.first(where: { $0.name == "bash" }) != nil
+                        && callObserved.count == 1
+                        && callObserved[0].mode == 0o700
+                        && callObserved[0].parentDirectEntries == [callObserved[0].dir.lastPathComponent]
+                        && callObserved[0].fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                        && ((try? fm.contentsOfDirectory(atPath: parent0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R2-P2-3] OpenCodeCallEventSource isolates DB/WAL/SHM in 0700 subdir with 0600 files and cleans up on success")
+
+            // Success path: OpenCodeCostProvider
+            box.clear()
+            let costUsage = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                try await OpenCodeCostProvider(homeDirectory: isolationRoot.appendingPathComponent("cost-success").path, timeZone: utc, environment: snapEnv).fetchUsage()
+            }
+            let costObserved = box.items()
+            try check((costUsage.extra["overall.totalTokens"]?.value as? Int) == 50
+                        && costObserved.count == 1
+                        && costObserved[0].mode == 0o700
+                        && costObserved[0].parentDirectEntries == [costObserved[0].dir.lastPathComponent]
+                        && costObserved[0].fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                        && ((try? fm.contentsOfDirectory(atPath: parent0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R2-P2-3] OpenCodeCostProvider isolates DB/WAL/SHM in 0700 subdir with 0600 files and cleans up on success")
+
+            if let snapDB { sqlite3_close(snapDB) }
+
+            // Failure path (a): sidecar copy error (-wal replaced with directory) cleans up partial 0700 dir on both consumers
+            try? fm.removeItem(at: walURL)
+            try? fm.removeItem(at: shmURL)
+            try fm.createDirectory(at: walURL, withIntermediateDirectories: true)
+            box.clear()
+            let copyFailCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                OpenCodeCallEventSource(homeDirectory: isolationRoot.path, timeZone: utc, environment: snapEnv).collect(cutoff: nil)
+            }
+            var copyFailCostThrew = false
+            do {
+                _ = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                    try await OpenCodeCostProvider(homeDirectory: isolationRoot.appendingPathComponent("cost-copy-fail").path, timeZone: utc, environment: snapEnv).fetchUsage()
+                }
+            } catch {
+                copyFailCostThrew = true
+            }
+            try check(copyFailCall.status.errorCode == "db_snapshot_failed"
+                        && copyFailCostThrew
+                        && box.items().isEmpty
+                        && ((try? fm.contentsOfDirectory(atPath: parent0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R2-P2-3] sidecar copy failure cleans up partial 0700 snapshot directory on both consumers")
+
+            // Failure path (b): corrupt SQLite bytes pass isolated 0700/0600 prep and clean up after failed read on both consumers
+            try? fm.removeItem(at: walURL)
+            try? fm.removeItem(at: dbURL)
+            try Data("not-a-sqlite-db".utf8).write(to: dbURL)
+            try Data("corrupt-wal".utf8).write(to: walURL)
+            try Data("corrupt-shm".utf8).write(to: shmURL)
+            chmod(dbURL.path, 0o644)
+            chmod(walURL.path, 0o644)
+            chmod(shmURL.path, 0o644)
+            box.clear()
+            let readFailCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                OpenCodeCallEventSource(homeDirectory: isolationRoot.path, timeZone: utc, environment: snapEnv).collect(cutoff: nil)
+            }
+            var readFailCostThrew = false
+            do {
+                _ = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(observer) {
+                    try await OpenCodeCostProvider(homeDirectory: isolationRoot.appendingPathComponent("cost-read-fail").path, timeZone: utc, environment: snapEnv).fetchUsage()
+                }
+            } catch {
+                readFailCostThrew = true
+            }
+            let readFailObserved = box.items()
+            try check(readFailCall.status.errorCode != nil
+                        && readFailCostThrew
+                        && readFailObserved.count == 2
+                        && readFailObserved.allSatisfy {
+                            $0.mode == 0o700
+                                && $0.parentDirectEntries == [$0.dir.lastPathComponent]
+                                && $0.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                        }
+                        && ((try? fm.contentsOfDirectory(atPath: parent0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R2-P2-3] SQLite read failure preserves 0700/0600 pre-read isolation and removes snapshot dirs on both consumers")
+
+            func hasSafeExtendedACLForTest(at path: String, isLeaf: Bool, euid: uid_t) -> Bool {
+                let benignMask: acl_permset_mask_t = [
+                    ACL_READ_DATA, ACL_EXECUTE, ACL_READ_ATTRIBUTES,
+                    ACL_READ_EXTATTRIBUTES, ACL_READ_SECURITY, ACL_SYNCHRONIZE,
+                ].reduce(0) { $0 | acl_permset_mask_t($1.rawValue) }
+                errno = 0
+                guard let acl = acl_get_link_np(path, ACL_TYPE_EXTENDED) else {
+                    let err = errno
+                    return err == ENOENT || err == ENOTSUP || err == EOPNOTSUPP
+                }
+                defer { acl_free(UnsafeMutableRawPointer(acl)) }
+                var entry: acl_entry_t?
+                var entryID = ACL_FIRST_ENTRY.rawValue
+                while true {
+                    errno = 0
+                    let status = acl_get_entry(acl, entryID, &entry)
+                    guard status == 0, let currentEntry = entry else {
+                        let err = errno
+                        return entryID == ACL_NEXT_ENTRY.rawValue ? (err == EINVAL || err == ENOENT) : err == ENOENT
+                    }
+                    entryID = ACL_NEXT_ENTRY.rawValue
+                    var tag = ACL_UNDEFINED_TAG
+                    guard acl_get_tag_type(currentEntry, &tag) == 0 else { return false }
+                    guard tag == ACL_EXTENDED_DENY || tag == ACL_EXTENDED_ALLOW else { return false }
+                    var permMask: acl_permset_mask_t = 0
+                    guard acl_get_permset_mask_np(currentEntry, &permMask) == 0 else { return false }
+                    var fileInherit: Int32 = 0
+                    var dirInherit: Int32 = 0
+                    var onlyInherit: Int32 = 0
+                    if isLeaf && permMask != 0 {
+                        var flagset: acl_flagset_t?
+                        guard acl_get_flagset_np(UnsafeMutableRawPointer(currentEntry), &flagset) == 0,
+                              let flagset else { return false }
+                        fileInherit = acl_get_flag_np(flagset, ACL_ENTRY_FILE_INHERIT)
+                        dirInherit = acl_get_flag_np(flagset, ACL_ENTRY_DIRECTORY_INHERIT)
+                        onlyInherit = acl_get_flag_np(flagset, ACL_ENTRY_ONLY_INHERIT)
+                        guard fileInherit >= 0, dirInherit >= 0, onlyInherit >= 0 else { return false }
+                    }
+                    if tag == ACL_EXTENDED_DENY {
+                        if !isLeaf || permMask == 0 { continue }
+                        if fileInherit != 0 || dirInherit != 0 { return false }
+                        if onlyInherit == 0 && (permMask & acl_permset_mask_t(ACL_DELETE_CHILD.rawValue)) != 0 { return false }
+                        continue
+                    }
+                    let hasLeafInherit = fileInherit != 0 || dirInherit != 0
+                    if (permMask & ~benignMask) == 0 && !hasLeafInherit { continue }
+                    guard let qualifier = acl_get_qualifier(currentEntry) else { return false }
+                    defer { acl_free(qualifier) }
+                    var uu: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+                    _ = withUnsafeMutableBytes(of: &uu) { dst in
+                        memcpy(dst.baseAddress!, qualifier, dst.count)
+                    }
+                    var resolvedID: id_t = 0
+                    var idType: Int32 = -1
+                    guard mbr_uuid_to_id(&uu, &resolvedID, &idType) == 0,
+                          idType == ID_TYPE_UID,
+                          uid_t(resolvedID) == euid || uid_t(resolvedID) == 0 else {
+                        return false
+                    }
+                }
+            }
+
+            func isVerifiedSafeTempDir(_ url: URL) -> Bool {
+                guard !url.path.components(separatedBy: "/").contains(".."),
+                      let resolvedPtr = realpath(url.path, nil) else { return false }
+                defer { free(resolvedPtr) }
+                let canonical = String(cString: resolvedPtr)
+                let euid = geteuid()
+                var st = stat()
+                guard lstat(canonical, &st) == 0,
+                      (st.st_mode & S_IFMT) == S_IFDIR,
+                      st.st_uid == euid,
+                      (st.st_mode & S_IRWXU) == S_IRWXU,
+                      (st.st_mode & (S_IWGRP | S_IWOTH)) == 0,
+                      Darwin.access(canonical, R_OK | W_OK | X_OK) == 0,
+                      hasSafeExtendedACLForTest(at: canonical, isLeaf: true, euid: euid) else {
+                    return false
+                }
+                var currentPath = canonical
+                var currentStat = st
+                while currentPath != "/" {
+                    let parentPath = (currentPath as NSString).deletingLastPathComponent
+                    if parentPath.isEmpty || parentPath == currentPath { return false }
+                    var parentStat = stat()
+                    guard lstat(parentPath, &parentStat) == 0,
+                          (parentStat.st_mode & S_IFMT) == S_IFDIR,
+                          parentStat.st_uid == euid || parentStat.st_uid == 0,
+                          hasSafeExtendedACLForTest(at: parentPath, isLeaf: false, euid: euid) else {
+                        return false
+                    }
+                    if (parentStat.st_mode & (S_IWGRP | S_IWOTH)) != 0 {
+                        guard (parentStat.st_mode & S_ISVTX) != 0,
+                              currentStat.st_uid == euid || (parentStat.st_uid == 0 && currentStat.st_uid == 0) else {
+                            return false
+                        }
+                    }
+                    currentPath = parentPath
+                    currentStat = parentStat
+                }
+                return true
+            }
+
+            @Sendable func canonicalPath(_ url: URL) -> String {
+                TokenSaverSettingsStore.canonicalHomePath(url)
+            }
+
+            @discardableResult
+            func seedSyntheticOpenCodeDB(at directory: URL, walMode: Bool) throws -> OpaquePointer? {
+                try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+                let targetDB = directory.appendingPathComponent("opencode.db")
+                try? fm.removeItem(at: targetDB)
+                try? fm.removeItem(at: directory.appendingPathComponent("opencode.db-wal"))
+                try? fm.removeItem(at: directory.appendingPathComponent("opencode.db-shm"))
+                var db: OpaquePointer?
+                try check(sqlite3_open_v2(targetDB.path, &db, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
+                          "[R3] open synthetic OpenCode DB")
+                var transferOwnership = false
+                defer { if !transferOwnership, let db { sqlite3_close(db) } }
+                let journalSQL = walMode
+                    ? "PRAGMA journal_mode=WAL;\nPRAGMA wal_autocheckpoint=0;\n"
+                    : "PRAGMA journal_mode=DELETE;\n"
+                let sql = journalSQL + """
+                CREATE TABLE part (id TEXT, time_created INTEGER, data TEXT);
+                CREATE TABLE message (id TEXT, session_id TEXT, time_created INTEGER, data TEXT);
+                INSERT INTO part VALUES ('p1', \(nowMs), '\(partJSON)');
+                INSERT INTO message VALUES ('m1', 's1', \(nowMs), '\(msgJSON)');
+                """
+                try check(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, "[R3] seed synthetic part and message rows")
+                chmod(targetDB.path, 0o644)
+                if walMode {
+                    chmod(directory.appendingPathComponent("opencode.db-wal").path, 0o644)
+                    chmod(directory.appendingPathComponent("opencode.db-shm").path, 0o644)
+                    transferOwnership = true
+                    return db
+                }
+                return nil
+            }
+
+            // R3-P2-1: Reject group/other-writable override roots (0770/0777) while keeping owned 0700/0755
+            let r3Root = isolationRoot.appendingPathComponent("r3-checks", isDirectory: true)
+            let r3Dir0700 = r3Root.appendingPathComponent("owned-0700", isDirectory: true)
+            let r3Dir0755 = r3Root.appendingPathComponent("owned-0755", isDirectory: true)
+            let r3Dir0770 = r3Root.appendingPathComponent("unsafe-0770", isDirectory: true)
+            let r3Dir0777 = r3Root.appendingPathComponent("unsafe-0777", isDirectory: true)
+            let r3Dir0500 = r3Root.appendingPathComponent("readonly-0500", isDirectory: true)
+            let r3SafeHome = r3Root.appendingPathComponent("safe-home", isDirectory: true)
+            for (dir, mode) in [
+                (r3Dir0700, mode_t(0o700)),
+                (r3Dir0755, mode_t(0o755)),
+                (r3Dir0770, mode_t(0o770)),
+                (r3Dir0777, mode_t(0o777)),
+                (r3Dir0500, mode_t(0o500)),
+                (r3SafeHome, mode_t(0o700)),
+            ] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+                try check(chmod(dir.path, mode) == 0 && fileMode(dir.path) == Int(mode),
+                          "[R3-P2-1] set mode \(String(mode, radix: 8)) on \(dir.lastPathComponent)")
+            }
+            defer { _ = chmod(r3Dir0500.path, 0o700) }
+
+            let chosen0700 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": r3Dir0700.path],
+                processEnvironment: ["HOME": r3SafeHome.path]
+            )
+            let chosen0755 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0755.path, "TMPDIR": r3Dir0777.path],
+                processEnvironment: ["TMPDIR": r3Dir0770.path, "HOME": r3SafeHome.path]
+            )
+            let fallbackFrom0770And0777 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0770.path, "TMPDIR": r3Dir0777.path],
+                processEnvironment: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0777.path, "TMPDIR": r3Dir0770.path, "HOME": r3SafeHome.path]
+            )
+            let fallbackFromReadOnly = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0500.path, "TMPDIR": r3Dir0777.path],
+                processEnvironment: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0755.path, "HOME": r3SafeHome.path]
+            )
+            let fallbackUncheckedSentinel = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0770.path, "TMPDIR": r3Dir0777.path],
+                processEnvironment: ["HOME": r3Dir0777.path]
+            )
+            try check(canonicalPath(chosen0700) == canonicalPath(r3Dir0700)
+                        && canonicalPath(chosen0755) == canonicalPath(r3Dir0755)
+                        && canonicalPath(fallbackFromReadOnly) == canonicalPath(r3Dir0755),
+                      "[R3-P2-1] owned 0700 and 0755 roots remain accepted")
+            let sentinelIsSafeOrClosed = isVerifiedSafeTempDir(fallbackUncheckedSentinel)
+                || fallbackUncheckedSentinel.path == "/var/empty/aiusage-unverified-temporary-root"
+            try check(canonicalPath(fallbackFrom0770And0777) != canonicalPath(r3Dir0770)
+                        && canonicalPath(fallbackFrom0770And0777) != canonicalPath(r3Dir0777)
+                        && isVerifiedSafeTempDir(fallbackFrom0770And0777)
+                        && canonicalPath(fallbackUncheckedSentinel) != canonicalPath(r3Dir0770)
+                        && canonicalPath(fallbackUncheckedSentinel) != canonicalPath(r3Dir0777)
+                        && sentinelIsSafeOrClosed,
+                      "[R3-P2-1] skips non-sticky 0770/0777 roots across all keys and returns verified safe fallback")
+
+            let r3ValidXDG = r3Root.appendingPathComponent("valid-xdg", isDirectory: true)
+            let r3WalDB = try seedSyntheticOpenCodeDB(at: r3ValidXDG.appendingPathComponent("opencode", isDirectory: true), walMode: true)
+            defer { if let r3WalDB { sqlite3_close(r3WalDB) } }
+            let r3SnapshotBox = SnapshotObservationBox()
+            let r3Observer: @Sendable (URL) -> Void = { dir in
+                let dirMode = fileMode(dir.path) ?? -1
+                let actualParent = dir.deletingLastPathComponent()
+                let parentDirect = ((try? FileManager.default.contentsOfDirectory(atPath: actualParent.path)) ?? []).sorted()
+                var modes: [String: Int] = [:]
+                for name in ["opencode.db", "opencode.db-wal", "opencode.db-shm"] {
+                    if let m = fileMode(dir.appendingPathComponent(name).path) {
+                        modes[name] = m
+                    }
+                }
+                r3SnapshotBox.record(dir, mode: dirMode, fileModes: modes, parentDirectEntries: parentDirect)
+            }
+
+            for (label, unsafeRoot) in [("0770", r3Dir0770), ("0777", r3Dir0777)] {
+                r3SnapshotBox.clear()
+                let env = [
+                    "XDG_DATA_HOME": r3ValidXDG.path,
+                    "TMPDIR": unsafeRoot.path,
+                    "AIUSAGE_TEST_FIXTURE_ROOT": unsafeRoot.path,
+                    "HOME": r3SafeHome.path,
+                ]
+                let callRes = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r3SafeHome.path, timeZone: utc, environment: env).collect(cutoff: nil)
+                }
+                let costRes = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                    try await OpenCodeCostProvider(
+                        homeDirectory: r3SafeHome.appendingPathComponent("cost-r3-\(label)").path,
+                        timeZone: utc,
+                        environment: env
+                    ).fetchUsage()
+                }
+                let obs = r3SnapshotBox.items()
+                try check(callRes.status.errorCode == nil
+                            && callRes.entries.first(where: { $0.name == "bash" }) != nil
+                            && (costRes.extra["overall.totalTokens"]?.value as? Int) == 50
+                            && obs.count == 2
+                            && obs.allSatisfy { item in
+                                let snapParent = item.dir.deletingLastPathComponent()
+                                let snapParentMode = fileMode(snapParent.path) ?? 0o777
+                                return item.mode == 0o700
+                                    && (snapParentMode & 0o022) == 0
+                                    && canonicalPath(snapParent) != canonicalPath(unsafeRoot)
+                                    && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                            }
+                            && ((try? fm.contentsOfDirectory(atPath: r3Dir0770.path)) ?? ["nonempty"]).isEmpty
+                            && ((try? fm.contentsOfDirectory(atPath: r3Dir0777.path)) ?? ["nonempty"]).isEmpty,
+                          "[R3-P2-1] snapshot consumers avoid \(label) root, use safe 0700/0600 fallback, and leave unsafe roots empty")
+            }
+
+            // R3-P2-2: Non-blocking FIFO rejection with deterministic EFTYPE, empty temp roots, and optional-sidecar retention
+            final class FIFOWatchdogState: @unchecked Sendable {
+                private let lock = NSLock()
+                private var fired = false
+                func markFired() { lock.withLock { fired = true } }
+                func didFire() -> Bool { lock.withLock { fired } }
+            }
+            let expectedNonRegularMessage = SensitiveDataRedactor.redactedMessage(
+                for: NSError(domain: NSPOSIXErrorDomain, code: Int(EFTYPE))
+            )
+            let r3FIFOXDG = r3Root.appendingPathComponent("fifo-xdg", isDirectory: true)
+            let r3FIFOOC = r3FIFOXDG.appendingPathComponent("opencode", isDirectory: true)
+            let fifoEnv = [
+                "XDG_DATA_HOME": r3FIFOXDG.path,
+                "TMPDIR": r3Dir0755.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0755.path,
+                "HOME": r3SafeHome.path,
+            ]
+
+            for fifoTarget in ["opencode.db-wal", "opencode.db-shm", "opencode.db"] {
+                _ = try seedSyntheticOpenCodeDB(at: r3FIFOOC, walMode: false)
+                if fifoTarget == "opencode.db-shm" {
+                    try Data("dummy-wal".utf8).write(to: r3FIFOOC.appendingPathComponent("opencode.db-wal"))
+                    chmod(r3FIFOOC.appendingPathComponent("opencode.db-wal").path, 0o644)
+                }
+                let fifoURL = r3FIFOOC.appendingPathComponent(fifoTarget)
+                try? fm.removeItem(at: fifoURL)
+                try check(mkfifo(fifoURL.path, 0o600) == 0, "[R3-P2-2] create writerless FIFO \(fifoTarget)")
+
+                let callState = FIFOWatchdogState()
+                let callWatchdog = DispatchWorkItem {
+                    callState.markFired()
+                    let fd = Darwin.open(fifoURL.path, O_WRONLY | O_NONBLOCK)
+                    if fd >= 0 { _ = Darwin.close(fd) }
+                }
+                r3SnapshotBox.clear()
+                errno = ENOENT
+                let callStart = Date()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5, execute: callWatchdog)
+                let fifoCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r3SafeHome.path, timeZone: utc, environment: fifoEnv).collect(cutoff: nil)
+                }
+                let callElapsed = Date().timeIntervalSince(callStart)
+                callWatchdog.cancel()
+
+                let costState = FIFOWatchdogState()
+                let costWatchdog = DispatchWorkItem {
+                    costState.markFired()
+                    let fd = Darwin.open(fifoURL.path, O_WRONLY | O_NONBLOCK)
+                    if fd >= 0 { _ = Darwin.close(fd) }
+                }
+                var costError: ProviderError?
+                errno = ENOENT
+                let costStart = Date()
+                DispatchQueue.global().asyncAfter(deadline: .now() + 0.5, execute: costWatchdog)
+                do {
+                    _ = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                        try await OpenCodeCostProvider(
+                            homeDirectory: r3SafeHome.appendingPathComponent("cost-fifo-\(fifoTarget)").path,
+                            timeZone: utc,
+                            environment: fifoEnv
+                        ).fetchUsage()
+                    }
+                } catch let err as ProviderError {
+                    costError = err
+                }
+                let costElapsed = Date().timeIntervalSince(costStart)
+                costWatchdog.cancel()
+
+                try check(!callState.didFire() && !costState.didFire()
+                            && callElapsed < 0.4 && costElapsed < 0.4
+                            && fifoCall.status.errorCode == "db_snapshot_failed"
+                            && costError?.code == "db_snapshot_failed"
+                            && costError?.redactedMessage == expectedNonRegularMessage
+                            && r3SnapshotBox.items().isEmpty
+                            && ((try? fm.contentsOfDirectory(atPath: r3Dir0755.path)) ?? ["nonempty"]).isEmpty,
+                          "[R3-P2-2] writerless FIFO \(fifoTarget) rejects promptly with deterministic EFTYPE and cleans up temp root")
+            }
+
+            // Retain optional missing -wal / -shm behavior
+            let r3NoSidecarXDG = r3Root.appendingPathComponent("no-sidecar-xdg", isDirectory: true)
+            let r3NoSidecarOC = r3NoSidecarXDG.appendingPathComponent("opencode", isDirectory: true)
+            _ = try seedSyntheticOpenCodeDB(at: r3NoSidecarOC, walMode: false)
+            try check(!fm.fileExists(atPath: r3NoSidecarOC.appendingPathComponent("opencode.db-wal").path)
+                        && !fm.fileExists(atPath: r3NoSidecarOC.appendingPathComponent("opencode.db-shm").path),
+                      "[R3-P2-2] no-sidecar fixture has no -wal or -shm")
+            let noSidecarEnv = [
+                "XDG_DATA_HOME": r3NoSidecarXDG.path,
+                "TMPDIR": r3Dir0755.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": r3Dir0755.path,
+                "HOME": r3SafeHome.path,
+            ]
+            r3SnapshotBox.clear()
+            let noSidecarCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                OpenCodeCallEventSource(homeDirectory: r3SafeHome.path, timeZone: utc, environment: noSidecarEnv).collect(cutoff: nil)
+            }
+            let noSidecarCost = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                try await OpenCodeCostProvider(
+                    homeDirectory: r3SafeHome.appendingPathComponent("cost-no-sidecar").path,
+                    timeZone: utc,
+                    environment: noSidecarEnv
+                ).fetchUsage()
+            }
+            let noSidecarObs = r3SnapshotBox.items()
+            try check(noSidecarCall.status.errorCode == nil
+                        && noSidecarCall.entries.first(where: { $0.name == "bash" }) != nil
+                        && (noSidecarCost.extra["overall.totalTokens"]?.value as? Int) == 50
+                        && noSidecarObs.count == 2
+                        && noSidecarObs.allSatisfy { $0.mode == 0o700 && $0.fileModes == ["opencode.db": 0o600] }
+                        && ((try? fm.contentsOfDirectory(atPath: r3Dir0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R3-P2-2] missing optional -wal/-shm sidecars still succeed with isolated 0700/0600 db snapshot")
+
+            // R4-P2-1: Reject non-sticky writable ancestors while preserving owned 0755 and sticky system/synthetic temp controls
+            let r4Root = isolationRoot.appendingPathComponent("r4-nested-checks", isDirectory: true)
+            let r4SafeHome = r4Root.appendingPathComponent("safe-home", isDirectory: true)
+            let r4Owned0755Parent = r4Root.appendingPathComponent("parent-0755", isDirectory: true)
+            let r4Child0700Under0755 = r4Owned0755Parent.appendingPathComponent("child-0700", isDirectory: true)
+            let r4Child0755Under0755 = r4Owned0755Parent.appendingPathComponent("child-0755", isDirectory: true)
+            let r4Unsafe0770Parent = r4Root.appendingPathComponent("parent-0770", isDirectory: true)
+            let r4Child0700Under0770 = r4Unsafe0770Parent.appendingPathComponent("child-0700", isDirectory: true)
+            let r4Unsafe0777Parent = r4Root.appendingPathComponent("parent-0777", isDirectory: true)
+            let r4Child0700Under0777 = r4Unsafe0777Parent.appendingPathComponent("child-0700", isDirectory: true)
+            let r4Deep0770Grandparent = r4Root.appendingPathComponent("grandparent-0770", isDirectory: true)
+            let r4Mid0755 = r4Deep0770Grandparent.appendingPathComponent("mid-0755", isDirectory: true)
+            let r4DeepChild0700 = r4Mid0755.appendingPathComponent("child-0700", isDirectory: true)
+            let r4UnsafeHomeParent = r4Root.appendingPathComponent("home-parent-0770", isDirectory: true)
+            let r4Home0700Under0770 = r4UnsafeHomeParent.appendingPathComponent("home-0700", isDirectory: true)
+            let r4Sticky1777Parent = r4Root.appendingPathComponent("sticky-1777", isDirectory: true)
+            let r4Child0700UnderSticky1777 = r4Sticky1777Parent.appendingPathComponent("child-0700", isDirectory: true)
+            let r4Sticky1770Parent = r4Root.appendingPathComponent("sticky-1770", isDirectory: true)
+            let r4Child0700UnderSticky1770 = r4Sticky1770Parent.appendingPathComponent("child-0700", isDirectory: true)
+
+            for dir in [
+                r4SafeHome, r4Child0700Under0755, r4Child0755Under0755,
+                r4Child0700Under0770, r4Child0700Under0777, r4DeepChild0700,
+                r4Home0700Under0770, r4Child0700UnderSticky1777, r4Child0700UnderSticky1770,
+            ] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            for (dir, mode) in [
+                (r4SafeHome, mode_t(0o700)),
+                (r4Owned0755Parent, mode_t(0o755)),
+                (r4Child0700Under0755, mode_t(0o700)),
+                (r4Child0755Under0755, mode_t(0o755)),
+                (r4Child0700Under0770, mode_t(0o700)),
+                (r4Unsafe0770Parent, mode_t(0o770)),
+                (r4Child0700Under0777, mode_t(0o700)),
+                (r4Unsafe0777Parent, mode_t(0o777)),
+                (r4DeepChild0700, mode_t(0o700)),
+                (r4Mid0755, mode_t(0o755)),
+                (r4Deep0770Grandparent, mode_t(0o770)),
+                (r4Home0700Under0770, mode_t(0o700)),
+                (r4UnsafeHomeParent, mode_t(0o770)),
+                (r4Child0700UnderSticky1777, mode_t(0o700)),
+                (r4Sticky1777Parent, mode_t(0o1777)),
+                (r4Child0700UnderSticky1770, mode_t(0o700)),
+                (r4Sticky1770Parent, mode_t(0o1770)),
+            ] {
+                try check(chmod(dir.path, mode) == 0 && fileMode(dir.path) == Int(mode),
+                          "[R4-P2-1] set mode \(String(mode, radix: 8)) on \(dir.lastPathComponent)")
+            }
+            defer {
+                for d in [r4Unsafe0770Parent, r4Unsafe0777Parent, r4Deep0770Grandparent, r4UnsafeHomeParent, r4Sticky1777Parent, r4Sticky1770Parent] {
+                    _ = chmod(d.path, 0o700)
+                }
+            }
+
+            let r4Control0700 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": r4Child0700Under0755.path],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            let r4Control0755 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r4Child0755Under0755.path],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            let r4Sticky1777 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": r4Child0700UnderSticky1777.path],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            let r4Sticky1770 = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r4Child0700UnderSticky1770.path],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            try check(canonicalPath(r4Control0700) == canonicalPath(r4Child0700Under0755)
+                        && canonicalPath(r4Control0755) == canonicalPath(r4Child0755Under0755)
+                        && canonicalPath(r4Sticky1777) == canonicalPath(r4Child0700UnderSticky1777)
+                        && canonicalPath(r4Sticky1770) == canonicalPath(r4Child0700UnderSticky1770),
+                      "[R4-P2-1] owned 0755 parent and sticky 1777/1770 controls remain accepted")
+
+            // Sticky system /tmp and /private/tmp spelling controls
+            let stickyControlTarget: URL
+            var ephemeralStickyRoot: URL?
+            let canon0755Child = canonicalPath(r4Child0700Under0755)
+            if canon0755Child.hasPrefix("/private/tmp/") {
+                stickyControlTarget = URL(fileURLWithPath: canon0755Child, isDirectory: true)
+            } else {
+                let holder = URL(fileURLWithPath: "/private/tmp/aiusage-r4-sticky-\(UUID().uuidString)", isDirectory: true)
+                let child = holder.appendingPathComponent("child-0700", isDirectory: true)
+                try fm.createDirectory(at: child, withIntermediateDirectories: true)
+                _ = chmod(holder.path, 0o700)
+                _ = chmod(child.path, 0o700)
+                ephemeralStickyRoot = holder
+                stickyControlTarget = child
+            }
+            defer { if let ephemeralStickyRoot { try? fm.removeItem(at: ephemeralStickyRoot) } }
+            let privateTmpSpelling = canonicalPath(stickyControlTarget)
+            let tmpAliasSpelling = "/tmp/" + String(privateTmpSpelling.dropFirst("/private/tmp/".count))
+            let pickedPrivateTmp = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": privateTmpSpelling],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            let pickedTmpAlias = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": tmpAliasSpelling],
+                processEnvironment: ["HOME": r4SafeHome.path]
+            )
+            try check(canonicalPath(pickedPrivateTmp) == privateTmpSpelling
+                        && canonicalPath(pickedTmpAlias) == privateTmpSpelling,
+                      "[R4-P2-1] sticky macOS /tmp and /private/tmp controls remain accepted")
+
+            // Reject non-sticky 0770/0777 ancestors and HOME fallback under 0770 ancestor
+            for (label, unsafeLeaf) in [
+                ("0770-parent", r4Child0700Under0770),
+                ("0777-parent", r4Child0700Under0777),
+                ("0770-grandparent", r4DeepChild0700),
+            ] {
+                let pickedFromOverridesAndEnv = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                    overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": unsafeLeaf.path, "TMPDIR": unsafeLeaf.path],
+                    processEnvironment: [
+                        "AIUSAGE_TEST_FIXTURE_ROOT": r4DeepChild0700.path,
+                        "TMPDIR": r4Child0700Under0777.path,
+                        "HOME": r4SafeHome.path,
+                    ]
+                )
+                try check(canonicalPath(pickedFromOverridesAndEnv) != canonicalPath(unsafeLeaf)
+                            && canonicalPath(pickedFromOverridesAndEnv) != canonicalPath(r4DeepChild0700)
+                            && canonicalPath(pickedFromOverridesAndEnv) != canonicalPath(r4Child0700Under0777)
+                            && isVerifiedSafeTempDir(pickedFromOverridesAndEnv),
+                          "[R4-P2-1] rejects \(label) across override and process keys and selects ancestor-safe fallback")
+            }
+
+            let rejectedUnsafeHomeFallback = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r4Child0700Under0770.path, "TMPDIR": r4Child0700Under0777.path],
+                processEnvironment: ["HOME": r4Home0700Under0770.path]
+            )
+            let r4SentinelSafeOrClosed = isVerifiedSafeTempDir(rejectedUnsafeHomeFallback)
+                || rejectedUnsafeHomeFallback.path == "/var/empty/aiusage-unverified-temporary-root"
+            try check(canonicalPath(rejectedUnsafeHomeFallback) != canonicalPath(r4Child0700Under0770)
+                        && canonicalPath(rejectedUnsafeHomeFallback) != canonicalPath(r4Child0700Under0777)
+                        && !canonicalPath(rejectedUnsafeHomeFallback).hasPrefix(canonicalPath(r4Home0700Under0770))
+                        && !fm.fileExists(atPath: r4Home0700Under0770.appendingPathComponent(".aiusage-tmp").path)
+                        && r4SentinelSafeOrClosed,
+                      "[R4-P2-1] rejects unsafe-ancestor HOME fallback without creating .aiusage-tmp inside it")
+
+            let r4ValidXDG = r4Root.appendingPathComponent("valid-xdg", isDirectory: true)
+            let r4WalDB = try seedSyntheticOpenCodeDB(at: r4ValidXDG.appendingPathComponent("opencode", isDirectory: true), walMode: true)
+            defer { if let r4WalDB { sqlite3_close(r4WalDB) } }
+
+            for (label, targetLeaf, parentDir) in [
+                ("0770-ancestor", r4Child0700Under0770, r4Unsafe0770Parent),
+                ("0777-ancestor", r4Child0700Under0777, r4Unsafe0777Parent),
+                ("0770-grandparent", r4DeepChild0700, r4Deep0770Grandparent),
+            ] {
+                r3SnapshotBox.clear()
+                let env = [
+                    "XDG_DATA_HOME": r4ValidXDG.path,
+                    "TMPDIR": targetLeaf.path,
+                    "AIUSAGE_TEST_FIXTURE_ROOT": targetLeaf.path,
+                    "HOME": r4SafeHome.path,
+                ]
+                let callRes = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r4SafeHome.path, timeZone: utc, environment: env).collect(cutoff: nil)
+                }
+                let costRes = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                    try await OpenCodeCostProvider(
+                        homeDirectory: r4SafeHome.appendingPathComponent("cost-r4-\(label)").path,
+                        timeZone: utc,
+                        environment: env
+                    ).fetchUsage()
+                }
+                let obs = r3SnapshotBox.items()
+                try check(callRes.status.errorCode == nil
+                            && callRes.entries.first(where: { $0.name == "bash" }) != nil
+                            && (costRes.extra["overall.totalTokens"]?.value as? Int) == 50
+                            && obs.count == 2
+                            && obs.allSatisfy { item in
+                                let snapParent = item.dir.deletingLastPathComponent()
+                                return item.mode == 0o700
+                                    && isVerifiedSafeTempDir(snapParent)
+                                    && canonicalPath(snapParent) != canonicalPath(targetLeaf)
+                                    && !canonicalPath(snapParent).hasPrefix(canonicalPath(parentDir))
+                                    && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                            }
+                            && ((try? fm.contentsOfDirectory(atPath: targetLeaf.path)) ?? ["nonempty"]).isEmpty,
+                          "[R4-P2-1] snapshot consumers reject \(label) leaf and leave it empty")
+            }
+
+            // Positive snapshot control under owned 0755 parent -> 0700 leaf
+            r3SnapshotBox.clear()
+            let r4ControlEnv = [
+                "XDG_DATA_HOME": r4ValidXDG.path,
+                "TMPDIR": r4Child0700Under0755.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": r4Child0700Under0755.path,
+                "HOME": r4SafeHome.path,
+            ]
+            let r4ControlCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                OpenCodeCallEventSource(homeDirectory: r4SafeHome.path, timeZone: utc, environment: r4ControlEnv).collect(cutoff: nil)
+            }
+            let r4ControlCost = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r3Observer) {
+                try await OpenCodeCostProvider(
+                    homeDirectory: r4SafeHome.appendingPathComponent("cost-r4-0755-control").path,
+                    timeZone: utc,
+                    environment: r4ControlEnv
+                ).fetchUsage()
+            }
+            let r4ControlObs = r3SnapshotBox.items()
+            try check(r4ControlCall.status.errorCode == nil
+                        && r4ControlCall.entries.first(where: { $0.name == "bash" }) != nil
+                        && (r4ControlCost.extra["overall.totalTokens"]?.value as? Int) == 50
+                        && r4ControlObs.count == 2
+                        && r4ControlObs.allSatisfy {
+                            $0.mode == 0o700
+                                && canonicalPath($0.dir.deletingLastPathComponent()) == canonicalPath(r4Child0700Under0755)
+                                && $0.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                        }
+                        && ((try? fm.contentsOfDirectory(atPath: r4Child0700Under0755.path)) ?? ["nonempty"]).isEmpty,
+                      "[R4-P2-1] owned 0755 parent control continues to host 0700/0600 snapshot isolation cleanly")
+
+            // R5-P2-1: Reject extended ACL grants and unassessable ACL candidates while preserving deny-only & benign read/traverse ACLs
+            func applyExtendedACL(
+                to path: String,
+                tag: acl_tag_t,
+                uuid: inout uuid_t,
+                perms: acl_permset_mask_t,
+                flags: [acl_flag_t] = []
+            ) -> Bool {
+                var acl: acl_t? = acl_init(1)
+                guard acl != nil else { return false }
+                defer { if let acl { acl_free(UnsafeMutableRawPointer(acl)) } }
+                var entry: acl_entry_t?
+                guard acl_create_entry(&acl, &entry) == 0, let entry, let currentACL = acl else { return false }
+                guard acl_set_tag_type(entry, tag) == 0 else { return false }
+                let qrc = withUnsafeBytes(of: &uuid) { raw -> Int32 in
+                    guard let base = raw.baseAddress else { return -1 }
+                    return acl_set_qualifier(entry, base)
+                }
+                guard qrc == 0, acl_set_permset_mask_np(entry, perms) == 0 else { return false }
+                if !flags.isEmpty {
+                    var flagset: acl_flagset_t?
+                    guard acl_get_flagset_np(UnsafeMutableRawPointer(entry), &flagset) == 0, let flagset else { return false }
+                    for flag in flags {
+                        guard acl_add_flag_np(flagset, flag) == 0 else { return false }
+                    }
+                }
+                return acl_set_link_np(path, ACL_TYPE_EXTENDED, currentACL) == 0
+            }
+
+            func clearExtendedACL(_ path: String) {
+                guard let fs = filesec_init() else { return }
+                defer { filesec_free(fs) }
+                var removeSentinel = UnsafeMutableRawPointer(bitPattern: 1)
+                if filesec_set_property(fs, FILESEC_ACL, &removeSentinel) == 0 {
+                    _ = chmodx_np(path, fs)
+                }
+            }
+
+            @Sendable func hasNoExtendedACL(_ path: String) -> Bool {
+                errno = 0
+                if let acl = acl_get_link_np(path, ACL_TYPE_EXTENDED) {
+                    acl_free(UnsafeMutableRawPointer(acl))
+                    return false
+                }
+                return errno == ENOENT || errno == ENOTSUP || errno == EOPNOTSUPP
+            }
+
+            var everyoneUUID: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            var selfUUID: uuid_t = (0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+            try check(mbr_gid_to_uuid(12, &everyoneUUID) == 0 && mbr_uid_to_uuid(geteuid(), &selfUUID) == 0,
+                      "[R5-P2-1] resolve synthetic ACL UUIDs for group:everyone and owner UID")
+
+            let r5Root = isolationRoot.appendingPathComponent("r5-acl-checks", isDirectory: true)
+            let r5SafeHome = r5Root.appendingPathComponent("safe-home", isDirectory: true)
+            let r5DelChildParent = r5Root.appendingPathComponent("acl-delchild-parent-0755", isDirectory: true)
+            let r5DelChildLeaf = r5DelChildParent.appendingPathComponent("child-0700", isDirectory: true)
+            let r5DelLeafParent = r5Root.appendingPathComponent("clean-parent-delleaf-0755", isDirectory: true)
+            let r5DelLeaf = r5DelLeafParent.appendingPathComponent("acl-del-child-0700", isDirectory: true)
+            let r5GrandACL = r5Root.appendingPathComponent("acl-grandparent-0755", isDirectory: true)
+            let r5GrandMid = r5GrandACL.appendingPathComponent("mid-0755", isDirectory: true)
+            let r5GrandLeaf = r5GrandMid.appendingPathComponent("child-0700", isDirectory: true)
+            let r5StickyACLParent = r5Root.appendingPathComponent("acl-sticky-1777", isDirectory: true)
+            let r5StickyACLLeaf = r5StickyACLParent.appendingPathComponent("child-0700", isDirectory: true)
+            let r5InheritParent = r5Root.appendingPathComponent("clean-parent-inherit-0755", isDirectory: true)
+            let r5InheritLeaf = r5InheritParent.appendingPathComponent("acl-inherit-child-0700", isDirectory: true)
+            let r5UnassessableParent = r5Root.appendingPathComponent("acl-deny-readsec-parent-0755", isDirectory: true)
+            let r5UnassessableLeaf = r5UnassessableParent.appendingPathComponent("child-0700", isDirectory: true)
+            let r5UnsafeHomeParent = r5Root.appendingPathComponent("acl-home-parent-0755", isDirectory: true)
+            let r5UnsafeHomeLeaf = r5UnsafeHomeParent.appendingPathComponent("home-0700", isDirectory: true)
+
+            let r5DenyDelParent = r5Root.appendingPathComponent("acl-deny-del-parent-0755", isDirectory: true)
+            let r5DenyDelParentLeaf = r5DenyDelParent.appendingPathComponent("child-0700", isDirectory: true)
+            let r5DenyDelLeafParent = r5Root.appendingPathComponent("clean-parent-denydel-0755", isDirectory: true)
+            let r5DenyDelLeaf = r5DenyDelLeafParent.appendingPathComponent("acl-denydel-child-0700", isDirectory: true)
+            let r5BenignParent = r5Root.appendingPathComponent("acl-benign-parent-0755", isDirectory: true)
+            let r5BenignParentLeaf = r5BenignParent.appendingPathComponent("child-0700", isDirectory: true)
+            let r5BenignLeafParent = r5Root.appendingPathComponent("clean-parent-benignleaf-0755", isDirectory: true)
+            let r5BenignLeaf0755 = r5BenignLeafParent.appendingPathComponent("acl-benign-child-0755", isDirectory: true)
+            let r5SelfAllowParent = r5Root.appendingPathComponent("acl-self-allow-parent-0755", isDirectory: true)
+            let r5SelfAllowLeaf = r5SelfAllowParent.appendingPathComponent("child-0700", isDirectory: true)
+
+            for dir in [
+                r5SafeHome, r5DelChildLeaf, r5DelLeaf, r5GrandLeaf, r5StickyACLLeaf,
+                r5InheritLeaf, r5UnassessableLeaf, r5UnsafeHomeLeaf, r5DenyDelParentLeaf,
+                r5DenyDelLeaf, r5BenignParentLeaf, r5BenignLeaf0755, r5SelfAllowLeaf,
+            ] {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            let r5AllManagedDirs = [
+                r5SafeHome, r5DelChildParent, r5DelChildLeaf, r5DelLeafParent, r5DelLeaf,
+                r5GrandACL, r5GrandMid, r5GrandLeaf, r5StickyACLParent, r5StickyACLLeaf,
+                r5InheritParent, r5InheritLeaf, r5UnassessableParent, r5UnassessableLeaf,
+                r5UnsafeHomeParent, r5UnsafeHomeLeaf, r5DenyDelParent, r5DenyDelParentLeaf,
+                r5DenyDelLeafParent, r5DenyDelLeaf, r5BenignParent, r5BenignParentLeaf,
+                r5BenignLeafParent, r5BenignLeaf0755, r5SelfAllowParent, r5SelfAllowLeaf,
+            ]
+            defer {
+                for dir in r5AllManagedDirs {
+                    clearExtendedACL(dir.path)
+                    _ = chmod(dir.path, 0o700)
+                }
+            }
+            for (dir, mode) in [
+                (r5SafeHome, mode_t(0o700)),
+                (r5DelChildParent, mode_t(0o755)), (r5DelChildLeaf, mode_t(0o700)),
+                (r5DelLeafParent, mode_t(0o755)), (r5DelLeaf, mode_t(0o700)),
+                (r5GrandACL, mode_t(0o755)), (r5GrandMid, mode_t(0o755)), (r5GrandLeaf, mode_t(0o700)),
+                (r5StickyACLParent, mode_t(0o1777)), (r5StickyACLLeaf, mode_t(0o700)),
+                (r5InheritParent, mode_t(0o755)), (r5InheritLeaf, mode_t(0o700)),
+                (r5UnassessableParent, mode_t(0o755)), (r5UnassessableLeaf, mode_t(0o700)),
+                (r5UnsafeHomeParent, mode_t(0o755)), (r5UnsafeHomeLeaf, mode_t(0o700)),
+                (r5DenyDelParent, mode_t(0o755)), (r5DenyDelParentLeaf, mode_t(0o700)),
+                (r5DenyDelLeafParent, mode_t(0o755)), (r5DenyDelLeaf, mode_t(0o700)),
+                (r5BenignParent, mode_t(0o755)), (r5BenignParentLeaf, mode_t(0o700)),
+                (r5BenignLeafParent, mode_t(0o755)), (r5BenignLeaf0755, mode_t(0o755)),
+                (r5SelfAllowParent, mode_t(0o755)), (r5SelfAllowLeaf, mode_t(0o700)),
+            ] {
+                try check(chmod(dir.path, mode) == 0 && fileMode(dir.path) == Int(mode),
+                          "[R5-P2-1] set mode \(String(mode, radix: 8)) on \(dir.lastPathComponent)")
+            }
+
+            let benignACLMask: acl_permset_mask_t = [
+                ACL_READ_DATA, ACL_EXECUTE, ACL_READ_ATTRIBUTES,
+                ACL_READ_EXTATTRIBUTES, ACL_READ_SECURITY, ACL_SYNCHRONIZE,
+            ].reduce(0) { $0 | acl_permset_mask_t($1.rawValue) }
+            let mutatingGrandMask: acl_permset_mask_t = [
+                ACL_WRITE_DATA, ACL_APPEND_DATA, ACL_WRITE_SECURITY, ACL_CHANGE_OWNER,
+            ].reduce(0) { $0 | acl_permset_mask_t($1.rawValue) }
+            let selfAllowMask: acl_permset_mask_t = [
+                ACL_READ_DATA, ACL_WRITE_DATA, ACL_EXECUTE,
+                ACL_DELETE, ACL_APPEND_DATA, ACL_DELETE_CHILD,
+            ].reduce(0) { $0 | acl_permset_mask_t($1.rawValue) }
+
+            // Positive ACL controls first (and negative ACL controls next, with unassessable parent applied separately)
+            try check(
+                applyExtendedACL(to: r5DelChildParent.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE_CHILD.rawValue))
+                && applyExtendedACL(to: r5DelLeaf.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE.rawValue))
+                && applyExtendedACL(to: r5GrandACL.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: mutatingGrandMask)
+                && applyExtendedACL(to: r5StickyACLParent.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE_CHILD.rawValue))
+                && applyExtendedACL(to: r5InheritLeaf.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_READ_DATA.rawValue | ACL_EXECUTE.rawValue), flags: [ACL_ENTRY_FILE_INHERIT, ACL_ENTRY_DIRECTORY_INHERIT])
+                && applyExtendedACL(to: r5UnsafeHomeParent.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE_CHILD.rawValue))
+                && applyExtendedACL(to: r5UnassessableParent.path, tag: ACL_EXTENDED_DENY, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_READ_SECURITY.rawValue))
+                && applyExtendedACL(to: r5DenyDelParent.path, tag: ACL_EXTENDED_DENY, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE.rawValue))
+                && applyExtendedACL(to: r5DenyDelLeaf.path, tag: ACL_EXTENDED_DENY, uuid: &everyoneUUID, perms: acl_permset_mask_t(ACL_DELETE.rawValue))
+                && applyExtendedACL(to: r5BenignParent.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: benignACLMask)
+                && applyExtendedACL(to: r5BenignLeaf0755.path, tag: ACL_EXTENDED_ALLOW, uuid: &everyoneUUID, perms: benignACLMask)
+                && applyExtendedACL(to: r5SelfAllowParent.path, tag: ACL_EXTENDED_ALLOW, uuid: &selfUUID, perms: selfAllowMask),
+                "[R5-P2-1] attach synthetic APFS negative and positive ACLs"
+            )
+
+            for (label, positiveLeaf) in [
+                ("deny-delete-parent", r5DenyDelParentLeaf),
+                ("deny-delete-leaf", r5DenyDelLeaf),
+                ("benign-read-traverse-parent", r5BenignParentLeaf),
+                ("benign-noninherit-read-leaf-0755", r5BenignLeaf0755),
+                ("trusted-owner-allow-parent", r5SelfAllowLeaf),
+            ] {
+                let picked = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                    overrides: ["TMPDIR": positiveLeaf.path],
+                    processEnvironment: ["HOME": r5SafeHome.path]
+                )
+                try check(canonicalPath(picked) == canonicalPath(positiveLeaf)
+                            && isVerifiedSafeTempDir(picked),
+                          "[R5-P2-1] positive ACL control '\(label)' remains accepted")
+            }
+
+            // Sticky /tmp and /private/tmp spelling controls preserved alongside ACL check
+            let r5PickedPrivate = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": privateTmpSpelling],
+                processEnvironment: ["HOME": r5SafeHome.path]
+            )
+            let r5PickedTmp = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["TMPDIR": tmpAliasSpelling],
+                processEnvironment: ["HOME": r5SafeHome.path]
+            )
+            try check(canonicalPath(r5PickedPrivate) == privateTmpSpelling
+                        && canonicalPath(r5PickedTmp) == privateTmpSpelling,
+                      "[R5-P2-1] sticky macOS /tmp and /private/tmp controls remain accepted with ACL verification")
+
+            for (label, unsafeLeaf) in [
+                ("0755-parent-allow-delete_child", r5DelChildLeaf),
+                ("0700-leaf-allow-delete", r5DelLeaf),
+                ("0755-grandparent-allow-write_sec_chown", r5GrandLeaf),
+                ("sticky-1777-parent-allow-delete_child", r5StickyACLLeaf),
+                ("0700-leaf-inheritable-read", r5InheritLeaf),
+                ("0755-parent-unassessable-deny-readsec", r5UnassessableLeaf),
+            ] {
+                let picked = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                    overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": unsafeLeaf.path, "TMPDIR": unsafeLeaf.path],
+                    processEnvironment: [
+                        "AIUSAGE_TEST_FIXTURE_ROOT": r5DelChildLeaf.path,
+                        "TMPDIR": r5UnassessableLeaf.path,
+                        "HOME": r5SafeHome.path,
+                    ]
+                )
+                try check(canonicalPath(picked) != canonicalPath(unsafeLeaf)
+                            && canonicalPath(picked) != canonicalPath(r5DelChildLeaf)
+                            && canonicalPath(picked) != canonicalPath(r5UnassessableLeaf)
+                            && isVerifiedSafeTempDir(picked),
+                          "[R5-P2-1] negative ACL case '\(label)' rejected across override and process keys")
+            }
+
+            let rejectedACLHomeFallback = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r5DelChildLeaf.path, "TMPDIR": r5InheritLeaf.path],
+                processEnvironment: ["HOME": r5UnsafeHomeLeaf.path]
+            )
+            let r5SentinelSafeOrClosed = isVerifiedSafeTempDir(rejectedACLHomeFallback)
+                || rejectedACLHomeFallback.path == "/var/empty/aiusage-unverified-temporary-root"
+            try check(canonicalPath(rejectedACLHomeFallback) != canonicalPath(r5DelChildLeaf)
+                        && canonicalPath(rejectedACLHomeFallback) != canonicalPath(r5InheritLeaf)
+                        && !canonicalPath(rejectedACLHomeFallback).hasPrefix(canonicalPath(r5UnsafeHomeParent))
+                        && !fm.fileExists(atPath: r5UnsafeHomeLeaf.appendingPathComponent(".aiusage-tmp").path)
+                        && r5SentinelSafeOrClosed,
+                      "[R5-P2-1] rejects ACL-unsafe HOME fallback without creating .aiusage-tmp inside it")
+
+            let r5ValidXDG = r5Root.appendingPathComponent("valid-xdg", isDirectory: true)
+            let r5WalDB = try seedSyntheticOpenCodeDB(at: r5ValidXDG.appendingPathComponent("opencode", isDirectory: true), walMode: true)
+            defer { if let r5WalDB { sqlite3_close(r5WalDB) } }
+
+            final class SnapshotACLBox: @unchecked Sendable {
+                private let lock = NSLock()
+                private var itemsList: [Bool] = []
+                func record(_ allACLFree: Bool) { lock.withLock { itemsList.append(allACLFree) } }
+                func values() -> [Bool] { lock.withLock { itemsList } }
+                func clear() { lock.withLock { itemsList.removeAll() } }
+            }
+            let r5ACLBox = SnapshotACLBox()
+            let r5Observer: @Sendable (URL) -> Void = { dir in
+                r3Observer(dir)
+                var allClean = hasNoExtendedACL(dir.path)
+                for name in ["opencode.db", "opencode.db-wal", "opencode.db-shm"] {
+                    allClean = allClean && hasNoExtendedACL(dir.appendingPathComponent(name).path)
+                }
+                r5ACLBox.record(allClean)
+            }
+
+            for (label, targetLeaf, excludedPrefix) in [
+                ("acl-allow-delete_child-parent", r5DelChildLeaf, r5DelChildParent),
+                ("acl-allow-delete-leaf", r5DelLeaf, r5DelLeaf),
+                ("acl-inheritable-leaf", r5InheritLeaf, r5InheritLeaf),
+                ("acl-unassessable-parent", r5UnassessableLeaf, r5UnassessableParent),
+            ] {
+                r3SnapshotBox.clear()
+                r5ACLBox.clear()
+                let env = [
+                    "XDG_DATA_HOME": r5ValidXDG.path,
+                    "TMPDIR": targetLeaf.path,
+                    "AIUSAGE_TEST_FIXTURE_ROOT": targetLeaf.path,
+                    "HOME": r5SafeHome.path,
+                ]
+                let callRes = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r5SafeHome.path, timeZone: utc, environment: env).collect(cutoff: nil)
+                }
+                let costRes = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    try await OpenCodeCostProvider(
+                        homeDirectory: r5SafeHome.appendingPathComponent("cost-r5-neg-\(label)").path,
+                        timeZone: utc,
+                        environment: env
+                    ).fetchUsage()
+                }
+                let obs = r3SnapshotBox.items()
+                let aclClean = r5ACLBox.values()
+                try check(callRes.status.errorCode == nil
+                            && callRes.entries.first(where: { $0.name == "bash" }) != nil
+                            && (costRes.extra["overall.totalTokens"]?.value as? Int) == 50
+                            && obs.count == 2
+                            && aclClean == [true, true]
+                            && obs.allSatisfy { item in
+                                let snapParent = item.dir.deletingLastPathComponent()
+                                return item.mode == 0o700
+                                    && isVerifiedSafeTempDir(snapParent)
+                                    && canonicalPath(snapParent) != canonicalPath(targetLeaf)
+                                    && !canonicalPath(snapParent).hasPrefix(canonicalPath(excludedPrefix))
+                                    && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                            }
+                            && ((try? fm.contentsOfDirectory(atPath: targetLeaf.path)) ?? ["nonempty"]).isEmpty,
+                          "[R5-P2-1] OpenCode consumers reject '\(label)', use ACL-safe fallback, and leave unsafe leaf empty")
+            }
+
+            for (label, positiveLeaf) in [
+                ("acl-deny-delete-parent", r5DenyDelParentLeaf),
+                ("acl-benign-read-parent", r5BenignParentLeaf),
+                ("acl-trusted-owner-parent", r5SelfAllowLeaf),
+            ] {
+                r3SnapshotBox.clear()
+                r5ACLBox.clear()
+                let env = [
+                    "XDG_DATA_HOME": r5ValidXDG.path,
+                    "TMPDIR": positiveLeaf.path,
+                    "AIUSAGE_TEST_FIXTURE_ROOT": positiveLeaf.path,
+                    "HOME": r5SafeHome.path,
+                ]
+                let callRes = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r5SafeHome.path, timeZone: utc, environment: env).collect(cutoff: nil)
+                }
+                let costRes = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    try await OpenCodeCostProvider(
+                        homeDirectory: r5SafeHome.appendingPathComponent("cost-r5-pos-\(label)").path,
+                        timeZone: utc,
+                        environment: env
+                    ).fetchUsage()
+                }
+                let obs = r3SnapshotBox.items()
+                let aclClean = r5ACLBox.values()
+                try check(callRes.status.errorCode == nil
+                            && callRes.entries.first(where: { $0.name == "bash" }) != nil
+                            && (costRes.extra["overall.totalTokens"]?.value as? Int) == 50
+                            && obs.count == 2
+                            && aclClean == [true, true]
+                            && obs.allSatisfy { item in
+                                item.mode == 0o700
+                                    && canonicalPath(item.dir.deletingLastPathComponent()) == canonicalPath(positiveLeaf)
+                                    && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                            }
+                            && ((try? fm.contentsOfDirectory(atPath: positiveLeaf.path)) ?? ["nonempty"]).isEmpty,
+                          "[R5-P2-1] OpenCode consumers accept positive ACL control '\(label)' with zero-ACL 0700/0600 snapshot cleanup")
+            }
+
+            // R6-P2-1: Reject inheritable & delete-child-blocking deny ACLs on candidate temp leaf without modifying user ACLs
+            func clearTreeExtendedACL(_ rootPath: String) {
+                guard let fs = filesec_init() else { return }
+                defer { filesec_free(fs) }
+                var removeSentinel = UnsafeMutableRawPointer(bitPattern: 1)
+                guard filesec_set_property(fs, FILESEC_ACL, &removeSentinel) == 0 else { return }
+                if let enumerator = fm.enumerator(atPath: rootPath) {
+                    var children: [String] = []
+                    while let rel = enumerator.nextObject() as? String {
+                        children.append((rootPath as NSString).appendingPathComponent(rel))
+                    }
+                    for child in children.reversed() {
+                        _ = chmodx_np(child, fs)
+                        _ = chmod(child, 0o700)
+                    }
+                }
+                _ = chmodx_np(rootPath, fs)
+                _ = chmod(rootPath, 0o700)
+            }
+
+            let r6Root = isolationRoot.appendingPathComponent("r6-deny-retention-checks", isDirectory: true)
+            let r6SafeHome = r6Root.appendingPathComponent("safe-home", isDirectory: true)
+            let r6CleanFallback = r6Root.appendingPathComponent("clean-fallback-0700", isDirectory: true)
+            let r6InhOnlyDenyLeaf = r6Root.appendingPathComponent("inh-only-deny-del-delchild-0700", isDirectory: true)
+            let r6FileInheritDenyLeaf = r6Root.appendingPathComponent("file-inherit-deny-del-0700", isDirectory: true)
+            let r6DirInheritDenyLeaf = r6Root.appendingPathComponent("dir-inherit-deny-del-0700", isDirectory: true)
+            let r6InhDenyReadSecLeaf = r6Root.appendingPathComponent("inh-only-deny-readsec-0700", isDirectory: true)
+            let r6DirectDenyDelChildLeaf = r6Root.appendingPathComponent("noninh-deny-delchild-0700", isDirectory: true)
+            let r6UnsafeDenyHomeLeaf = r6Root.appendingPathComponent("inh-deny-home-0700", isDirectory: true)
+            let r6NonInhDenyDeleteLeaf = r6Root.appendingPathComponent("noninh-deny-del-positive-0700", isDirectory: true)
+
+            let r6Leaves = [
+                r6SafeHome, r6CleanFallback, r6InhOnlyDenyLeaf, r6FileInheritDenyLeaf,
+                r6DirInheritDenyLeaf, r6InhDenyReadSecLeaf, r6DirectDenyDelChildLeaf,
+                r6UnsafeDenyHomeLeaf, r6NonInhDenyDeleteLeaf,
+            ]
+            for dir in r6Leaves {
+                try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            }
+            defer { clearTreeExtendedACL(r6Root.path) }
+            for dir in r6Leaves {
+                try check(chmod(dir.path, 0o700) == 0 && fileMode(dir.path) == 0o700,
+                          "[R6-P2-1] set mode 0700 on \(dir.lastPathComponent)")
+            }
+
+            try check(
+                applyExtendedACL(
+                    to: r6InhOnlyDenyLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE.rawValue | ACL_DELETE_CHILD.rawValue),
+                    flags: [ACL_ENTRY_FILE_INHERIT, ACL_ENTRY_DIRECTORY_INHERIT, ACL_ENTRY_ONLY_INHERIT]
+                )
+                && applyExtendedACL(
+                    to: r6FileInheritDenyLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE.rawValue),
+                    flags: [ACL_ENTRY_FILE_INHERIT]
+                )
+                && applyExtendedACL(
+                    to: r6DirInheritDenyLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE.rawValue),
+                    flags: [ACL_ENTRY_DIRECTORY_INHERIT]
+                )
+                && applyExtendedACL(
+                    to: r6InhDenyReadSecLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_READ_SECURITY.rawValue),
+                    flags: [ACL_ENTRY_FILE_INHERIT, ACL_ENTRY_DIRECTORY_INHERIT, ACL_ENTRY_ONLY_INHERIT]
+                )
+                && applyExtendedACL(
+                    to: r6DirectDenyDelChildLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE_CHILD.rawValue)
+                )
+                && applyExtendedACL(
+                    to: r6UnsafeDenyHomeLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE.rawValue | ACL_DELETE_CHILD.rawValue),
+                    flags: [ACL_ENTRY_FILE_INHERIT, ACL_ENTRY_DIRECTORY_INHERIT, ACL_ENTRY_ONLY_INHERIT]
+                )
+                && applyExtendedACL(
+                    to: r6NonInhDenyDeleteLeaf.path,
+                    tag: ACL_EXTENDED_DENY,
+                    uuid: &everyoneUUID,
+                    perms: acl_permset_mask_t(ACL_DELETE.rawValue)
+                ),
+                "[R6-P2-1] attach synthetic APFS retention-deny and benign deny-delete ACLs"
+            )
+
+            // Negative retention-ACL leaves must reject without mutating the user's ACL
+            let r6NegCases: [(String, URL)] = [
+                ("inh-only-deny-delete-delete_child", r6InhOnlyDenyLeaf),
+                ("file-inherit-deny-delete", r6FileInheritDenyLeaf),
+                ("dir-inherit-deny-delete", r6DirInheritDenyLeaf),
+                ("inh-only-deny-read_security", r6InhDenyReadSecLeaf),
+                ("noninh-deny-delete_child", r6DirectDenyDelChildLeaf),
+            ]
+            for (label, unsafeLeaf) in r6NegCases {
+                let picked = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                    overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": unsafeLeaf.path, "TMPDIR": unsafeLeaf.path],
+                    processEnvironment: ["TMPDIR": r6CleanFallback.path, "HOME": r6SafeHome.path]
+                )
+                try check(canonicalPath(picked) == canonicalPath(r6CleanFallback)
+                            && canonicalPath(picked) != canonicalPath(unsafeLeaf)
+                            && isVerifiedSafeTempDir(picked)
+                            && !hasNoExtendedACL(unsafeLeaf.path),
+                          "[R6-P2-1] rejects '\(label)' via process fallback without altering leaf ACL")
+            }
+
+            let rejectedR6HomeFallback = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                overrides: ["AIUSAGE_TEST_FIXTURE_ROOT": r6InhOnlyDenyLeaf.path, "TMPDIR": r6DirectDenyDelChildLeaf.path],
+                processEnvironment: ["HOME": r6UnsafeDenyHomeLeaf.path]
+            )
+            let r6SentinelSafeOrClosed = isVerifiedSafeTempDir(rejectedR6HomeFallback)
+                || rejectedR6HomeFallback.path == "/var/empty/aiusage-unverified-temporary-root"
+            try check(canonicalPath(rejectedR6HomeFallback) != canonicalPath(r6InhOnlyDenyLeaf)
+                        && canonicalPath(rejectedR6HomeFallback) != canonicalPath(r6DirectDenyDelChildLeaf)
+                        && !canonicalPath(rejectedR6HomeFallback).hasPrefix(canonicalPath(r6UnsafeDenyHomeLeaf))
+                        && !fm.fileExists(atPath: r6UnsafeDenyHomeLeaf.appendingPathComponent(".aiusage-tmp").path)
+                        && r6SentinelSafeOrClosed,
+                      "[R6-P2-1] rejects inheritable-deny HOME fallback without creating .aiusage-tmp inside it")
+
+            // Positive controls preserved: non-inheritable deny-delete leaf & parent, 0755 parent, and sticky /tmp /private/tmp
+            for (label, positiveURL, expectedPath) in [
+                ("noninh-deny-delete-0700-leaf", r6NonInhDenyDeleteLeaf, canonicalPath(r6NonInhDenyDeleteLeaf)),
+                ("noninh-deny-delete-0755-parent", r5DenyDelParentLeaf, canonicalPath(r5DenyDelParentLeaf)),
+                ("plain-0755-parent-control", r4Child0700Under0755, canonicalPath(r4Child0700Under0755)),
+                ("sticky-private-tmp-control", URL(fileURLWithPath: privateTmpSpelling, isDirectory: true), privateTmpSpelling),
+                ("sticky-tmp-alias-control", URL(fileURLWithPath: tmpAliasSpelling, isDirectory: true), privateTmpSpelling),
+            ] {
+                let picked = TokenSaverSettingsStore.resolvedTemporaryDirectory(
+                    overrides: ["TMPDIR": positiveURL.path],
+                    processEnvironment: ["HOME": r6SafeHome.path]
+                )
+                try check(canonicalPath(picked) == expectedPath && isVerifiedSafeTempDir(picked),
+                          "[R6-P2-1] positive control '\(label)' remains accepted")
+            }
+
+            let r6ValidXDG = r6Root.appendingPathComponent("valid-xdg", isDirectory: true)
+            let r6WalDB = try seedSyntheticOpenCodeDB(at: r6ValidXDG.appendingPathComponent("opencode", isDirectory: true), walMode: true)
+            defer { if let r6WalDB { sqlite3_close(r6WalDB) } }
+
+            // (a) Dedicated clean fallback in processEnvironment: verify OpenCode consumers + direct snapshot helper leave 0 snapshots in leaf and fallback
+            for (label, unsafeLeaf) in r6NegCases {
+                let env = [
+                    "XDG_DATA_HOME": r6ValidXDG.path,
+                    "AIUSAGE_TEST_FIXTURE_ROOT": unsafeLeaf.path,
+                    "TMPDIR": r6CleanFallback.path,
+                    "HOME": r6SafeHome.path,
+                ]
+                r3SnapshotBox.clear()
+                r5ACLBox.clear()
+                let callRes = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    OpenCodeCallEventSource(homeDirectory: r6SafeHome.path, timeZone: utc, environment: env).collect(cutoff: nil)
+                }
+                let costRes = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                    try await OpenCodeCostProvider(
+                        homeDirectory: r6SafeHome.appendingPathComponent("cost-r6-neg-\(label)").path,
+                        timeZone: utc,
+                        environment: env
+                    ).fetchUsage()
+                }
+                let obs = r3SnapshotBox.items()
+                try check(callRes.status.errorCode == nil
+                            && callRes.entries.first(where: { $0.name == "bash" }) != nil
+                            && (costRes.extra["overall.totalTokens"]?.value as? Int) == 50
+                            && obs.count == 2
+                            && r5ACLBox.values() == [true, true]
+                            && obs.allSatisfy { item in
+                                item.mode == 0o700
+                                    && canonicalPath(item.dir.deletingLastPathComponent()) == canonicalPath(r6CleanFallback)
+                                    && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                                    && !fm.fileExists(atPath: item.dir.path)
+                            }
+                            && ((try? fm.contentsOfDirectory(atPath: unsafeLeaf.path)) ?? ["nonempty"]).isEmpty
+                            && ((try? fm.contentsOfDirectory(atPath: r6CleanFallback.path)) ?? ["nonempty"]).isEmpty
+                            && !hasNoExtendedACL(unsafeLeaf.path),
+                          "[R6-P2-1] OpenCode consumers reject '\(label)', use fallback, retain 0 files/dirs in both leaf and fallback, and keep leaf ACL untouched")
+            }
+
+            // Direct snapshot + cleanup helper check on R6-P2-1 exact reproducer
+            let directEnv = [
+                "AIUSAGE_TEST_FIXTURE_ROOT": r6InhOnlyDenyLeaf.path,
+                "TMPDIR": r6CleanFallback.path,
+                "HOME": r6SafeHome.path,
+            ]
+            let directSnapshotPath = try makeOpenCodeDatabaseSnapshot(
+                dataDirectory: r6ValidXDG.appendingPathComponent("opencode", isDirectory: true).path,
+                prefix: "opencode-r6-direct",
+                environment: directEnv
+            )
+            let directSnapshotURL = URL(fileURLWithPath: directSnapshotPath, isDirectory: false).deletingLastPathComponent()
+            let directInFallback = canonicalPath(directSnapshotURL.deletingLastPathComponent()) == canonicalPath(r6CleanFallback)
+            cleanupOpenCodeDatabaseSnapshot(directSnapshotPath, expectedDirectoryPrefix: "opencode-r6-direct")
+            try check(directInFallback
+                        && !fm.fileExists(atPath: directSnapshotURL.path)
+                        && ((try? fm.contentsOfDirectory(atPath: r6InhOnlyDenyLeaf.path)) ?? ["nonempty"]).isEmpty
+                        && ((try? fm.contentsOfDirectory(atPath: r6CleanFallback.path)) ?? ["nonempty"]).isEmpty,
+                      "[R6-P2-1] direct make/cleanupOpenCodeDatabaseSnapshot selects fallback and leaves 0 files or dirs in leaf or fallback")
+
+            // (b) When both overrides and TMPDIR target r6InhOnlyDenyLeaf, both consumers still resolve a safe fallback with 0 retained snapshots
+            let bothUnsafeEnv = [
+                "XDG_DATA_HOME": r6ValidXDG.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": r6InhOnlyDenyLeaf.path,
+                "TMPDIR": r6InhOnlyDenyLeaf.path,
+                "HOME": r6SafeHome.path,
+            ]
+            r3SnapshotBox.clear()
+            r5ACLBox.clear()
+            let callResAllUnsafe = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                OpenCodeCallEventSource(homeDirectory: r6SafeHome.path, timeZone: utc, environment: bothUnsafeEnv).collect(cutoff: nil)
+            }
+            let costResAllUnsafe = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                try await OpenCodeCostProvider(
+                    homeDirectory: r6SafeHome.appendingPathComponent("cost-r6-all-unsafe").path,
+                    timeZone: utc,
+                    environment: bothUnsafeEnv
+                ).fetchUsage()
+            }
+            let obsAllUnsafe = r3SnapshotBox.items()
+            try check(callResAllUnsafe.status.errorCode == nil
+                        && callResAllUnsafe.entries.first(where: { $0.name == "bash" }) != nil
+                        && (costResAllUnsafe.extra["overall.totalTokens"]?.value as? Int) == 50
+                        && obsAllUnsafe.count == 2
+                        && r5ACLBox.values() == [true, true]
+                        && obsAllUnsafe.allSatisfy { item in
+                            let snapParent = item.dir.deletingLastPathComponent()
+                            return item.mode == 0o700
+                                && isVerifiedSafeTempDir(snapParent)
+                                && canonicalPath(snapParent) != canonicalPath(r6InhOnlyDenyLeaf)
+                                && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                                && !fm.fileExists(atPath: item.dir.path)
+                        }
+                        && ((try? fm.contentsOfDirectory(atPath: r6InhOnlyDenyLeaf.path)) ?? ["nonempty"]).isEmpty
+                        && !hasNoExtendedACL(r6InhOnlyDenyLeaf.path),
+                      "[R6-P2-1] OpenCode consumers leave 0 snapshots in rejected leaf or fallback even when all override/TMPDIR keys target r6InhOnlyDenyLeaf")
+
+            // (c) Non-inheritable deny-delete 0700 leaf positive control remains directly usable and cleans up 100%
+            let r6PosEnv = [
+                "XDG_DATA_HOME": r6ValidXDG.path,
+                "TMPDIR": r6NonInhDenyDeleteLeaf.path,
+                "AIUSAGE_TEST_FIXTURE_ROOT": r6NonInhDenyDeleteLeaf.path,
+                "HOME": r6SafeHome.path,
+            ]
+            r3SnapshotBox.clear()
+            r5ACLBox.clear()
+            let r6PosCall = OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                OpenCodeCallEventSource(homeDirectory: r6SafeHome.path, timeZone: utc, environment: r6PosEnv).collect(cutoff: nil)
+            }
+            let r6PosCost = try await OpenCodeSnapshotIsolation.$didPrepareSnapshot.withValue(r5Observer) {
+                try await OpenCodeCostProvider(
+                    homeDirectory: r6SafeHome.appendingPathComponent("cost-r6-pos-denydel").path,
+                    timeZone: utc,
+                    environment: r6PosEnv
+                ).fetchUsage()
+            }
+            let r6PosObs = r3SnapshotBox.items()
+            try check(r6PosCall.status.errorCode == nil
+                        && r6PosCall.entries.first(where: { $0.name == "bash" }) != nil
+                        && (r6PosCost.extra["overall.totalTokens"]?.value as? Int) == 50
+                        && r6PosObs.count == 2
+                        && r5ACLBox.values() == [true, true]
+                        && r6PosObs.allSatisfy { item in
+                            item.mode == 0o700
+                                && canonicalPath(item.dir.deletingLastPathComponent()) == canonicalPath(r6NonInhDenyDeleteLeaf)
+                                && item.fileModes == ["opencode.db": 0o600, "opencode.db-wal": 0o600, "opencode.db-shm": 0o600]
+                                && !fm.fileExists(atPath: item.dir.path)
+                        }
+                        && ((try? fm.contentsOfDirectory(atPath: r6NonInhDenyDeleteLeaf.path)) ?? ["nonempty"]).isEmpty,
+                      "[R6-P2-1] non-inheritable deny-delete 0700 leaf positive control hosts 0700/0600 snapshots and cleans up to 0 files/dirs")
         }
     }
 

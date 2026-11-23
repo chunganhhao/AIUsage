@@ -63,7 +63,10 @@ struct AntiBanPhase3Regression {
     }
 
     static func runtimeLayout() throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("anti-ban-phase3-\(UUID())")
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let root = fixtureBase.appendingPathComponent("anti-ban-phase3-\(UUID())")
         defer { try? FileManager.default.removeItem(at: root) }
         let paths = try CLIProxyPaths(root: root)
         try paths.prepare()

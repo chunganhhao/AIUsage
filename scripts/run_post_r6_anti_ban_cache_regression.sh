@@ -4325,6 +4325,7 @@ struct CPAConnectivityMain {{
 
         let paths = try CLIProxyPaths(root: root.appendingPathComponent("cpa", isDirectory: true))
         try paths.prepare(fileManager: fm)
+        precondition(!fm.fileExists(atPath: paths.authDirectory.path), "[Finding #2] Held-build prepare must not create legacy auth/")
         let priv = P256.Signing.PrivateKey()
         let trusted = CLIProxyTrustedJWSKey(
             keyID: "k1",
@@ -4356,6 +4357,7 @@ struct CPAConnectivityMain {{
                 "aiusage_verified_access_token_sha256": CLIProxyCapabilityMatrix.sha256Hex(tok),
                 "disabled": false
             ]
+            try fm.createDirectory(at: paths.authDirectory, withIntermediateDirectories: true)
             try JSONSerialization.data(withJSONObject: obj, options: [.sortedKeys]).write(
                 to: paths.authDirectory.appendingPathComponent(name)
             )

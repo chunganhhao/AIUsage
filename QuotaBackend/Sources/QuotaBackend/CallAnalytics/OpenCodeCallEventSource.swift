@@ -164,22 +164,15 @@ struct OpenCodeCallEventSource {
     }
 
     private func makeDatabaseSnapshot(dataDirectory: String) throws -> String {
-        let sourcePath = (dataDirectory as NSString).appendingPathComponent(Self.databaseFilename)
-        let snapshotPath = (NSTemporaryDirectory() as NSString)
-            .appendingPathComponent("aiusage-callanalytics-\(UUID().uuidString).db")
-        do {
-            try FileManager.default.copyItem(atPath: sourcePath, toPath: snapshotPath)
-        } catch {
-            throw ProviderError("db_snapshot_failed", SensitiveDataRedactor.redactedMessage(for: error))
-        }
-        try? FileManager.default.copyItem(atPath: sourcePath + "-wal", toPath: snapshotPath + "-wal")
-        try? FileManager.default.copyItem(atPath: sourcePath + "-shm", toPath: snapshotPath + "-shm")
-        return snapshotPath
+        try makeOpenCodeDatabaseSnapshot(
+            dataDirectory: dataDirectory,
+            databaseFilename: Self.databaseFilename,
+            prefix: "aiusage-callanalytics",
+            environment: environment
+        )
     }
 
     private func cleanupDatabaseSnapshot(_ snapshotPath: String) {
-        try? FileManager.default.removeItem(atPath: snapshotPath)
-        try? FileManager.default.removeItem(atPath: snapshotPath + "-wal")
-        try? FileManager.default.removeItem(atPath: snapshotPath + "-shm")
+        cleanupOpenCodeDatabaseSnapshot(snapshotPath, expectedDirectoryPrefix: "aiusage-callanalytics-")
     }
 }

@@ -197,7 +197,10 @@ struct NativeToggleFixture: View {
     @MainActor static var assertions = 0
     @MainActor static func check(_ value: @autoclosure () -> Bool, _ message: String) { assertions += 1; precondition(value(), message) }
     @MainActor static func main() async throws {
-        let home = FileManager.default.temporaryDirectory.appendingPathComponent("aiusage-safe-switch-\(UUID())")
+        let fixtureBase = CommandLine.arguments.dropFirst().first.map { URL(fileURLWithPath: $0, isDirectory: true) }
+            ?? TokenSaverSettingsStore.resolvedTemporaryDirectory()
+        try FileManager.default.createDirectory(at: fixtureBase, withIntermediateDirectories: true)
+        let home = fixtureBase.appendingPathComponent("aiusage-safe-switch-\(UUID())")
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: home) }
         Boundary.authPath = home.appendingPathComponent("target.json").path
@@ -366,6 +369,9 @@ struct NativeToggleFixture: View {
             workspaceBundleURL: { wrongCodexApp }
         )
         let wrongHelperPath = wrongCodexApp.path + "/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex"
+        let wrongHelperURL = URL(fileURLWithPath: wrongHelperPath)
+        try FileManager.default.createDirectory(at: wrongHelperURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data().write(to: wrongHelperURL)
         check(wrongResolved == nil && wrongVerifiedSet.isEmpty && wrongRegisteredSet.isEmpty,
               "[§13.2] Bundle named Codex.app with wrong CFBundleIdentifier must never enter verified set")
         check(!ProductionCodexStorageParser.isBundledCodexExecutablePath(wrongHelperPath, verifiedBundlePaths: wrongVerifiedSet)

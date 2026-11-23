@@ -121,6 +121,11 @@ enum SidebarNavigation {
 
     /// 过滤掉已隐藏的条目；常驻条目不受影响。
     static func visible(_ items: [SidebarNavItem], hidden: Set<String>) -> [SidebarNavItem] {
-        items.filter { !$0.isHideable || !hidden.contains($0.section.rawValue) }
+        items.filter { isVisible($0.section, hidden: hidden) }
+    }
+
+    static func isVisible(_ section: AppSection, hidden: Set<String>) -> Bool {
+        guard let item = all.first(where: { $0.section == section }) else { return true }
+        return !item.isHideable || !hidden.contains(section.rawValue)
     }
 }

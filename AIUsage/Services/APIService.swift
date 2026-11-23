@@ -100,13 +100,13 @@ class APIService {
     nonisolated static func isSameOrigin(_ lhs: URL, _ rhs: URL) -> Bool {
         guard let lScheme = lhs.scheme?.lowercased(),
               let rScheme = rhs.scheme?.lowercased(),
-              let lHost = lhs.host?.lowercased(),
-              let rHost = rhs.host?.lowercased() else {
+              let lHost = lhs.host, !lHost.isEmpty,
+              let rHost = rhs.host, !rHost.isEmpty else {
             return false
         }
         let lPort = lhs.port ?? (lScheme == "https" ? 443 : 80)
         let rPort = rhs.port ?? (rScheme == "https" ? 443 : 80)
-        return lScheme == rScheme && lHost == rHost && lPort == rPort
+        return lScheme == rScheme && lPort == rPort && AppSettings.remoteHostsMatch(lHost, rHost)
     }
 
     func updateBaseURL(_ url: String) {

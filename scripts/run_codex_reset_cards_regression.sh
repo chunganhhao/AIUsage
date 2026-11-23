@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-SCRATCH="${AIUSAGE_RESET_SWIFTPM_SCRATCH:-${TMPDIR:-/tmp}/aiusage-reset-cards-swiftpm}"
+SCRATCH="${AIUSAGE_RESET_SWIFTPM_SCRATCH:-${AIUSAGE_SWIFTPM_SCRATCH:-${TMPDIR:-/tmp}/aiusage-reset-cards-swiftpm}}"
 REGRESSION_DIR="$(mktemp -d "${TMPDIR:-/tmp}/aiusage-reset-regression.XXXXXX")"
 trap 'rm -rf "$REGRESSION_DIR"' EXIT
 swift build --build-system native --package-path "$PROJECT_DIR/QuotaBackend" --scratch-path "$SCRATCH" --target QuotaBackend >/dev/null
@@ -127,4 +127,5 @@ swiftc -parse-as-library -swift-version 5 \
   "${UI_SOURCES[@]}" \
   "$MAIN_SOURCE" \
   -o "$REGRESSION_DIR/reset-regression"
-"$REGRESSION_DIR/reset-regression" "$@"
+mkdir -p "$REGRESSION_DIR/fixtures"
+AIUSAGE_TEST_FIXTURE_ROOT="$REGRESSION_DIR/fixtures" "$REGRESSION_DIR/reset-regression" "$@"

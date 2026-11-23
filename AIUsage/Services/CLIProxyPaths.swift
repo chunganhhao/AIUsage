@@ -50,17 +50,23 @@ nonisolated struct CLIProxyPaths: Sendable {
         try versionDirectory(version).appendingPathComponent(binaryName, isDirectory: false)
     }
 
-    func prepare(fileManager: FileManager = .default) throws {
-        for directory in [
+    func prepare(
+        includeLegacyAuthDirectory: Bool = CLIProxyCapabilityMatrix.subscriptionsEnabledInThisBuild,
+        fileManager: FileManager = .default
+    ) throws {
+        var directories = [
             root,
             versionsDirectory,
-            authDirectory,
             isolatedAuthDirectory,
             runtimeWorkingDirectory,
             runtimeTempDirectory,
             pluginsDirectory,
             logsDirectory
-        ] {
+        ]
+        if includeLegacyAuthDirectory {
+            directories.insert(authDirectory, at: 2)
+        }
+        for directory in directories {
             try fileManager.createDirectory(at: directory, withIntermediateDirectories: true)
             try fileManager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: directory.path)
         }
