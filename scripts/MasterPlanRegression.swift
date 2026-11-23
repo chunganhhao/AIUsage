@@ -100,6 +100,37 @@ private actor Attempts {
             "https://[fe80:0:0:0:0:0:0:1%en0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
         )
         try check(ipv6ZoneMatch.port == 8443, "equivalent zone-scoped IPv6 HTTPS URL preserves custom port")
+        let ipv6EncodedZoneMatch = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%25en0]", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6EncodedZoneMatch.host == "https://fe80::1%en0" && ipv6EncodedZoneMatch.port == 8443,
+                  "RFC 6874 %25-encoded zone URL normalizes zone ID and preserves custom port")
+        let ipv6ReverseEncodedZone = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80:0:0:0:0:0:0:1%en0]/", savedHost: "https://fe80::1%25en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6ReverseEncodedZone.port == 8443,
+                  "saved RFC 6874 %25-encoded host matches unencoded expanded IPv6 zone and preserves custom port")
+        try check(AppSettingsAddressFixture.remoteHostsMatch("[fe80::1%25en0]", "fe80:0:0:0:0:0:0:1%en0"),
+                  "remoteHostsMatch treats RFC 6874 %25en0 and %en0 on equivalent IPv6 literals as equal")
+        let ipv6EncodedZoneCaseMismatch = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%25EN0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6EncodedZoneCaseMismatch.port == 443,
+                  "different-case RFC 6874 %25-encoded IPv6 zone ID treats endpoint as changed")
+        let ipv6EmptyEncodedZone = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80::1%25]/", savedHost: "https://fe80::1%25", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6EmptyEncodedZone.port == 443
+                    && !AppSettingsAddressFixture.remoteHostsMatch("fe80::1%25", "fe80::1%25"),
+                  "empty RFC 6874 %25 zone delimiter never matches")
+        try check(!AppSettingsAddressFixture.remoteHostsMatch("fe80::1%25%zz", "fe80::1%25%zz"),
+                  "malformed percent-encoded IPv6 zone ID never matches")
+        let ipv6HexPrefixZone = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
+            "https://[fe80:0:0:0:0:0:0:1%25de0]/", savedHost: "https://fe80::1%de0", savedPort: 8443, portInput: "8443"
+        )
+        try check(ipv6HexPrefixZone.port == 8443
+                    && AppSettingsAddressFixture.remoteHostsMatch("fe80::1%de0", "fe80:0:0:0:0:0:0:1%25de0"),
+                  "unencoded %de0 zone stays intact and matches RFC 6874 %25de0")
         let ipv6ZoneCaseCompressed = AppSettingsAddressFixture.resolveRemoteSettingsAddress(
             "https://[fe80::1%EN0]/", savedHost: "https://fe80::1%en0", savedPort: 8443, portInput: "8443"
         )

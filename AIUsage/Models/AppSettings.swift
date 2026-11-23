@@ -313,28 +313,49 @@ final class AppSettings: ObservableObject {
     }
 
     nonisolated static func remoteHostsMatch(_ lhs: String, _ rhs: String) -> Bool {
+        func decodeIPv6Zone(_ raw: Substring) -> String? {
+            raw.hasPrefix("25") ? String(raw.dropFirst(2)).removingPercentEncoding : String(raw)
+        }
         let left = lhs.hasPrefix("[") && lhs.hasSuffix("]") ? lhs.dropFirst().dropLast() : lhs[...]
         let right = rhs.hasPrefix("[") && rhs.hasSuffix("]") ? rhs.dropFirst().dropLast() : rhs[...]
         let lhsParts = left.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
         let rhsParts = right.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
-        let lhsZone = lhsParts.dropFirst().first
-        let rhsZone = rhsParts.dropFirst().first
-        guard lhsZone == rhsZone, lhsZone?.isEmpty != true else { return false }
         var lhsAddress = in6_addr()
         var rhsAddress = in6_addr()
         let lhsBase = String(lhsParts[0])
         let rhsBase = String(rhsParts[0])
         if lhsBase.withCString({ inet_pton(AF_INET6, $0, &lhsAddress) }) == 1,
            rhsBase.withCString({ inet_pton(AF_INET6, $0, &rhsAddress) }) == 1 {
+            if let lhsZone = lhsParts.dropFirst().first ?? (rhsParts.count > 1 ? ""[...] : nil),
+               let rhsZone = rhsParts.dropFirst().first ?? (lhsParts.count > 1 ? ""[...] : nil) {
+                guard let decodedLeft = decodeIPv6Zone(lhsZone),
+                      let decodedRight = decodeIPv6Zone(rhsZone),
+                      !decodedLeft.isEmpty,
+                      decodedLeft == decodedRight else {
+                    return false
+                }
+            }
             return withUnsafeBytes(of: lhsAddress) { lhsBytes in
                 withUnsafeBytes(of: rhsAddress) { rhsBytes in lhsBytes.elementsEqual(rhsBytes) }
             }
         }
-        return lhsZone == nil && lhsBase.caseInsensitiveCompare(rhsBase) == .orderedSame
+        return lhsParts.count == 1 && rhsParts.count == 1 && lhsBase.caseInsensitiveCompare(rhsBase) == .orderedSame
     }
 
     /// 把「地址」输入拆成主机与可选端口：`http://100.64.1.2:4318/`、`mini.tailnet.ts.net`、`[fd7a::1]:4318` 都能识别。
     static func parseRemoteAddress(_ raw: String) -> (host: String, port: Int?) {
+        func normalizeIPv6Zone(_ host: String) -> String {
+            let parts = host.split(separator: "%", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts[1].hasPrefix("25") else { return host }
+            var address = in6_addr()
+            let base = String(parts[0])
+            guard base.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1,
+                  let zone = String(parts[1].dropFirst(2)).removingPercentEncoding,
+                  !zone.isEmpty else {
+                return host
+            }
+            return "\(base)%\(zone)"
+        }
         var text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         if let schemeRange = text.range(of: "://") {
             text = String(text[schemeRange.upperBound...])
@@ -343,7 +364,7 @@ final class AppSettings: ObservableObject {
             text = String(text[..<slash])
         }
         if text.hasPrefix("[") {
-            let host = String(text.dropFirst().prefix { $0 != "]" })
+            let host = normalizeIPv6Zone(String(text.dropFirst().prefix { $0 != "]" }))
             let rest = text.drop { $0 != "]" }.dropFirst()
             let port = rest.hasPrefix(":") ? Int(rest.dropFirst()) : nil
             return (host, port)
@@ -351,7 +372,7 @@ final class AppSettings: ObservableObject {
         if text.filter({ $0 == ":" }).count == 1, let colon = text.firstIndex(of: ":") {
             return (String(text[..<colon]), Int(text[text.index(after: colon)...]))
         }
-        return (text, nil)
+        return (normalizeIPv6Zone(text), nil)
     }
 
     @Published var shareQuotaEnabled: Bool = UserDefaults.standard.bool(forKey: DefaultsKey.shareQuotaEnabled)
