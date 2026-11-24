@@ -10,6 +10,7 @@ struct ProviderAccountGroupSection: View {
 
     @EnvironmentObject var appState: AppState
     @EnvironmentObject var refreshCoordinator: ProviderRefreshCoordinator
+    @EnvironmentObject var activationManager: ProviderActivationManager
     @Environment(\.colorScheme) private var colorScheme
     @State private var isBatchManaging = false
     @State private var selectedForDeletion: Set<String> = []
@@ -61,7 +62,7 @@ struct ProviderAccountGroupSection: View {
                            group.accounts.count >= 2,
                            let bestNext = group.accounts.bestNextQuotaCandidate(
                             isActive: { entry in
-                                ProviderActivationManager.shared.isActiveAccount(entry)
+                                activationManager.isActiveAccount(entry)
                             }
                            ) {
                             pill(
@@ -76,6 +77,9 @@ struct ProviderAccountGroupSection: View {
 
                     HStack(spacing: 10) {
                         Button {
+                            if group.providerId == "antigravity" {
+                                activationManager.detectActiveAntigravityAccount()
+                            }
                             refreshCoordinator.refreshProvider(group.providerId)
                         } label: {
                             Label(

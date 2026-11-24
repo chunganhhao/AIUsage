@@ -974,6 +974,206 @@ private actor Attempts {
         try check(QuotaBurnRate.windowDuration(label: "Gemini · 5 giờ") == 5 * 3600, "Vietnamese 5h label resolves window duration")
         try check(QuotaBurnRate.windowDuration(label: "Gemini · Hàng tuần") == 7 * 86400, "Vietnamese weekly label resolves window duration")
         try check(QuotaBurnRate.windowDuration(label: "5GB RAM") == nil, "5GB does not match 5h burn-rate window")
+
+        let slow7dReset = parser.string(from: now.addingTimeInterval(3 * 86400))
+        let fast7dReset = parser.string(from: now.addingTimeInterval(4 * 86400))
+        let freshSlow = QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: now, isStale: false, now: now)
+        try check(freshSlow != nil && freshSlow?.isAtRisk == false && freshSlow?.exhaustionAfter == nil,
+                  "fresh active slow-burn snapshot stays steady without exhaustion")
+
+        let atCaptureFast = QuotaBurnRate.estimate(remainingPercent: 28.6, resetAt: fast7dReset, label: "Weekly", now: now.addingTimeInterval(-600))
+        let agedFast = QuotaBurnRate.estimate(remainingPercent: 28.6, resetAt: fast7dReset, label: "Weekly", fetchedAt: now.addingTimeInterval(-600), isStale: false, now: now)
+        try check(agedFast?.isAtRisk == true, "fresh active fast-burn snapshot remains at risk")
+        if let rawLeft = atCaptureFast?.exhaustionAfter, let agedLeft = agedFast?.exhaustionAfter {
+            try check(abs(agedLeft - max(0, rawLeft - 600)) < 1.0, "snapshot-aware exhaustion subtracts elapsed age since capture")
+        } else {
+            try check(false, "expected exhaustionAfter on fast burn snapshot")
+        }
+
+        try check(QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: now.addingTimeInterval(-3 * 86400), isStale: false, now: now) == nil,
+                  "dormant 3-day-old snapshot suppresses burn-rate prediction")
+        try check(QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: now.addingTimeInterval(-(30 * 60 + 1)), isStale: false, now: now) == nil,
+                  "30m + 1s old snapshot is stale and suppresses burn-rate prediction")
+        try check(QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: now.addingTimeInterval(-30 * 60), isStale: false, now: now) != nil,
+                  "exact 30m boundary snapshot remains eligible")
+        try check(QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: now, isStale: true, now: now) == nil,
+                  "explicit isStale=true suppresses burn-rate even at age 0")
+        try check(QuotaBurnRate.estimate(remainingPercent: 74, resetAt: slow7dReset, label: "Weekly", fetchedAt: nil, isStale: false, now: now) == nil,
+                  "missing fetchedAt suppresses burn-rate prediction")
+        try check(QuotaBurnRate.isSnapshotFresh(fetchedAt: now.addingTimeInterval(30), now: now) == true,
+                  "small +30s future clock skew tolerated")
+        try check(QuotaBurnRate.isSnapshotFresh(fetchedAt: now.addingTimeInterval(120), now: now) == false,
+                  "large +120s future clock skew rejected")
+        try check(QuotaBurnRate.estimate(remainingPercent: 20, resetAt: parser.string(from: now.addingTimeInterval(-10)), label: "5h Window", fetchedAt: now.addingTimeInterval(-300), isStale: false, now: now) == nil,
+                  "window expired at now suppresses prediction even if unexpired at fetchedAt")
+        try check(QuotaBurnRate.isSnapshotFresh(fetchedAt: now, now: now, maxAge: -1) == false
+                  && QuotaBurnRate.isSnapshotFresh(fetchedAt: now, now: now, maxAge: .nan) == false,
+                  "negative or NaN maxAge rejected")
+
+        let pastProjected = QuotaBurnRate.estimate(
+            remainingPercent: 5,
+            resetAt: parser.string(from: now.addingTimeInterval(4 * 3600 - 600)),
+            label: "5h Window",
+            fetchedAt: now.addingTimeInterval(-600),
+            isStale: false,
+            now: now
+        )
+        try check(pastProjected != nil && pastProjected?.isAtRisk == true && pastProjected?.exhaustionAfter == 0,
+                  "past-projected exhaustion within TTL clamps to 0.0 instead of positive minutes")
+
+        let subMinute = QuotaBurnRate.estimate(
+            remainingPercent: 5,
+            resetAt: parser.string(from: now.addingTimeInterval(4 * 3600 - 159)),
+            label: "5h Window",
+            fetchedAt: now.addingTimeInterval(-159),
+            isStale: false,
+            now: now
+        )
+        if let secs = subMinute?.exhaustionAfter {
+            try check(subMinute?.isAtRisk == true && secs > 0 && secs < 60,
+                      "positive sub-minute ETA remains strictly positive (0 < secs < 60)")
+        } else {
+            try check(false, "expected positive sub-minute exhaustionAfter")
+        }
+
+        let validTimestamps = [
+            "2023-11-14T22:13:20Z",
+            "2023-11-14T22:13:20.123456Z",
+            "2023-11-14T22:13:20+07:00",
+            "2023-11-14T22:13:20.5+07:00",
+            "2023-11-14T22:13:20-05:30",
+            "2023-11-14T22:13:20+0700",
+            "2023-11-14T22:13:20+07"
+        ]
+        for valid in validTimestamps {
+            try check(QuotaBurnRate.parseSnapshotTimestamp(valid) != nil,
+                      "strict snapshot timestamp accepts valid ISO8601 \(valid)")
+        }
+
+        let invalidTimestamps: [String?] = [
+            "2023-11-14T22:13:20Zjunk",
+            "2023-11-14T22:13:20.123Zjunk",
+            "2023-11-14T22:13:20+07:00junk",
+            "2023-11-14T22:13:20Z\n",
+            "2023-11-14T22:13:20Z ",
+            " 2023-11-14T22:13:20Z",
+            "2023-11-14T22:13:20+99:99",
+            "not-a-timestamp",
+            "",
+            nil
+        ]
+        for invalid in invalidTimestamps {
+            try check(QuotaBurnRate.parseSnapshotTimestamp(invalid) == nil,
+                      "strict snapshot timestamp rejects malformed/trailing junk \(String(describing: invalid))")
+        }
+
+        let probeNow = QuotaBurnRate.parseSnapshotTimestamp("2023-11-14T22:13:20Z")!
+        let probeReset = SharedFormatters.iso8601String(from: probeNow.addingTimeInterval(3 * 3600))
+        try check(
+            QuotaBurnRate.estimate(
+                remainingPercent: 74,
+                resetAt: probeReset,
+                label: "5h Window",
+                fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2023-11-14T22:13:20Z"),
+                now: probeNow
+            ) != nil,
+            "fixed-clock probe accepts exact ISO8601 timestamp"
+        )
+        try check(
+            QuotaBurnRate.estimate(
+                remainingPercent: 74,
+                resetAt: probeReset,
+                label: "5h Window",
+                fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2023-11-14T22:13:20Zjunk"),
+                now: probeNow
+            ) == nil,
+            "fixed-clock probe suppresses prediction when timestamp has trailing junk"
+        )
+
+        let rolloverClock = QuotaBurnRate.parseSnapshotTimestamp("2026-12-01T00:00:00Z")!
+        let rolloverReset = "2026-12-01T03:00:00Z"
+        try check(
+            QuotaBurnRate.estimate(
+                remainingPercent: 74,
+                resetAt: rolloverReset,
+                label: "5h Window",
+                fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2026-12-01T00:00:00Z"),
+                now: rolloverClock
+            ) != nil,
+            "valid 2026-12-01T00:00:00Z produces burn-rate estimate at fixed clock"
+        )
+        try check(
+            QuotaBurnRate.parseSnapshotTimestamp("2026-11-31T00:00:00Z") == nil
+                && QuotaBurnRate.estimate(
+                    remainingPercent: 74,
+                    resetAt: rolloverReset,
+                    label: "5h Window",
+                    fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2026-11-31T00:00:00Z"),
+                    now: rolloverClock
+                ) == nil,
+            "nonexistent 2026-11-31T00:00:00Z is rejected instead of rolling over to 2026-12-01"
+        )
+
+        let nonLeapRolloverClock = QuotaBurnRate.parseSnapshotTimestamp("2026-03-01T00:00:00Z")!
+        try check(
+            QuotaBurnRate.parseSnapshotTimestamp("2026-02-29T00:00:00Z") == nil
+                && QuotaBurnRate.estimate(
+                    remainingPercent: 74,
+                    resetAt: "2026-03-01T03:00:00Z",
+                    label: "5h Window",
+                    fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2026-02-29T00:00:00Z"),
+                    now: nonLeapRolloverClock
+                ) == nil,
+            "non-leap 2026-02-29T00:00:00Z is rejected instead of rolling over to 2026-03-01"
+        )
+        try check(QuotaBurnRate.parseSnapshotTimestamp("2100-02-29T00:00:00Z") == nil,
+                  "century non-leap 2100-02-29T00:00:00Z is rejected")
+
+        let leapClock = QuotaBurnRate.parseSnapshotTimestamp("2028-02-29T00:00:00Z")
+        try check(
+            leapClock != nil
+                && QuotaBurnRate.estimate(
+                    remainingPercent: 74,
+                    resetAt: "2028-02-29T03:00:00Z",
+                    label: "5h Window",
+                    fetchedAt: leapClock,
+                    now: leapClock!
+                ) != nil,
+            "valid leap-year 2028-02-29T00:00:00Z parses and produces estimate"
+        )
+        try check(QuotaBurnRate.parseSnapshotTimestamp("2000-02-29T00:00:00Z") != nil,
+                  "quadricentennial leap-year 2000-02-29T00:00:00Z parses")
+
+        let plus07Midnight = QuotaBurnRate.parseSnapshotTimestamp("2026-12-01T01:30:00+07:00")
+        let utcPrevDay = QuotaBurnRate.parseSnapshotTimestamp("2026-11-30T18:30:00Z")
+        try check(
+            plus07Midnight != nil && plus07Midnight == utcPrevDay
+                && QuotaBurnRate.estimate(
+                    remainingPercent: 74,
+                    resetAt: "2026-11-30T21:30:00Z",
+                    label: "5h Window",
+                    fetchedAt: plus07Midnight,
+                    now: utcPrevDay!
+                ) != nil,
+            "midnight-crossing +07:00 timestamp preserves raw calendar day and matches UTC instant"
+        )
+        try check(
+            QuotaBurnRate.parseSnapshotTimestamp("2026-11-30T23:30:00-07:00") == QuotaBurnRate.parseSnapshotTimestamp("2026-12-01T06:30:00Z")
+                && QuotaBurnRate.parseSnapshotTimestamp("2028-02-29T00:30:00+07:00") == QuotaBurnRate.parseSnapshotTimestamp("2028-02-28T17:30:00Z")
+                && QuotaBurnRate.parseSnapshotTimestamp("2026-11-31T01:30:00+07:00") == nil,
+            "midnight-crossing negative/leap offsets preserve exact instant while rejecting nonexistent offset date"
+        )
+        for badClock in [
+            "2026-12-01T24:00:00Z",
+            "2026-12-01T23:60:00Z",
+            "2026-12-01T23:59:60Z",
+            "0000-01-01T00:00:00Z",
+            "2026-00-10T00:00:00Z",
+            "2026-11-00T00:00:00Z"
+        ] {
+            try check(QuotaBurnRate.parseSnapshotTimestamp(badClock) == nil,
+                      "out-of-range calendar/clock component rejected: \(badClock)")
+        }
     }
     static func warmup(_ home: URL) async throws {
         try check(WarmupSettings().autoChainReset == false, "WarmupSettings.autoChainReset defaults to false")
@@ -1688,6 +1888,28 @@ private actor Attempts {
         )
         let viStrings = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Resources/vi.lproj/Localizable.strings"), encoding: .utf8)
         try check(viStrings.contains("\"Auto-sync models & prices\" ="), "vi Localizable.strings includes v0.16.1 keys")
+        try check(viStrings.contains("\"Pace: steady\" =") && viStrings.contains("\"Active account in Antigravity IDE\" ="),
+                  "vi Localizable.strings includes active Antigravity and burn-rate copy")
+        try check(viStrings.contains("\"past projected limit\" ="),
+                  "vi Localizable.strings includes past projected limit copy")
+
+        let activationManagerSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/ViewModels/ProviderActivationManager.swift"), encoding: .utf8)
+        try check(activationManagerSrc.contains(#"static let activatableProviders: Set<String> = ["codex", "gemini"]"#),
+                  "ProviderActivationManager keeps antigravity out of activatableProviders (no 1-click IDE switch)")
+        try check(activationManagerSrc.contains(#"static let activeAccountDetectionProviders: Set<String> = ["codex", "gemini", "antigravity"]"#),
+                  "ProviderActivationManager allows active-account display for antigravity")
+        let providerCardSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Views/ProviderCard.swift"), encoding: .utf8)
+        let menuRowSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Views/MenuBarAccountRow.swift"), encoding: .utf8)
+        let groupSectionSrc = try String(contentsOf: repoRoot.appendingPathComponent("AIUsage/Views/ProviderAccountGroupSection.swift"), encoding: .utf8)
+        try check(providerCardSrc.contains("activationManager.canDisplayActiveAccount(provider.providerId)"),
+                  "ProviderCard gates active indicator on canDisplayActiveAccount rather than canActivateProvider")
+        try check(menuRowSrc.contains("activationManager.canDisplayActiveAccount(providerId)"),
+                  "MenuBarAccountRow gates active badge on canDisplayActiveAccount rather than canActivateProvider")
+        try check(groupSectionSrc.contains("if group.providerId == \"antigravity\"")
+                  && groupSectionSrc.contains("activationManager.detectActiveAntigravityAccount()")
+                  && !groupSectionSrc.contains("detectActiveCodexAccount")
+                  && !groupSectionSrc.contains("detectActiveGeminiAccount"),
+                  "ProviderAccountGroupSection Refresh App only re-detects antigravity (no Codex proxy active overwrite)")
 
         // Verify legacy v1 call archive fixtures still migrate cleanly when written to call-analytics-archive-v1.json.
         let fm = FileManager.default

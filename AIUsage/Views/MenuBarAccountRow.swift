@@ -113,10 +113,32 @@ struct MenuBarAccountRow: View {
         .onTapGesture { if canActivate { performActivation() } }
     }
 
+    private var snapshotFetchedAt: Date? {
+        QuotaBurnRate.parseSnapshotTimestamp(entry.liveProvider?.fetchedAt)
+    }
+
+    private var isDormantCachedSnapshot: Bool {
+        guard let provider = entry.liveProvider else { return true }
+        if provider.status == .error || refreshCoordinator.lastCheckError(for: provider) != nil {
+            return true
+        }
+        guard provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex" else {
+            return false
+        }
+        if settings.backendMode == "local", !isActive {
+            return true
+        }
+        return false
+    }
+
     private var accountContent: some View {
         VStack(alignment: .leading, spacing: 4) {
             accountHeader
-            BurnRateBadge(windows: windows)
+            BurnRateBadge(
+                windows: windows,
+                fetchedAt: snapshotFetchedAt,
+                isStale: isDormantCachedSnapshot
+            )
             if !isCostProvider && !windows.isEmpty { quotaWindowBars }
         }
     }
@@ -213,7 +235,7 @@ struct MenuBarAccountRow: View {
                     .foregroundStyle(MenuBarHelpers.quotaColor(percent))
             }
 
-            if isActive && activationManager.canActivateProvider(providerId) {
+            if isActive && activationManager.canDisplayActiveAccount(providerId) {
                 activeBadge
             } else if canActivate {
                 switchButton
@@ -281,7 +303,7 @@ struct MenuBarAccountRow: View {
     private var activeBadge: some View {
         HStack(spacing: 3) {
             Circle().fill(.green).frame(width: 6, height: 6)
-            Text(L("Active", "活跃"))
+            Text(L("Active", "活跃", "Đang dùng"))
                 .font(.system(size: 9, weight: .semibold))
                 .foregroundStyle(.green)
         }
@@ -289,6 +311,11 @@ struct MenuBarAccountRow: View {
         .padding(.vertical, 3)
         .background(Color.green.opacity(0.12))
         .clipShape(Capsule())
+        .help(
+            providerId == "antigravity"
+                ? L("Active account in Antigravity IDE", "Antigravity IDE 当前活跃账号", "Tài khoản đang bật trên Antigravity IDE")
+                : L("Active CLI account", "当前 CLI 账号", "Tài khoản CLI đang dùng")
+        )
     }
 
     private var switchButton: some View {

@@ -57,13 +57,16 @@ struct AccountCheckError: Equatable {
 
 @MainActor final class ProviderActivationManager: ObservableObject {
     static let shared = ProviderActivationManager()
+    static let activeAccountDetectionProviders: Set<String> = ["codex", "gemini", "antigravity"]
     enum Result { case success(String), failure(String) }
     var activationResult: Result?
+    var activeAccountIds: Set<String> = []
     static var remoteViewOnlyLabel: String { L("View only", "只读") }
     func canActivateProvider(_ id: String) -> Bool { false }
+    func canDisplayActiveAccount(_ id: String) -> Bool { Self.activeAccountDetectionProviders.contains(id) }
     func canSwitch(to entry: ProviderAccountEntry) -> Bool { false }
     func isRemoteViewOnly(_ entry: ProviderAccountEntry) -> Bool { entry.id == "fixture-remote" }
-    func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool { false }
+    func isActiveAccount(_ entry: ProviderAccountEntry) -> Bool { activeAccountIds.contains(entry.id) }
     func deactivateAccount(entry: ProviderAccountEntry) { preconditionFailure("Fixture activation disabled") }
     func activateAccount(entry: ProviderAccountEntry) async throws -> Bool { preconditionFailure("Fixture activation disabled") }
 }

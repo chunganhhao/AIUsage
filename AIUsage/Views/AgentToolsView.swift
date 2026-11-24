@@ -4,15 +4,47 @@ import QuotaBackend
 
 struct BurnRateBadge: View {
     let windows: [QuotaWindow]
+    var fetchedAt: Date? = nil
+    var isStale: Bool = false
+    var now: Date? = nil
+
     private var estimate: QuotaBurnRate? {
-        windows.compactMap { QuotaBurnRate.estimate(remainingPercent: $0.remainingPercent, resetAt: $0.resetAt, label: $0.label) }
-            .max { $0.multiplier < $1.multiplier }
+        let referenceNow = now ?? Date()
+        return windows.compactMap {
+            QuotaBurnRate.estimate(
+                remainingPercent: $0.remainingPercent,
+                resetAt: $0.resetAt,
+                label: $0.label,
+                fetchedAt: fetchedAt,
+                isStale: isStale,
+                now: referenceNow
+            )
+        }
+        .max { $0.multiplier < $1.multiplier }
     }
+    private func badgeText(for estimate: QuotaBurnRate) -> String {
+        guard let exhaustionAfter = estimate.exhaustionAfter else {
+            return L("Pace: steady", "消耗平稳", "Tốc độ: ổn định")
+        }
+        let pace = String(format: "%.1f", estimate.multiplier)
+        if exhaustionAfter <= 0 {
+            return "🔥 \(pace)× · \(L("past projected limit", "已过预计耗尽点", "đã qua mốc dự báo"))"
+        }
+        return "🔥 \(pace)× · ~\(max(1, Int(exhaustionAfter / 60))) \(L("min left", "分钟耗尽", "phút nữa hết"))"
+    }
+
     var body: some View {
         if let estimate {
-            Text(estimate.exhaustionAfter.map { "🔥 \(String(format: "%.1f", estimate.multiplier))× · ~\(max(1, Int($0 / 60))) min left" } ?? "🟢 Steady")
-                .font(.caption2).foregroundStyle(estimate.isAtRisk ? .orange : .secondary)
-                .help("Window-average estimate assuming unchanged demand, not a guarantee. Unknown or expired windows are not predicted.")
+            Text(badgeText(for: estimate))
+            .font(.caption2)
+            .foregroundStyle(estimate.isAtRisk ? .orange : .secondary)
+            .help(
+                L(
+                    "Window-average quota burn estimate assuming unchanged demand, not a guarantee. Stale, dormant, unknown, or expired windows are not predicted.",
+                    "基于当前窗口平均消耗速度估算，假设使用强度不变，不构成保证。陈旧、休眠、未知或已过期的窗口不参与预测。",
+                    "Ước tính tốc độ tiêu thụ quota trung bình theo cửa sổ hiện tại (giả sử mức sử dụng không đổi, không đảm bảo và không phải trạng thái tài khoản đang bật). Các ảnh chụp cũ, ngủ đông, không rõ hoặc đã qua đặt lại sẽ không hiển thị."
+                )
+            )
         }
     }
 }

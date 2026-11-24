@@ -21,6 +21,7 @@ final class ProviderActivationManager: ObservableObject {
     static let shared = ProviderActivationManager()
 
     static let activatableProviders: Set<String> = ["codex", "gemini"]
+    static let activeAccountDetectionProviders: Set<String> = ["codex", "gemini", "antigravity"]
 
     @Published var activeProviderAccountIds: [String: String] = {
         guard let data = UserDefaults.standard.data(forKey: DefaultsKey.activeProviderAccountIds) else {
@@ -112,6 +113,10 @@ final class ProviderActivationManager: ObservableObject {
 
     func canActivateProvider(_ providerId: String) -> Bool {
         Self.activatableProviders.contains(providerId)
+    }
+
+    func canDisplayActiveAccount(_ providerId: String) -> Bool {
+        Self.activeAccountDetectionProviders.contains(providerId)
     }
 
     static var remoteViewOnlyLabel: String { L("From remote · view only", "来自远程 · 仅查看") }

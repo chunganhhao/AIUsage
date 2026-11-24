@@ -50,6 +50,10 @@ struct ProviderCard: View {
         }
         return refreshCoordinator.accountRefreshDate(for: provider)
     }
+
+    private var snapshotFetchedAt: Date? {
+        QuotaBurnRate.parseSnapshotTimestamp(provider.fetchedAt)
+    }
     
     var body: some View {
         VStack(alignment: .leading, spacing: 9) {
@@ -61,11 +65,8 @@ struct ProviderCard: View {
                         .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
 
-                    if isActiveProviderAccount && activationManager.canActivateProvider(provider.providerId) {
-                        Circle()
-                            .fill(Color.green)
-                            .frame(width: 6, height: 6)
-                            .help(L("Active CLI account", "当前 CLI 账号"))
+                    if showsActiveAccountIndicator {
+                        activeAccountBadge
                     }
 
                     if isRemoteViewOnly {
@@ -103,7 +104,11 @@ struct ProviderCard: View {
                 }
 
                 EnvironmentOverrideBanner(provider: provider.providerId)
-                BurnRateBadge(windows: provider.windows)
+                BurnRateBadge(
+                    windows: provider.windows,
+                    fetchedAt: snapshotFetchedAt,
+                    isStale: isDormantCachedSnapshot
+                )
                 if useMultiWindowLayout {
                     MultiWindowQuotaView(
                         windows: provider.windows,
@@ -224,6 +229,14 @@ struct ProviderCard: View {
                         Label(L("Activate", "激活"), systemImage: "bolt.fill")
                     }
                 }
+                Divider()
+            } else if showsActiveAccountIndicator {
+                Label(
+                    provider.baseProviderId == "antigravity"
+                        ? L("IDE Active", "当前生效", "Đang bật trên IDE")
+                        : L("Active Account", "当前账号", "Tài khoản đang dùng"),
+                    systemImage: "checkmark.circle.fill"
+                )
                 Divider()
             }
 
@@ -473,6 +486,49 @@ struct ProviderCard: View {
         return activationManager.isActiveAccount(entry)
     }
 
+    private var showsActiveAccountIndicator: Bool {
+        isActiveProviderAccount && activationManager.canDisplayActiveAccount(provider.providerId)
+    }
+
+    private var isDormantCachedSnapshot: Bool {
+        if provider.status == .error || refreshCoordinator.lastCheckError(for: provider) != nil {
+            return true
+        }
+        guard provider.baseProviderId == "antigravity" || provider.baseProviderId == "codex" else {
+            return false
+        }
+        if settings.backendMode == "local", accountEntry != nil, !isActiveProviderAccount {
+            return true
+        }
+        return false
+    }
+
+    private var activeAccountBadge: some View {
+        HStack(spacing: 4) {
+            Circle()
+                .fill(Color.green)
+                .frame(width: 6, height: 6)
+            Text(L("Active", "当前", "Đang dùng"))
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(.green)
+                .lineLimit(1)
+                .fixedSize(horizontal: true, vertical: false)
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 2.5)
+        .background(Color.green.opacity(colorScheme == .dark ? 0.18 : 0.12), in: Capsule())
+        .help(
+            provider.baseProviderId == "antigravity"
+                ? L("Active account in Antigravity IDE", "Antigravity IDE 当前活跃账号", "Tài khoản đang bật trên Antigravity IDE")
+                : L("Active CLI account", "当前 CLI 账号", "Tài khoản CLI đang dùng")
+        )
+        .accessibilityLabel(
+            provider.baseProviderId == "antigravity"
+                ? L("IDE Active", "当前生效", "Đang bật trên IDE")
+                : L("Active CLI account", "当前 CLI 账号", "Tài khoản CLI đang dùng")
+        )
+    }
+
     private var canActivateCodex: Bool { canActivateProvider }
     private var isCodexActiveAccount: Bool { isActiveProviderAccount }
 
@@ -533,6 +589,9 @@ struct ProviderCard: View {
     private var cardBorderColor: Color {
         if isHovered {
             return accentColor.opacity(colorScheme == .dark ? 0.55 : 0.32)
+        }
+        if showsActiveAccountIndicator {
+            return Color.green.opacity(colorScheme == .dark ? 0.42 : 0.30)
         }
         return AppStroke.card(colorScheme)
     }

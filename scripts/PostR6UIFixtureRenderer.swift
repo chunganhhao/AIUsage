@@ -1,4 +1,5 @@
 import AppKit
+import PDFKit
 import SwiftUI
 @testable import QuotaBackend
 
@@ -271,16 +272,380 @@ struct PostR6UIFixtureRenderer {
         let pngURL = outputDir.appendingPathComponent("post-r6-provider-cards-en-light.png")
         let size = try await renderOffscreen(rootView, scheme: .light, width: 440, to: pngURL)
         try uiCheck(size.height > 250, "Rendered real ProviderCard UI stack height=\(size.height)")
+
+        // 4. Antigravity active badge vs dormant BurnRateBadge suppression (compiled ProviderCard + MenuBarAccountRow in VI)
+        fixtureLanguage = "vi"
+        defer {
+            fixtureLanguage = "en"
+            activation.activeAccountIds.removeAll()
+        }
+        let agyActiveSlow = makeCard(
+            id: "antigravity:cred:activeSlow",
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: now,
+            windows: [
+                .init(label: "Claude + GPT · Hàng tuần", remainingPercent: 74, usedPercent: nil, value: "74%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(3 * 86400))),
+                .init(label: "Gemini · 5 giờ", remainingPercent: 95, usedPercent: nil, value: "95%", note: "", resetAt: future5hIso)
+            ]
+        )
+        let agyActiveFast = makeCard(
+            id: "antigravity:cred:activeFast",
+            providerId: "antigravity",
+            label: "fast-active@example.invalid",
+            remaining: 28,
+            fetchedAt: now,
+            windows: [
+                .init(label: "Claude + GPT · Hàng tuần", remainingPercent: 28.6, usedPercent: nil, value: "28.6%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4.5 * 86400))),
+                .init(label: "Gemini · 5 giờ", remainingPercent: 95.6, usedPercent: nil, value: "95.6%", note: "", resetAt: future5hIso)
+            ]
+        )
+        let agyActiveStale = makeCard(
+            id: "antigravity:cred:activeStale",
+            providerId: "antigravity",
+            label: "stale-active@example.invalid",
+            remaining: 74,
+            fetchedAt: now.addingTimeInterval(-3600),
+            windows: agyActiveSlow.windows
+        )
+        let agyDormantOld = makeCard(
+            id: "antigravity:cred:dormantOld",
+            providerId: "antigravity",
+            label: "dormant@example.invalid",
+            remaining: 66.6,
+            fetchedAt: now.addingTimeInterval(-3 * 86400),
+            windows: [
+                .init(label: "Claude + GPT · Hàng tuần", remainingPercent: 100, usedPercent: nil, value: "100%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4 * 86400))),
+                .init(label: "Gemini · Hàng tuần", remainingPercent: 74.2, usedPercent: nil, value: "74.2%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(3.8 * 86400)))
+            ]
+        )
+        let agyDormantRecent = makeCard(
+            id: "antigravity:cred:dormantRecent",
+            providerId: "antigravity",
+            label: "dormant-recent@example.invalid",
+            remaining: 74,
+            fetchedAt: now.addingTimeInterval(-300),
+            windows: agyActiveSlow.windows
+        )
+
+        func agyEntry(_ card: ProviderData) -> ProviderAccountEntry {
+            ProviderAccountEntry(
+                id: card.id,
+                providerId: "antigravity",
+                providerTitle: "Antigravity",
+                providerSubtitle: nil,
+                liveProvider: card,
+                storedAccount: StoredProviderAccount(
+                    id: card.id,
+                    providerId: "antigravity",
+                    email: card.accountLabel ?? card.label,
+                    displayName: nil,
+                    note: nil,
+                    accountId: card.accountId,
+                    providerResultId: card.id,
+                    credentialId: card.id,
+                    createdAt: SharedFormatters.iso8601String(from: now),
+                    lastSeenAt: card.fetchedAt,
+                    sourceFilePath: "/tmp/fixture/\(card.id).json"
+                )
+            )
+        }
+
+        let activeSlowEntry = agyEntry(agyActiveSlow)
+        let activeFastEntry = agyEntry(agyActiveFast)
+        let activeStaleEntry = agyEntry(agyActiveStale)
+        let dormantOldEntry = agyEntry(agyDormantOld)
+        let dormantRecentEntry = agyEntry(agyDormantRecent)
+        activation.activeAccountIds = [activeSlowEntry.id, activeFastEntry.id, activeStaleEntry.id]
+
+        @MainActor func renderCardText(_ entry: ProviderAccountEntry) async throws -> String {
+            let view = ProviderCard(
+                provider: entry.liveProvider!,
+                titleOverride: entry.cardTitle,
+                footerAccountLabelOverride: entry.footerAccountLabel,
+                accountEntry: entry
+            )
+            .frame(width: 360)
+            .environmentObject(appState)
+            .environmentObject(renderCoordinator)
+            .environmentObject(activation)
+            .environmentObject(settings)
+            return try await extractRenderedText(view, scheme: .dark, width: 360)
+        }
+
+        let activeSlowText = try await renderCardText(activeSlowEntry)
+        try uiCheck(activeSlowText.contains("Đang dùng"), "active slow Antigravity ProviderCard renders 'Đang dùng' badge: \(activeSlowText)")
+        try uiCheck(activeSlowText.contains("Tốc độ: ổn định") && !activeSlowText.contains("Steady"), "active slow Antigravity ProviderCard renders localized 'Tốc độ: ổn định'")
+
+        let activeFastText = try await renderCardText(activeFastEntry)
+        try uiCheck(activeFastText.contains("Đang dùng"), "active fast Antigravity ProviderCard renders 'Đang dùng' badge")
+        try uiCheck(activeFastText.contains("🔥") && activeFastText.contains("phút nữa hết") && !activeFastText.contains("ổn định"),
+                    "active fast Antigravity ProviderCard renders localized burn alert instead of steady")
+
+        let activeStaleText = try await renderCardText(activeStaleEntry)
+        try uiCheck(activeStaleText.contains("Đang dùng"), "stale active Antigravity ProviderCard still shows 'Đang dùng'")
+        try uiCheck(!activeStaleText.contains("ổn định") && !activeStaleText.contains("Steady") && !activeStaleText.contains("🔥"),
+                    "stale (>30m) active Antigravity ProviderCard suppresses BurnRateBadge")
+
+        for (name, dormantEntry) in [("3d-old dormant", dormantOldEntry), ("5m-recent dormant", dormantRecentEntry)] {
+            let dormantText = try await renderCardText(dormantEntry)
+            try uiCheck(!dormantText.contains("Đang dùng"), "\(name) Antigravity ProviderCard omits 'Đang dùng'")
+            try uiCheck(!dormantText.contains("ổn định") && !dormantText.contains("Steady") && !dormantText.contains("🔥") && !dormantText.contains("phút nữa hết"),
+                        "\(name) Antigravity ProviderCard suppresses BurnRateBadge: \(dormantText)")
+        }
+
+        @MainActor func renderMenuRowText(_ entry: ProviderAccountEntry) async throws -> String {
+            let view = MenuBarAccountRow(
+                entry: entry,
+                providerId: "antigravity",
+                accentColor: .cyan,
+                codexProxyActive: false,
+                codexGlobalProxyManaged: false,
+                activationMessage: .constant(nil),
+                activationSuccess: .constant(false)
+            )
+            .frame(width: 400)
+            .environmentObject(appState)
+            .environmentObject(renderCoordinator)
+            .environmentObject(activation)
+            return try await extractRenderedText(view, scheme: .dark, width: 400)
+        }
+
+        let activeRowText = try await renderMenuRowText(activeSlowEntry)
+        try uiCheck(activeRowText.contains("Đang dùng") && !activeRowText.contains("Switch") && activeRowText.contains("Tốc độ: ổn định"),
+                    "active Antigravity MenuBarAccountRow shows 'Đang dùng' + fresh pace without 'Switch': \(activeRowText)")
+
+        let dormantRowText = try await renderMenuRowText(dormantOldEntry)
+        try uiCheck(!dormantRowText.contains("Đang dùng") && !dormantRowText.contains("Switch") && !dormantRowText.contains("ổn định") && !dormantRowText.contains("Steady") && !dormantRowText.contains("🔥"),
+                    "dormant Antigravity MenuBarAccountRow omits 'Đang dùng', 'Switch', and BurnRateBadge: \(dormantRowText)")
+
+        // 5. Codex §5.1–§5.3 regressions: missing/malformed fetchedAt ignores coordinator refresh history,
+        // past-projected ETA omits '~1 min left', and Codex proxy takeover hides Active + BurnRateBadge.
+        renderCoordinator.markAccountRefreshed(agyActiveSlow, at: now)
+        let agyActiveMissingTs = makeCard(
+            id: agyActiveSlow.id,
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: nil,
+            windows: agyActiveSlow.windows
+        )
+        let agyActiveMalformedTs = makeCard(
+            id: agyActiveSlow.id,
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: nil,
+            rawFetchedAt: "not-a-timestamp",
+            windows: agyActiveSlow.windows
+        )
+        let agyActiveTrailingJunkTs = makeCard(
+            id: agyActiveSlow.id,
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: nil,
+            rawFetchedAt: SharedFormatters.iso8601String(from: now) + "junk",
+            windows: agyActiveSlow.windows
+        )
+        let agyActiveInvalidCalendarTs = makeCard(
+            id: agyActiveSlow.id,
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: nil,
+            rawFetchedAt: "2026-11-31T00:00:00Z",
+            windows: agyActiveSlow.windows
+        )
+        try uiCheck(renderCoordinator.accountRefreshDate(for: agyActiveMissingTs) != nil,
+                    "precondition: coordinator history fallback is populated for missing-timestamp card")
+        for (tsKind, card) in [
+            ("missing fetchedAt", agyActiveMissingTs),
+            ("malformed fetchedAt", agyActiveMalformedTs),
+            ("trailing-junk fetchedAt", agyActiveTrailingJunkTs),
+            ("invalid-calendar fetchedAt", agyActiveInvalidCalendarTs)
+        ] {
+            let entry = agyEntry(card)
+            let cardText = try await renderCardText(entry)
+            try uiCheck(cardText.contains("Đang dùng"), "\(tsKind) active ProviderCard keeps 'Đang dùng'")
+            try uiCheck(!cardText.contains("ổn định") && !cardText.contains("Steady") && !cardText.contains("🔥") && !cardText.contains("phút nữa hết") && !cardText.contains("đã qua mốc dự báo"),
+                        "\(tsKind) ProviderCard suppresses BurnRateBadge despite coordinator refresh history: \(cardText)")
+            let rowText = try await renderMenuRowText(entry)
+            try uiCheck(rowText.contains("Đang dùng"), "\(tsKind) active MenuBarAccountRow keeps 'Đang dùng'")
+            try uiCheck(!rowText.contains("ổn định") && !rowText.contains("Steady") && !rowText.contains("🔥") && !rowText.contains("phút nữa hết") && !rowText.contains("đã qua mốc dự báo"),
+                        "\(tsKind) MenuBarAccountRow suppresses BurnRateBadge despite coordinator refresh history: \(rowText)")
+        }
+
+        let offsetFormatter = ISO8601DateFormatter()
+        offsetFormatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        offsetFormatter.timeZone = TimeZone(secondsFromGMT: 7 * 3600)
+        let agyActiveFractionalOffsetTs = makeCard(
+            id: agyActiveSlow.id,
+            providerId: "antigravity",
+            label: "active@example.invalid",
+            remaining: 74,
+            fetchedAt: nil,
+            rawFetchedAt: offsetFormatter.string(from: now),
+            windows: agyActiveSlow.windows
+        )
+        let fractionalOffsetEntry = agyEntry(agyActiveFractionalOffsetTs)
+        let fractionalCardText = try await renderCardText(fractionalOffsetEntry)
+        try uiCheck(fractionalCardText.contains("Đang dùng") && fractionalCardText.contains("Tốc độ: ổn định"),
+                    "fractional +07:00 ISO8601 timestamp renders 'Đang dùng' + 'Tốc độ: ổn định' on ProviderCard: \(fractionalCardText)")
+        let fractionalRowText = try await renderMenuRowText(fractionalOffsetEntry)
+        try uiCheck(fractionalRowText.contains("Đang dùng") && fractionalRowText.contains("Tốc độ: ổn định"),
+                    "fractional +07:00 ISO8601 timestamp renders 'Đang dùng' + 'Tốc độ: ổn định' on MenuBarAccountRow: \(fractionalRowText)")
+
+        let rolloverFixedClock = QuotaBurnRate.parseSnapshotTimestamp("2026-12-01T00:00:00Z")!
+        let rolloverWindows: [QuotaWindow] = [
+            .init(label: "Gemini · 5 giờ", remainingPercent: 74, usedPercent: nil, value: "74%", note: "", resetAt: "2026-12-01T03:00:00Z")
+        ]
+        let looseRolloverBadge = BurnRateBadge(
+            windows: rolloverWindows,
+            fetchedAt: SharedFormatters.parseISO8601("2026-11-31T00:00:00Z"),
+            isStale: false,
+            now: rolloverFixedClock
+        )
+        let strictRolloverBadge = BurnRateBadge(
+            windows: rolloverWindows,
+            fetchedAt: QuotaBurnRate.parseSnapshotTimestamp("2026-11-31T00:00:00Z"),
+            isStale: false,
+            now: rolloverFixedClock
+        )
+        let looseRolloverText = try await extractRenderedText(looseRolloverBadge, scheme: .dark, width: 280)
+        try uiCheck(looseRolloverText.contains("Tốc độ: ổn định"),
+                    "precondition: Foundation loose parse would roll 2026-11-31 to 2026-12-01 and render BurnRateBadge: \(looseRolloverText)")
+        let strictRolloverText = try await extractRenderedText(strictRolloverBadge, scheme: .dark, width: 280)
+        try uiCheck(!strictRolloverText.contains("ổn định") && !strictRolloverText.contains("Steady") && !strictRolloverText.contains("🔥"),
+                    "strict parseSnapshotTimestamp suppresses BurnRateBadge on 2026-11-31 at 2026-12-01 clock: \(strictRolloverText)")
+
+        let agyActivePastEta = makeCard(
+            id: "antigravity:cred:activePastEta",
+            providerId: "antigravity",
+            label: "past-eta@example.invalid",
+            remaining: 5,
+            fetchedAt: now.addingTimeInterval(-600),
+            windows: [
+                .init(label: "Gemini · 5 giờ", remainingPercent: 5, usedPercent: nil, value: "5%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4 * 3600 - 600)))
+            ]
+        )
+        let agyActiveSubMinuteEta = makeCard(
+            id: "antigravity:cred:activeSubMinuteEta",
+            providerId: "antigravity",
+            label: "subminute-eta@example.invalid",
+            remaining: 5,
+            fetchedAt: now.addingTimeInterval(-159),
+            windows: [
+                .init(label: "Gemini · 5 giờ", remainingPercent: 5, usedPercent: nil, value: "5%", note: "", resetAt: SharedFormatters.iso8601String(from: now.addingTimeInterval(4 * 3600 - 159)))
+            ]
+        )
+        let activePastEtaEntry = agyEntry(agyActivePastEta)
+        let activeSubMinuteEntry = agyEntry(agyActiveSubMinuteEta)
+        activation.activeAccountIds.insert(activePastEtaEntry.id)
+        activation.activeAccountIds.insert(activeSubMinuteEntry.id)
+
+        let pastEtaText = try await renderCardText(activePastEtaEntry)
+        try uiCheck(pastEtaText.contains("🔥") && pastEtaText.contains("đã qua mốc dự báo") && !pastEtaText.contains("phút nữa hết") && !pastEtaText.contains("~1"),
+                    "past-projected ETA renders 'đã qua mốc dự báo' instead of '~1 phút nữa hết': \(pastEtaText)")
+
+        let subMinuteText = try await renderCardText(activeSubMinuteEntry)
+        try uiCheck(subMinuteText.contains("🔥") && subMinuteText.contains("~1 phút nữa hết") && !subMinuteText.contains("đã qua mốc dự báo"),
+                    "positive sub-minute ETA keeps '~1 phút nữa hết' distinct from past-projected ETA: \(subMinuteText)")
+
+        let codexCard = makeCard(
+            id: "codex:cred:proxyCheck",
+            providerId: "codex",
+            label: "codex-proxy@example.invalid",
+            remaining: 74,
+            fetchedAt: now,
+            windows: [
+                .init(label: "5h Window", remainingPercent: 74, usedPercent: nil, value: "74%", note: "", resetAt: future5hIso)
+            ]
+        )
+        let codexEntry = ProviderAccountEntry(
+            id: codexCard.id,
+            providerId: "codex",
+            providerTitle: "Codex",
+            providerSubtitle: nil,
+            liveProvider: codexCard,
+            storedAccount: StoredProviderAccount(
+                id: codexCard.id,
+                providerId: "codex",
+                email: "codex-proxy@example.invalid",
+                displayName: nil,
+                note: nil,
+                accountId: codexCard.accountId,
+                providerResultId: codexCard.id,
+                credentialId: codexCard.id,
+                createdAt: SharedFormatters.iso8601String(from: now),
+                lastSeenAt: codexCard.fetchedAt,
+                sourceFilePath: "/tmp/fixture/codex-proxy.json"
+            )
+        )
+        let codexProxyCardText = try await renderCardText(codexEntry)
+        try uiCheck(!codexProxyCardText.contains("Đang dùng") && !codexProxyCardText.contains("ổn định") && !codexProxyCardText.contains("🔥"),
+                    "Codex ProviderCard suppresses Active and BurnRateBadge when proxy leaves active ID nil: \(codexProxyCardText)")
+        let codexProxyRow = MenuBarAccountRow(
+            entry: codexEntry,
+            providerId: "codex",
+            accentColor: .indigo,
+            codexProxyActive: true,
+            codexGlobalProxyManaged: false,
+            activationMessage: .constant(nil),
+            activationSuccess: .constant(false)
+        )
+        .frame(width: 400)
+        .environmentObject(appState)
+        .environmentObject(renderCoordinator)
+        .environmentObject(activation)
+        let codexProxyRowText = try await extractRenderedText(codexProxyRow, scheme: .dark, width: 400)
+        try uiCheck(!codexProxyRowText.contains("Đang dùng") && !codexProxyRowText.contains("ổn định") && !codexProxyRowText.contains("🔥"),
+                    "Codex MenuBarAccountRow omits Active and BurnRateBadge when codexProxyActive=true: \(codexProxyRowText)")
+        activation.activeAccountIds.insert(codexEntry.id)
+        let codexProxyFallbackRowText = try await extractRenderedText(codexProxyRow, scheme: .dark, width: 400)
+        try uiCheck(!codexProxyFallbackRowText.contains("Đang dùng") && !codexProxyFallbackRowText.contains("ổn định") && !codexProxyFallbackRowText.contains("🔥"),
+                    "Codex MenuBarAccountRow still omits Active and BurnRateBadge when codexProxyActive=true even if activeAccountIds contains entry: \(codexProxyFallbackRowText)")
+        activation.activeAccountIds.remove(codexEntry.id)
+
+        let agyStackView = VStack(spacing: 12) {
+            ProviderCard(
+                provider: agyActiveFast,
+                titleOverride: activeFastEntry.cardTitle,
+                footerAccountLabelOverride: activeFastEntry.footerAccountLabel,
+                accountEntry: activeFastEntry
+            )
+            ProviderCard(
+                provider: agyDormantOld,
+                titleOverride: dormantOldEntry.cardTitle,
+                footerAccountLabelOverride: dormantOldEntry.footerAccountLabel,
+                accountEntry: dormantOldEntry
+            )
+        }
+        .padding(16)
+        .frame(width: 420)
+        .background(AppSurface.page(.dark))
+        .environmentObject(appState)
+        .environmentObject(renderCoordinator)
+        .environmentObject(activation)
+        .environmentObject(settings)
+
+        let agyPngURL = outputDir.appendingPathComponent("post-r6-agy-active-burnrate-vi-dark.png")
+        let agySize = try await renderOffscreen(agyStackView, scheme: .dark, width: 420, to: agyPngURL)
+        try uiCheck(agySize.height > 200, "Rendered Antigravity active/dormant VI dark stack height=\(agySize.height)")
         try uiCheck(StubURLProtocol.requests.isEmpty, "UI rendering performed ZERO network requests")
 
         let manifest: [String: Any] = [
-            "rendered": ["file": pngURL.lastPathComponent, "width": size.width, "height": size.height],
+            "rendered": [
+                ["file": pngURL.lastPathComponent, "width": size.width, "height": size.height],
+                ["file": agyPngURL.lastPathComponent, "width": agySize.width, "height": agySize.height]
+            ],
             "assertions": uiCheckCount,
             "httpRequests": StubURLProtocol.requests.count
         ]
         try JSONSerialization.data(withJSONObject: manifest, options: [.prettyPrinted, .sortedKeys])
             .write(to: outputDir.appendingPathComponent("ui-fixture-manifest.json"))
-        print("PASS: Post-R6 compiled production UI + coordinator timestamp/health fixture (\(uiCheckCount) assertions, \(StubURLProtocol.requests.count) HTTP calls, rendered \(pngURL.lastPathComponent))")
+        print("PASS: Post-R6 compiled production UI + coordinator timestamp/health fixture (\(uiCheckCount) assertions, \(StubURLProtocol.requests.count) HTTP calls, rendered \(pngURL.lastPathComponent) & \(agyPngURL.lastPathComponent))")
     }
 
     @MainActor static func makeCard(
@@ -289,6 +654,7 @@ struct PostR6UIFixtureRenderer {
         label: String,
         remaining: Double,
         fetchedAt: Date?,
+        rawFetchedAt: String? = nil,
         windows: [QuotaWindow]
     ) -> ProviderData {
         ProviderData(
@@ -305,7 +671,7 @@ struct PostR6UIFixtureRenderer {
             theme: .init(accent: providerId == "codex" ? "indigo" : "cyan", glow: ""),
             sourceLabel: "Fixture",
             sourceType: "auth",
-            fetchedAt: fetchedAt.map { SharedFormatters.iso8601String(from: $0) },
+            fetchedAt: rawFetchedAt ?? fetchedAt.map { SharedFormatters.iso8601String(from: $0) },
             accountLabel: label,
             membershipLabel: "Pro",
             headline: .init(eyebrow: "", primary: "\(Int(remaining))%", secondary: "", supporting: ""),
@@ -320,10 +686,54 @@ struct PostR6UIFixtureRenderer {
         )
     }
 
+    @MainActor static func extractRenderedText<V: View>(_ root: V, scheme: ColorScheme, width: CGFloat) async throws -> String {
+        let hosting = NSHostingView(rootView: root.environment(\.colorScheme, scheme))
+        let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: width, height: 1), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
+        window.contentView = hosting
+        hosting.setFrameSize(NSSize(width: width, height: 1))
+        let height = ceil(hosting.fittingSize.height)
+        let size = NSSize(width: width, height: max(height, 40))
+        window.setContentSize(size)
+        hosting.frame = NSRect(origin: .zero, size: size)
+        hosting.layoutSubtreeIfNeeded()
+        window.displayIfNeeded()
+        await Task.yield()
+        hosting.layoutSubtreeIfNeeded()
+        var parts: [String] = []
+        var visited = Set<ObjectIdentifier>()
+        func visit(_ obj: AnyObject) {
+            let id = ObjectIdentifier(obj)
+            guard visited.insert(id).inserted else { return }
+            if let ax = obj as? NSAccessibilityProtocol {
+                for value in [ax.accessibilityLabel(), ax.accessibilityTitle(), ax.accessibilityValue() as? String, ax.accessibilityHelp()] {
+                    if let text = value?.trimmingCharacters(in: .whitespacesAndNewlines), !text.isEmpty {
+                        parts.append(text)
+                    }
+                }
+                for child in (ax.accessibilityChildren() ?? []) {
+                    visit(child as AnyObject)
+                }
+            }
+            if let view = obj as? NSView {
+                if let tf = view as? NSTextField, !tf.stringValue.isEmpty { parts.append(tf.stringValue) }
+                if let btn = view as? NSButton, !btn.title.isEmpty { parts.append(btn.title) }
+                for sub in view.subviews { visit(sub) }
+            }
+        }
+        visit(hosting)
+        let pdfData = hosting.dataWithPDF(inside: hosting.bounds)
+        if let pdfString = PDFDocument(data: pdfData)?.string {
+            parts.append(pdfString)
+        }
+        window.contentView = nil
+        return parts.joined(separator: " | ")
+    }
+
     @MainActor static func renderOffscreen<V: View>(_ root: V, scheme: ColorScheme, width: CGFloat, to url: URL) async throws -> CGSize {
         let hosting = NSHostingView(rootView: root.environment(\.colorScheme, scheme))
         let window = NSWindow(contentRect: NSRect(x: -10_000, y: -10_000, width: width, height: 1), styleMask: [.borderless], backing: .buffered, defer: false)
-        window.appearance = NSAppearance(named: .aqua)
+        window.appearance = NSAppearance(named: scheme == .dark ? .darkAqua : .aqua)
         window.contentView = hosting
         hosting.setFrameSize(NSSize(width: width, height: 1))
         let height = ceil(hosting.fittingSize.height)

@@ -2456,3 +2456,8 @@
 "Enter the Base URL yourself" = "Tự nhập Base URL";
 "Sign Up" = "Đăng ký";
 "Hide Recommendation" = "Ẩn đề xuất";
+"Active account in Antigravity IDE" = "Tài khoản đang bật trên Antigravity IDE";
+"Pace: steady" = "Tốc độ: ổn định";
+"min left" = "phút nữa hết";
+"past projected limit" = "đã qua mốc dự báo";
+"Window-average quota burn estimate assuming unchanged demand, not a guarantee. Stale, dormant, unknown, or expired windows are not predicted." = "Ước tính tốc độ tiêu thụ quota trung bình theo cửa sổ hiện tại (giả sử mức sử dụng không đổi, không đảm bảo và không phải trạng thái tài khoản đang bật). Các ảnh chụp cũ, ngủ đông, không rõ hoặc đã qua đặt lại sẽ không hiển thị.";
